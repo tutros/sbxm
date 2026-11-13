@@ -154,7 +154,7 @@ impl<'a> Loop<'a> {
             return false;
         };
         let at = location.unwrap_or(self.default_location);
-        let held = self.children.iter().filter(|&&l| l == at).count();
+        let held = self.children.iter().filter(|&&l| l == at).count() + self.jobs_in(at);
         held >= slots.of(at) as usize
     }
 
@@ -466,7 +466,7 @@ pub(super) fn work<'a>(
     // would at a stop, and the loop stops with them.
     match result {
         Ok(stop) => Ok(stop),
-        Err(e) if live.is_empty() => Err(e),
+        Err(e) if live.is_empty() && lp.jobs.is_empty() => Err(e),
         Err(e) => {
             pass.halt.get_or_insert(e);
             lp.draining = true;
@@ -510,7 +510,15 @@ fn run<'a>(
             }
         }
         sync(lp, live);
-        if live.is_empty() {
+        // The job children too (issue 633), each end acted on at once.
+        let (jobs_ended, halt) = lp.supervise_jobs(out, warn)?;
+        ended_any |= jobs_ended;
+        if let Some(e) = halt {
+            lp.draining = true;
+            pass.halt.get_or_insert(e);
+        }
+        let busy = !live.is_empty() || !lp.jobs.is_empty();
+        if !busy {
             if let Some(e) = pass.halt.take() {
                 left(pass, out)?;
                 return Err(e);
@@ -534,7 +542,7 @@ fn run<'a>(
         // The loop's own steps and new starts: at the first pass, whenever a child ended or none
         // runs, and every [`PAUSE_POLL`] meanwhile.
         let now = lp.now();
-        let due_check = live.is_empty()
+        let due_check = !busy
             || ended_any
             || pass
                 .checked
@@ -592,7 +600,7 @@ fn may_start(
 
 /// Sleeps one [`TICK`] while children run and none ended in this pass.
 fn continue_or_sleep(lp: &Loop, live: &[Live], ended_any: bool) {
-    if !live.is_empty() && !ended_any {
+    if (!live.is_empty() || !lp.jobs.is_empty()) && !ended_any {
         (lp.env.sleep)(TICK);
     }
 }
@@ -623,7 +631,7 @@ fn steps_and_starts<'a>(
     }
     // The PRs awaiting the user (317(6)): with no child running, waited for as before; with
     // some, counted with them before each start ([`Loop::awaiting_room`]).
-    if live.is_empty() && !lp.wait_for_prs(out, warn)? {
+    if live.is_empty() && lp.jobs.is_empty() && !lp.wait_for_prs(out, warn)? {
         return Ok(None);
     }
     let mut started_any = false;
@@ -659,7 +667,7 @@ fn steps_and_starts<'a>(
             out,
         )?;
         let Some(issue) = next else {
-            if !live.is_empty() || started_any || !pass.due.is_empty() {
+            if !live.is_empty() || !lp.jobs.is_empty() || started_any || !pass.due.is_empty() {
                 break;
             }
             if opts.wait {

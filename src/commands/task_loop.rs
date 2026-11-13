@@ -59,6 +59,7 @@ use crate::task::{
 
 mod check;
 pub mod child;
+mod job_children;
 mod jobs;
 mod parallel;
 mod waiting;
@@ -798,6 +799,8 @@ struct Loop<'a> {
     /// The issue of a running child that waits out a usage limit: no step of the loop's own
     /// starts a task meanwhile (issue 615, answer 4).
     usage_hold: Option<u32>,
+    /// The job children running (issue 633): resolves, log-fixes and queued jobs.
+    jobs: Vec<job_children::JobChild<'a>>,
 }
 
 impl Loop<'_> {
@@ -2221,6 +2224,17 @@ impl Loop<'_> {
             if self.resolves.contains(&(number, tip.clone())) {
                 continue;
             }
+            // One child per PR at a time (issue 633): a job running on it goes first, and the
+            // resolve is decided again once it ends, against the PR's new head.
+            if self.pr_busy(number) {
+                let line = format!(
+                    "{pr_named}: its resolve waits for the job running on it; tried again at a \
+                     later pass",
+                    pr_named = self.pr_named(number)
+                );
+                self.say_once(out, line)?;
+                continue;
+            }
             // A resolve whose slot a child holds, or that a child's usage limit holds back, waits
             // for a later pass (issue 615): the loop never waits while it supervises children.
             if let Some(waits) = self.wait_reason(self.fix_slot(number), true) {
@@ -2240,7 +2254,11 @@ impl Loop<'_> {
             if (self.env.stop_requested)() {
                 return Ok(false);
             }
-            self.resolve(number, &task, state.auto_merge, &branch, out, warn)?;
+            if self.slots.is_some() {
+                self.start_resolve(number, &task, state.auto_merge, &branch, out, warn)?;
+            } else {
+                self.resolve(number, &task, state.auto_merge, &branch, out, warn)?;
+            }
         }
         Ok(true)
     }
@@ -2266,17 +2284,38 @@ impl Loop<'_> {
         warn: &mut dyn Write,
     ) -> Result<()> {
         let started = self.now();
+        let Some(head) = self.resolve_begin(number, armed, branch, out, warn)? else {
+            return Ok(());
+        };
+        let result = self.steps.fix_pr(number, out, warn);
+        self.resolve_end(
+            number, task, armed, branch, &head, started, result, out, warn,
+        )
+    }
+
+    /// A resolve's steps before its `task fix`: the PR's head read, its line, auto-merge disarmed
+    /// if `armed`, its `go` label dropped. `None` when it can't go on (said once): it is not
+    /// resolved until the base moves.
+    fn resolve_begin(
+        &mut self,
+        number: u32,
+        armed: bool,
+        branch: &str,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<String>> {
         let head = match self.github.pr(&self.repo, number) {
             Ok(pr) => pr.head_oid,
             Err(e) => {
-                return self.warn_once(
+                self.warn_once(
                     warn,
                     format!(
                         "{pr_named} can't be read ({e:#}); it is not resolved until {branch} \
                          moves",
                         pr_named = self.pr_named(number)
                     ),
-                );
+                )?;
+                return Ok(None);
             }
         };
         writeln!(
@@ -2286,14 +2325,15 @@ impl Loop<'_> {
         )?;
         if armed {
             if let Err(e) = self.disarm(number) {
-                return self.warn_once(
+                self.warn_once(
                     warn,
                     format!(
                         "auto-merge could not be disarmed on {pr_named} ({e:#}); it is not \
                          resolved until {branch} moves",
                         pr_named = self.pr_named(number)
                     ),
-                );
+                )?;
+                return Ok(None);
             }
             writeln!(
                 out,
@@ -2302,11 +2342,28 @@ impl Loop<'_> {
             )?;
         }
         self.drop_go(number, warn)?;
-        let result = self.steps.fix_pr(number, out, warn);
-        if let Some(id) = record::fix_id(number, &head) {
+        Ok(Some(head))
+    }
+
+    /// A resolve's steps after its `task fix` of `head` ended with `result`: armed again or left
+    /// to the user, and its log row.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn resolve_end(
+        &mut self,
+        number: u32,
+        task: &str,
+        armed: bool,
+        branch: &str,
+        head: &str,
+        started: u64,
+        result: Result<()>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        if let Some(id) = record::fix_id(number, head) {
             self.notify_question(&id, out, warn)?;
         }
-        let fix = record::fix_id(number, &head).and_then(|id| {
+        let fix = record::fix_id(number, head).and_then(|id| {
             record::read(&record::task_dir(&self.base_dir, &id).join("task.json")).ok()
         });
         let review = fix.as_ref().and_then(|r| r.review.clone());
@@ -2326,7 +2383,7 @@ impl Loop<'_> {
                 let own = self
                     .record_of(task)
                     .is_some_and(|rec| passes_arm_checks(&rec));
-                let current = record::fix_id(number, &head).unwrap_or_default();
+                let current = record::fix_id(number, head).unwrap_or_default();
                 let eligible = armed || (own && self.earlier_resolves_pass(number, &current));
                 match self.rearm(number, task, "resolve", eligible, review, out, warn)? {
                     Some(note) => format!("resolved, {note}"),
@@ -3810,6 +3867,7 @@ fn run_loop(
         default_location,
         draining: false,
         usage_hold: None,
+        jobs: Vec::new(),
     };
 
     // The cut-off tasks first: their owed resumes are written before anything else can fail.

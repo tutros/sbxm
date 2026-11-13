@@ -311,3 +311,555 @@ mod real_binary {
         );
     }
 }
+
+// --- the loop with job children, played ---
+
+/// Helpers shared by the loop's tests below; not every test uses every one.
+#[allow(dead_code)]
+mod play {
+    use std::cell::{Cell, RefCell};
+    use std::collections::{HashMap, VecDeque};
+    use std::fs;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use anyhow::{Result, anyhow};
+    use sbxm::backend::Location;
+    use sbxm::commands::task_loop::{self, Env, JobStep, Options, Phase, PhaseEnd, Started, Steps};
+    use sbxm::github::fake::FakeGitHub;
+    use sbxm::github::{PrInfo, PrState};
+    use sbxm::task::outcome::{Kind, Outcome};
+    use sbxm::task::record::{self, NewTask, Process, Record, ReviewResult, Stage, Status};
+
+    use super::common;
+    use super::common::task_fixture::{Probe, issue_text, open_issue};
+
+    pub const REPO: &str = "o/r";
+    const READY: &str = "ready-for-worker";
+    /// 2026-11-02T10:00:00Z.
+    pub const START: u64 = 1_793_613_600;
+    pub const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// A played job's name in the events: `fix 150`, `log-fix 150`, `review 150`, `spec tidy.md`,
+    /// `should-fix tidy.md`, `template rust`.
+    pub fn job_name(job: &JobStep) -> String {
+        match job {
+            JobStep::Fix {
+                pr,
+                check_run: None,
+            } => format!("fix {pr}"),
+            JobStep::Fix {
+                pr,
+                check_run: Some(_),
+            } => format!("log-fix {pr}"),
+            JobStep::Review { pr } => format!("review {pr}"),
+            JobStep::RunSpec(spec) => {
+                format!("spec {}", spec.file_name().unwrap().to_string_lossy())
+            }
+            JobStep::ShouldFixSpec(spec) => {
+                format!("should-fix {}", spec.file_name().unwrap().to_string_lossy())
+            }
+            JobStep::Template { profile, .. } => format!("template {profile}"),
+        }
+    }
+
+    /// Plays each issue's phases and each job as children that end after a number of polls;
+    /// `events` says what started and ended, in order.
+    pub struct Play<'a> {
+        base: PathBuf,
+        /// Each issue's phases, in order: polls before it ends.
+        issues: RefCell<HashMap<u32, VecDeque<u32>>>,
+        /// Each job's runs by its name, in order: polls before it ends, and how.
+        jobs: RefCell<HashMap<String, VecDeque<(u32, Kind)>>>,
+        pub events: RefCell<Vec<String>>,
+        running: Cell<usize>,
+        pub most: Cell<usize>,
+        /// Run as each job starts, by its name: GitHub changing meanwhile.
+        on_job: Box<dyn Fn(&str) + 'a>,
+        /// Run as each issue's phase starts.
+        on_issue: Box<dyn Fn(u32) + 'a>,
+        /// Run as each job ends, by its name.
+        on_job_end: Box<dyn Fn(&str) + 'a>,
+    }
+
+    impl<'a> Play<'a> {
+        pub fn new(base: &Path) -> Self {
+            Self {
+                base: base.to_owned(),
+                issues: RefCell::default(),
+                jobs: RefCell::default(),
+                events: RefCell::default(),
+                running: Cell::new(0),
+                most: Cell::new(0),
+                on_job: Box::new(|_| {}),
+                on_issue: Box::new(|_| {}),
+                on_job_end: Box::new(|_| {}),
+            }
+        }
+
+        pub fn issue(self, issue: u32, polls: u32) -> Self {
+            self.issues
+                .borrow_mut()
+                .entry(issue)
+                .or_default()
+                .push_back(polls);
+            self
+        }
+
+        pub fn job(self, name: &str, polls: u32, kind: Kind) -> Self {
+            self.jobs
+                .borrow_mut()
+                .entry(name.to_owned())
+                .or_default()
+                .push_back((polls, kind));
+            self
+        }
+
+        pub fn on_job(mut self, f: impl Fn(&str) + 'a) -> Self {
+            self.on_job = Box::new(f);
+            self
+        }
+
+        pub fn on_issue(mut self, f: impl Fn(u32) + 'a) -> Self {
+            self.on_issue = Box::new(f);
+            self
+        }
+
+        pub fn on_job_end(mut self, f: impl Fn(&str) + 'a) -> Self {
+            self.on_job_end = Box::new(f);
+            self
+        }
+
+        pub fn events(&self) -> Vec<String> {
+            self.events.borrow().clone()
+        }
+
+        /// The index of `event` among the events; panics when it is not there.
+        pub fn at(&self, event: &str) -> usize {
+            self.events()
+                .iter()
+                .position(|e| e == event)
+                .unwrap_or_else(|| panic!("no {event:?} in {:?}", self.events()))
+        }
+
+        pub fn has(&self, event: &str) -> bool {
+            self.events().iter().any(|e| e == event)
+        }
+
+        fn started(&self, event: String) {
+            self.events.borrow_mut().push(event);
+            self.running.set(self.running.get() + 1);
+            self.most.set(self.most.get().max(self.running.get()));
+        }
+    }
+
+    /// Issue `issue`'s record as a child leaves it, ready, in `location`.
+    pub fn write_ready(base: &Path, issue: u32, location: Location) {
+        let dir = record::task_dir(base, &format!("issue-{issue}"));
+        let mut rec = record::read(&dir.join("task.json")).unwrap_or_else(|_| {
+            let mut rec = Record::new(
+                &NewTask {
+                    kind: record::Kind::Issue,
+                    number: issue,
+                    repo: REPO,
+                    title: &format!("Fix {issue}"),
+                    base: "main",
+                    branch: &format!("sbxm/issue-{issue}"),
+                    config_hash: "h",
+                    id: None,
+                },
+                START,
+                Process::new(1, 0),
+            );
+            rec.location = location;
+            rec
+        });
+        rec.stage = Stage::Ready;
+        rec.status = Status::Ok;
+        rec.review = Some(ReviewResult {
+            round: 1,
+            must_fix: 0,
+            not_run: Some(Vec::new()),
+            ..ReviewResult::default()
+        });
+        record::write(&dir, &rec).unwrap();
+    }
+
+    enum Who {
+        Issue(u32, Location),
+        Job(String, Kind),
+    }
+
+    struct Playing<'p, 'a> {
+        play: &'p Play<'a>,
+        who: Who,
+        polls: u32,
+    }
+
+    impl Started for Playing<'_, '_> {
+        fn poll(&mut self, _out: &mut dyn Write) -> Option<PhaseEnd> {
+            if self.polls > 0 {
+                self.polls -= 1;
+                return None;
+            }
+            self.play.running.set(self.play.running.get() - 1);
+            Some(match &self.who {
+                Who::Issue(issue, location) => {
+                    write_ready(&self.play.base, *issue, *location);
+                    self.play.events.borrow_mut().push(format!("end {issue}"));
+                    PhaseEnd::Outcome(Outcome::new(Kind::Ready, None, ""))
+                }
+                Who::Job(name, kind) => {
+                    self.play.events.borrow_mut().push(format!("end {name}"));
+                    (self.play.on_job_end)(name);
+                    let detail = if *kind == Kind::Ready {
+                        ""
+                    } else {
+                        "it failed"
+                    };
+                    PhaseEnd::Outcome(Outcome::new(*kind, None, detail))
+                }
+            })
+        }
+    }
+
+    impl Steps for Play<'_> {
+        fn start_task(
+            &self,
+            issue: u32,
+            phase: Phase,
+            _out: &mut dyn Write,
+            _warn: &mut dyn Write,
+        ) -> Box<dyn Started + '_> {
+            let location = match phase {
+                Phase::Run(location) => location.unwrap_or_default(),
+                Phase::Resume | Phase::ShouldFix => {
+                    let dir = record::task_dir(&self.base, &format!("issue-{issue}"));
+                    record::read(&dir.join("task.json")).unwrap().location
+                }
+            };
+            self.started(format!("start {issue} {}", location.as_str()));
+            (self.on_issue)(issue);
+            let polls = self
+                .issues
+                .borrow_mut()
+                .get_mut(&issue)
+                .and_then(VecDeque::pop_front)
+                .unwrap_or(0);
+            Box::new(Playing {
+                play: self,
+                who: Who::Issue(issue, location),
+                polls,
+            })
+        }
+
+        fn start_job(
+            &self,
+            job: &JobStep,
+            slot: Location,
+            _out: &mut dyn Write,
+            _warn: &mut dyn Write,
+        ) -> Box<dyn Started + '_> {
+            let name = job_name(job);
+            self.started(format!("start {name} {}", slot.as_str()));
+            (self.on_job)(&name);
+            let (polls, kind) = self
+                .jobs
+                .borrow_mut()
+                .get_mut(&name)
+                .and_then(VecDeque::pop_front)
+                .unwrap_or((0, Kind::Ready));
+            Box::new(Playing {
+                play: self,
+                who: Job(name, kind),
+                polls,
+            })
+        }
+
+        fn run(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("#{issue} run in the loop's process"))
+        }
+
+        fn resume(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("#{issue} resumed in the loop's process"))
+        }
+
+        fn finish(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+            self.events.borrow_mut().push(format!("finish {issue}"));
+            let dir = record::task_dir(&self.base, &format!("issue-{issue}"));
+            let mut rec = record::read(&dir.join("task.json"))?;
+            rec.stage = Stage::Finished;
+            rec.status = Status::Ok;
+            rec.pr = Some(format!("https://github.com/{REPO}/pull/{}", 100 + issue));
+            record::write(&dir, &rec)
+        }
+
+        fn file_findings(
+            &self,
+            _issue: u32,
+            _out: &mut dyn Write,
+            _warn: &mut dyn Write,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn fix_pr(&self, pr: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+            self.events
+                .borrow_mut()
+                .push(format!("in-process fix {pr}"));
+            Ok(())
+        }
+
+        fn fix_check(
+            &self,
+            pr: u32,
+            _run: u64,
+            _out: &mut dyn Write,
+            _warn: &mut dyn Write,
+        ) -> Result<()> {
+            self.events
+                .borrow_mut()
+                .push(format!("in-process log-fix {pr}"));
+            Ok(())
+        }
+
+        fn rm_merged(&self, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+            Ok(())
+        }
+
+        fn room(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    use Who::Job;
+
+    pub struct Fixture {
+        pub env: common::Env,
+        pub repo_root: PathBuf,
+    }
+
+    impl Fixture {
+        pub fn base(&self) -> PathBuf {
+            self.env.base_dir()
+        }
+
+        pub fn log_text(&self) -> String {
+            fs::read_to_string(
+                self.base()
+                    .join(".sbxm/loop-logs/2026-11-02-100000-loop.md"),
+            )
+            .unwrap_or_default()
+        }
+
+        pub fn queue(&self, name: &str, text: &str) {
+            let queue = sbxm::task::jobs::queue_dir(&self.base());
+            fs::create_dir_all(&queue).unwrap();
+            fs::write(queue.join(name), text).unwrap();
+        }
+
+        pub fn queued(&self, name: &str) -> bool {
+            sbxm::task::jobs::queue_dir(&self.base())
+                .join(name)
+                .is_file()
+        }
+    }
+
+    /// `sandbox_slots` unset (one local), and `cloud_slots` as given.
+    pub fn fixture(cloud_slots: Option<u32>) -> Fixture {
+        let env = common::Env::new();
+        if let Some(n) = cloud_slots {
+            common::cloud_slot::set_cloud_slots(&env, n);
+        }
+        let repo_root = env.tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        fs::write(
+            repo_root.join("sbxm-task.toml"),
+            "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = []\n",
+        )
+        .unwrap();
+        Fixture { env, repo_root }
+    }
+
+    /// GitHub with these issues open and labeled ready, each sized S, with `extra` labels.
+    pub fn github(issues: &[(u32, &[&str])]) -> FakeGitHub {
+        let mut gh = FakeGitHub::default()
+            .with_user("me")
+            .with_default_branch("main")
+            .with_branch_head("main", HEAD);
+        let mut open = Vec::new();
+        for (n, extra) in issues {
+            gh = gh.with_issue_text(issue_text(*n));
+            let mut labels = vec![READY, "size:S"];
+            labels.extend_from_slice(extra);
+            open.push(open_issue(*n, &labels, "Why\n"));
+        }
+        gh.with_open_issues(open)
+    }
+
+    pub fn pr(number: u32) -> PrInfo {
+        PrInfo {
+            number,
+            head_ref: format!("sbxm/pr-{number}"),
+            head_oid: HEAD.into(),
+            is_cross_repository: false,
+            head_repo: String::new(),
+            state: PrState::Open,
+            title: format!("PR {number}"),
+            body: String::new(),
+            closing_issues: Vec::new(),
+            base_moved: false,
+        }
+    }
+
+    /// A finished task of issue `issue` the loop opened PR `pr` for, in `location`.
+    pub fn loop_pr(base: &Path, issue: u32, pr: u32, location: Location) {
+        write_ready(base, issue, location);
+        let dir = record::task_dir(base, &format!("issue-{issue}"));
+        let mut rec = record::read(&dir.join("task.json")).unwrap();
+        rec.stage = Stage::Finished;
+        rec.pr = Some(format!("https://github.com/{REPO}/pull/{pr}"));
+        rec.hooks = serde_json::json!({ task_loop::LOOP_HOOK: true });
+        record::write(&dir, &rec).unwrap();
+    }
+
+    pub struct Run {
+        pub result: Result<()>,
+        pub out: String,
+    }
+
+    /// Runs the loop over `issues` (none: the labeled queue) to its stop, its clock moving with
+    /// its sleeps; `stop` is asked whenever the loop looks for a stop request.
+    pub fn run_loop(
+        f: &Fixture,
+        steps: &dyn Steps,
+        gh: &FakeGitHub,
+        stop: &dyn Fn() -> bool,
+        issues: &[u32],
+    ) -> Run {
+        let clock = Cell::new(START);
+        let env = Env {
+            now: &|| clock.get(),
+            sleep: &|d: Duration| clock.set(clock.get() + d.as_secs()),
+            stop_requested: stop,
+        };
+        let mut out = Vec::new();
+        let result = task_loop::run(
+            &f.env.config_dir(),
+            &Options {
+                repo_root: f.repo_root.clone(),
+                issues: issues.to_vec(),
+                cap: None,
+                repo: Some(REPO.into()),
+                wait: false,
+            },
+            steps,
+            gh,
+            &Probe,
+            &env,
+            &mut out,
+            &mut Vec::new(),
+        );
+        Run {
+            result,
+            out: String::from_utf8(out).unwrap(),
+        }
+    }
+
+    pub fn never() -> bool {
+        false
+    }
+
+    pub fn starts(play: &Play) -> Vec<String> {
+        play.events()
+            .into_iter()
+            .filter(|e| e.starts_with("start"))
+            .collect()
+    }
+}
+
+// --- resolves ---
+
+mod resolves {
+    use sbxm::backend::Location;
+    use sbxm::github::Mergeable;
+    use sbxm::task::outcome::Kind;
+
+    use super::play::*;
+
+    #[test]
+    fn a_task_childs_end_is_acted_on_while_a_resolve_child_runs() {
+        let f = fixture(Some(2));
+        loop_pr(&f.base(), 50, 150, Location::Cloud);
+        let gh = github(&[(1, &[])]).with_pr(pr(150)).with_pr(pr(101));
+        gh.set_mergeable(150, Mergeable::Conflicting);
+        let play = Play::new(&f.base())
+            .issue(1, 3)
+            .job("fix 150", 30, Kind::Ready);
+
+        let run = run_loop(&f, &play, &gh, &never, &[1]);
+
+        run.result.unwrap();
+        assert_eq!(
+            starts(&play),
+            ["start fix 150 cloud", "start 1 local"],
+            "{}",
+            run.out
+        );
+        // Its finish, while the resolve still runs.
+        assert!(play.at("finish 1") < play.at("end fix 150"), "{}", run.out);
+        assert!(!play.has("in-process fix 150"), "{}", run.out);
+        assert!(
+            run.out
+                .contains("conflicts with main; resolving it with `sbxm task fix --pr 150`"),
+            "{}",
+            run.out
+        );
+        let log = f.log_text();
+        assert!(log.contains("resolve: conflicts with main"), "{log}");
+    }
+
+    #[test]
+    fn a_resolve_waiting_for_its_slot_takes_it_before_a_new_issue_for_that_place() {
+        let f = fixture(Some(1));
+        loop_pr(&f.base(), 50, 150, Location::Local);
+        let gh = github(&[
+            (1, &["run-local"]),
+            (2, &["run-cloud"]),
+            (3, &["run-local"]),
+        ])
+        .with_pr(pr(150))
+        .with_pr(pr(101))
+        .with_pr(pr(102))
+        .with_pr(pr(103));
+        // The PR starts conflicting once #1 holds the local slot.
+        let play = Play::new(&f.base())
+            .issue(1, 10)
+            .issue(2, 2)
+            .job("fix 150", 10, Kind::Ready)
+            .on_issue(|issue| {
+                if issue == 1 {
+                    gh.set_mergeable(150, Mergeable::Conflicting);
+                }
+            });
+
+        let run = run_loop(&f, &play, &gh, &never, &[1, 2, 3]);
+
+        run.result.unwrap();
+        assert!(
+            run.out
+                .contains("its resolve waits for a free local slot; tried again at a later pass"),
+            "{}",
+            run.out
+        );
+        // The cloud issue starts meanwhile; the resolve goes before #3 in the local slot.
+        assert!(play.at("start 2 cloud") < play.at("end 1"), "{}", run.out);
+        assert!(play.at("end 1") < play.at("start fix 150 local"));
+        assert!(
+            play.at("end fix 150") < play.at("start 3 local"),
+            "{}",
+            run.out
+        );
+    }
+}
