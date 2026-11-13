@@ -953,6 +953,13 @@ mod resolves {
         );
         let log = f.log_text();
         assert!(log.contains("resolve: conflicts with main"), "{log}");
+        // #1's row, and its arming, as it ended.
+        assert!(log.contains("| #1 Fix 1 | S | local |"), "{log}");
+        assert!(
+            run.out.contains("[issue-1 local] #1 (Fix 1): PR #101"),
+            "{}",
+            run.out
+        );
     }
 
     #[test]
