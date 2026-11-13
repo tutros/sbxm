@@ -115,6 +115,10 @@ Decision 321: `sdlc/decisions/` (issue #561, `sdlc/milestone-5.md`).
 
 Decision 322: `sdlc/decisions/` (issue #616, #612's review Q-1).
 
+## Round 22: strict templates for pi (2026-11-13)
+
+Decision 323: `sdlc/decisions/` (issue #266's real check; replaces decision 231).
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
@@ -124,7 +128,7 @@ Decision 322: `sdlc/decisions/` (issue #616, #612's review Q-1).
 - **S10 (M2b, git bundle from a sandbox):** Done 2026-10-01 (passed), recorded in decision 161.
 - **S8 (GitHub access from a sandbox):** out of M2b [141]; written 2026-09-27, not run; spec `sdlc/spikes/S8.md`. Can issue workers [80–82] push, open PRs and edit issues through `sbx`'s proxy with a repo-scoped token, and do branch protection, no Workflows permission and a narrow allowlist hold? Q1–Q2 need no token; Q3–Q4 need a scratch repo and a stored `github` secret, which the repo owner doesn't plan to set up (a fork's owner may).
 - **S5 (M2):** Headless runs per harness inside `sbx`. Done: Claude, Codex, Antigravity (see "Spike results" below) [93][103]. Gemini CLI is blocked/deprecated upstream and dropped as an M2a harness [103]. Pi deferred. Prompt in, run to completion, extract answer + transcript + token usage (decision 13). Leads: the v3 kit spec has `agent-sessions@1` (`prompt: ["-p", "{{.Prompt}}"]` for claude), but `sbx` 0.43 has no CLI verb for it. Route used: `sbx exec <sandbox> <harness-cli> <headless flags>` (Claude, Codex) or `sbx run --kit <pinned> <agent> <workspace>` + `sbx exec` (Antigravity).
-- **S15 (templates milestone, Pi):** Done; results in `sdlc/spikes/S15-results.md`, verdict "works" (a template saved from a `pi` sandbox works with Pi's kit reference); decision 231 refuses strict Pi. Spec `sdlc/spikes/S15.md` (approved by the user 2026-10-15). Does a template saved from a `pi` sandbox work with `sbx create -t TAG --pull never` plus sbxm's kits, given that Pi's `agent_arg` is a kit reference of its own [73]: does the sandbox start, does Pi answer headless, do the always-loaded `AGENTS.md` and the provider secret still work, and does the kit's allow list apply? Decides whether Pi joins the milestone.
+- **S15 (templates milestone, Pi):** Done; results in `sdlc/spikes/S15-results.md`, verdict "works" (a template saved from a `pi` sandbox works with Pi's kit reference); decision 231 refused strict Pi, replaced by decision 323 (strict Pi denies the kit's extra hosts). Spec `sdlc/spikes/S15.md` (approved by the user 2026-10-15). Does a template saved from a `pi` sandbox work with `sbx create -t TAG --pull never` plus sbxm's kits, given that Pi's `agent_arg` is a kit reference of its own [73]: does the sandbox start, does Pi answer headless, do the always-loaded `AGENTS.md` and the provider secret still work, and does the kit's allow list apply? Decides whether Pi joins the milestone.
 - **S14 (#245, Docker Cloud Sandboxes):** Done 2026-10-23; write-up `sdlc/spikes/S14.md`, followed by milestone 4 (merged).
 - **S16 (#288, Google OAuth for throwaway Antigravity sandboxes):** Done (decision 270, PR #329).
 - **#199 (does a fresh reviewer sandbox per review round matter):** not run, waiting on its trigger (issue #199).
