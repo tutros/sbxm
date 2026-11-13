@@ -123,6 +123,8 @@ pub struct FakeGitHub {
     pr_labels: Mutex<Vec<(u32, Vec<String>)>>,
     pr_labels_failure: Option<String>,
     remove_label_failure: Option<String>,
+    /// Only `issue_labels` fails (and is still recorded; issue 623).
+    issue_labels_failure: Option<String>,
     /// What `commit_statuses` answers, by commit; none for a commit not scripted.
     posted_statuses: Vec<(String, Vec<PostedStatus>)>,
     statuses_failure: Option<String>,
@@ -207,6 +209,12 @@ impl FakeGitHub {
     /// Only `pr_remove_label` fails (and is still recorded).
     pub fn failing_label_removal(mut self, message: &str) -> Self {
         self.remove_label_failure = Some(message.to_owned());
+        self
+    }
+
+    /// Only `issue_labels` fails (and is still recorded; issue 623).
+    pub fn failing_issue_labels(mut self, message: &str) -> Self {
+        self.issue_labels_failure = Some(message.to_owned());
         self
     }
 
@@ -824,6 +832,9 @@ impl GitHubBackend for FakeGitHub {
             add.to_vec(),
             remove.to_vec(),
         ))?;
+        if let Some(message) = &self.issue_labels_failure {
+            return Err(anyhow!("{message}"));
+        }
         // The same issue in both lists, as GitHub has it once: `issues_open` sees the change too.
         let mut all = self.all_issues.lock().unwrap();
         let mut open = self.open_issues.lock().unwrap();

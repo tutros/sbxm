@@ -24,6 +24,7 @@ use crate::task::fixes;
 use crate::task::gates::ShellHostRunner;
 use crate::task::lifetime;
 use crate::task::pipeline::{self, Ctx};
+use crate::task::queue;
 use crate::task::record::{self, ProcessProbe};
 use crate::task::repo::{self, Identity};
 
@@ -456,7 +457,29 @@ fn start(
     // every thread has finished.
     let asides = std::sync::Mutex::new(aside_by_id);
     let settle_warnings: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    // The picks labeled `ready-for-worker`, once chosen: a start by hand takes the label off each
+    // the moment its record exists, as the loop does, so the issue leaves the loop's queue (issue
+    // 623). A child of the loop leaves it to the loop. A failed removal is only a warning.
+    let labeled: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+    let label_warnings: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let unlabel = |number: u32| {
+        {
+            let mut labeled = labeled.lock().unwrap();
+            let Some(at) = labeled.iter().position(|&n| n == number) else {
+                return;
+            };
+            labeled.remove(at);
+        }
+        let ready = [queue::READY_LABEL.to_owned()];
+        if let Err(e) = github.issue_labels(&repo_name, number, &[], &ready) {
+            label_warnings.lock().unwrap().push(format!(
+                "issue #{number}'s {} label could not be removed: {e:#}",
+                queue::READY_LABEL
+            ));
+        }
+    };
     let on_prepared = |number: u32| {
+        unlabel(number);
         let id = format!("issue-{number}");
         let Some(aside) = asides.lock().unwrap().remove(&id) else {
             return;
@@ -485,6 +508,9 @@ fn start(
             writeln!(out, "#{number}: skipped, {why}")?;
         }
         let selection = pipeline::require_picks(selection)?;
+        if !record::in_loop() {
+            labeled.lock().unwrap().clone_from(&selection.labeled);
+        }
 
         let names: Vec<String> = selection
             .picks
@@ -498,6 +524,18 @@ fn start(
     })();
 
     for warning in settle_warnings.into_inner().unwrap() {
+        writeln!(warn, "warning: {warning}")?;
+    }
+    // A task whose preparation failed after writing its record still exists, for `task resume`:
+    // its label goes too.
+    let left = labeled.lock().unwrap().clone();
+    for number in left {
+        let id = format!("issue-{number}");
+        if record::task_dir(&base_dir, &id).join("task.json").is_file() {
+            unlabel(number);
+        }
+    }
+    for warning in label_warnings.into_inner().unwrap() {
         writeln!(warn, "warning: {warning}")?;
     }
     let mut aside_by_id = asides.into_inner().unwrap();

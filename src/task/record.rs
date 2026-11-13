@@ -231,6 +231,12 @@ pub fn started_by_loop(process: Process) {
     let _ = THIS_LOOP.set(process);
 }
 
+/// Whether this process is a child of `task loop` ([`started_by_loop`]): the loop then takes its
+/// issue's label off itself (issue 623).
+pub fn in_loop() -> bool {
+    THIS_LOOP.get().is_some()
+}
+
 /// The loop's process from [`LOOP_ENV`]'s value; `None` for anything else.
 pub fn parse_loop(value: &str) -> Option<Process> {
     serde_json::from_str(value).ok()

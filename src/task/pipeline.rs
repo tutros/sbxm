@@ -19,6 +19,7 @@ use super::machine;
 use super::next;
 use super::pr_fix::{self, ReviewToFix};
 use super::prompts::{self, Role};
+use super::queue;
 use super::record::{
     self, Agent, GateResult, GateRun, Kind, NewTask, OpenFinding, PrBranch, Process, ProcessProbe,
     Record, RunInfo, SandboxRole, Stage, Status,
@@ -703,6 +704,12 @@ pub fn choose_issues(ctx: &Ctx, explicit: Option<&[u32]>, workers: usize) -> Res
     };
     let mut selection = select::select(&open, &taken, explicit, workers, &prs);
     selection.warnings = warnings;
+    selection.labeled = open
+        .iter()
+        .filter(|i| selection.picks.contains(&i.number))
+        .filter(|i| i.labels.iter().any(|l| l == queue::READY_LABEL))
+        .map(|i| i.number)
+        .collect();
     Ok(selection)
 }
 
