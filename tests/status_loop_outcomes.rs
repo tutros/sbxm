@@ -379,7 +379,7 @@ fn a_held_claim_is_not_counted_so_the_running_issue_is_task_1_of_1() {
         })
     );
     assert!(
-        text.contains("  task: issue-2 (Fix 2) at working, task 1 of 1\n"),
+        text.contains("  task: issue-2 (Fix 2) at working, local, task 1 of 1\n"),
         "{text}"
     );
     assert!(!text.contains("parked"), "{text}");
@@ -677,7 +677,7 @@ fn a_retry_held_again_goes_behind_the_retries_already_due() {
         })
     );
     assert!(
-        text.contains("  task: issue-2 (Fix 2) at ready, task 2 of 3\n"),
+        text.contains("  task: issue-2 (Fix 2) at ready, local, task 2 of 3\n"),
         "{text}"
     );
     assert!(
