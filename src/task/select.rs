@@ -61,6 +61,8 @@ pub struct Selection {
     pub not_open: Vec<u32>,
     /// Warnings from before selection (the caller prints them), e.g. a PR that couldn't be read.
     pub warnings: Vec<String>,
+    /// The picks labeled `ready-for-worker`, whose label a start by hand takes off (issue 623).
+    pub labeled: Vec<u32>,
 }
 
 /// The `#<digits>` numbers on the first line of `body` that starts with `**<field>:**`.
