@@ -176,6 +176,40 @@ pub trait Steps {
         };
         Box::new(Ended(Some(ended)))
     }
+    /// A job's command started and left running (issue 633), for a loop that runs several
+    /// children at once: a queued job's, a resolve's or a log-fix's; `slot` is where the loop
+    /// expects it to run, for its window lines. [`TaskSteps`] starts it as a child `sbxm`
+    /// process; this default runs it to its end here, through the step that runs it in-process.
+    fn start_job(
+        &self,
+        job: &JobStep,
+        slot: Location,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Box<dyn Started + '_> {
+        let _ = slot;
+        let ended = PhaseEnd::here(out, warn, |out, warn| match job {
+            JobStep::Fix {
+                pr,
+                check_run: None,
+            } => self.fix_pr(*pr, out, warn),
+            JobStep::Fix {
+                pr,
+                check_run: Some(run),
+            } => self.fix_check(*pr, *run, out, warn),
+            JobStep::Review { pr } => self.review_pr(*pr, out, warn),
+            JobStep::RunSpec(spec) => self.run_spec(spec, out, warn),
+            JobStep::ShouldFixSpec(spec) => self.should_fix_spec(spec, out, warn),
+            JobStep::Template {
+                profile,
+                harness,
+                warm,
+            } => self
+                .template_build(profile, *harness, warm.as_deref(), out, warn)
+                .map(drop),
+        });
+        Box::new(Ended(Some(ended)))
+    }
     /// `task finish --issue N`: its PR, a draft when something is left unresolved.
     fn finish(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
     /// `task file-findings --issue N --create`: the review's should-fix findings as sized
@@ -249,6 +283,26 @@ pub enum Phase {
     Resume,
     /// `task resume --rounds 1 --should-fix` (decision 306).
     ShouldFix,
+}
+
+/// A job's command as the loop starts it as a child (issue 633): a queued job's, or the loop's
+/// own resolve (decision 298) or log-fix (decision 300).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobStep {
+    /// `task fix --pr N`, with `check_run` `--check-run <id>`.
+    Fix { pr: u32, check_run: Option<u64> },
+    /// `task review --pr N`.
+    Review { pr: u32 },
+    /// `task run --spec FILE`.
+    RunSpec(PathBuf),
+    /// `task resume --spec FILE --rounds 1 --should-fix` (decision 306).
+    ShouldFixSpec(PathBuf),
+    /// `template build <profile> --harness <harness>`, with `warm` `--warm <checkout>`.
+    Template {
+        profile: String,
+        harness: Harness,
+        warm: Option<PathBuf>,
+    },
 }
 
 /// A task's phase the loop started and supervises (issue 615).
@@ -4350,7 +4404,15 @@ impl TaskSteps<'_> {
             Ok(command) => command,
             Err(ended) => return ended,
         };
-        self.child(issue, None, what, args, !should_fix, out, warn)
+        self.child(
+            format!("issue-{issue}"),
+            None,
+            what,
+            args,
+            !should_fix,
+            out,
+            warn,
+        )
     }
 
     /// `task resume`'s words for the window and its arguments, after this process's own claim on
@@ -4402,7 +4464,7 @@ impl TaskSteps<'_> {
     #[allow(clippy::too_many_arguments)]
     fn child(
         &self,
-        issue: u32,
+        id: String,
         location: Option<Location>,
         what: &str,
         args: Vec<String>,
@@ -4410,7 +4472,7 @@ impl TaskSteps<'_> {
         out: &mut dyn Write,
         _warn: &mut dyn Write,
     ) -> PhaseEnd {
-        let prepared = match self.prepare(issue, location, what, args, obey_stop) {
+        let prepared = match self.prepare(id, location, what, args, obey_stop) {
             Ok(prepared) => prepared,
             Err(ended) => return ended,
         };
@@ -4425,14 +4487,14 @@ impl TaskSteps<'_> {
     #[allow(clippy::too_many_arguments)]
     fn start_child(
         &self,
-        issue: u32,
+        id: String,
         location: Option<Location>,
         what: &str,
         args: Vec<String>,
         obey_stop: bool,
         out: &mut dyn Write,
     ) -> Box<dyn Started + '_> {
-        let prepared = match self.prepare(issue, location, what, args, obey_stop) {
+        let prepared = match self.prepare(id, location, what, args, obey_stop) {
             Ok(prepared) => prepared,
             Err(ended) => return Box::new(Ended(Some(ended))),
         };
@@ -4447,18 +4509,90 @@ impl TaskSteps<'_> {
         }
     }
 
+    /// A job's child command (issue 633): the task whose folder gets its outcome, the window's
+    /// words for it, its arguments, and whether its slot wait obeys the loop's stop. `Err`: how
+    /// it ended without starting.
+    fn job_command(
+        &self,
+        job: &JobStep,
+    ) -> std::result::Result<(String, &'static str, Vec<String>, bool), PhaseEnd> {
+        let here = |e: anyhow::Error| PhaseEnd::Outcome(outcome::Outcome::of(&Err(e), ""));
+        let words = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        let repo = self
+            .repo
+            .iter()
+            .flat_map(|repo| ["--repo".to_owned(), repo.clone()]);
+        Ok(match job {
+            JobStep::Fix { pr, check_run } => {
+                let name = resolve_repo(self.repo.as_deref(), &self.repo_root).map_err(here)?;
+                let head = self.github.pr(&name, *pr).map_err(here)?.head_oid;
+                let Some(id) = record::fix_id(*pr, &head) else {
+                    return Err(here(anyhow!(
+                        "PR #{pr}'s head {head:?} isn't a full commit id; see `gh pr view {pr}`"
+                    )));
+                };
+                let mut args = words(&["task", "fix", "--pr"]);
+                args.push(pr.to_string());
+                if let Some(run) = check_run {
+                    args.extend(["--check-run".to_owned(), run.to_string()]);
+                }
+                args.extend(repo);
+                (id, "task fix", args, false)
+            }
+            JobStep::Review { pr } => {
+                let mut args = words(&["task", "review", "--pr"]);
+                args.push(pr.to_string());
+                args.extend(repo);
+                (format!("pr-{pr}"), "task review", args, false)
+            }
+            JobStep::RunSpec(spec) => {
+                let id = record::spec_id(spec).map_err(here)?.0;
+                let mut args = words(&["task", "run", "--spec"]);
+                args.push(spec.display().to_string());
+                args.extend(repo);
+                (id, "task run", args, true)
+            }
+            JobStep::ShouldFixSpec(spec) => {
+                let id = record::spec_id(spec).map_err(here)?.0;
+                self.release(&id).map_err(here)?;
+                let mut args = words(&["task", "resume", "--spec"]);
+                args.push(spec.display().to_string());
+                args.extend(words(&["--rounds", "1", "--should-fix"]));
+                (id, "should-fix round", args, false)
+            }
+            JobStep::Template {
+                profile,
+                harness,
+                warm,
+            } => {
+                let mut args = words(&["template", "build"]);
+                args.extend([
+                    profile.clone(),
+                    "--harness".to_owned(),
+                    harness.as_str().to_owned(),
+                ]);
+                if let Some(warm) = warm {
+                    args.extend(["--warm".to_owned(), warm.display().to_string()]);
+                }
+                let id = format!("template-{}", crate::template::key(profile, *harness));
+                (id, "template build", args, false)
+            }
+        })
+    }
+
     /// What a phase's child needs before it starts: an earlier run's outcome removed, its
-    /// command, and where it writes its outcome. `Err`: how it ended without starting.
+    /// command, and where it writes its outcome. `id`: the task it works on, whose folder holds
+    /// its outcome, or for a template build a name for its outcome file alone. `Err`: how it
+    /// ended without starting.
     fn prepare(
         &self,
-        issue: u32,
+        id: String,
         location: Option<Location>,
         what: &str,
         args: Vec<String>,
         obey_stop: bool,
     ) -> std::result::Result<Prepared, PhaseEnd> {
         let here = |e: anyhow::Error| PhaseEnd::Outcome(outcome::Outcome::of(&Err(e), ""));
-        let id = format!("issue-{issue}");
         let base_dir = GlobalConfig::load(self.config_dir).map_err(here)?.base_dir;
         let dir = record::task_dir(&base_dir, &id);
         // Where a child whose task has no folder writes its outcome.
@@ -4623,7 +4757,8 @@ impl Steps for TaskSteps<'_> {
         warn: &mut dyn Write,
     ) -> PhaseEnd {
         let (args, slot) = self.run_args(issue, location);
-        self.child(issue, Some(slot), "task run", args, true, out, warn)
+        let id = format!("issue-{issue}");
+        self.child(id, Some(slot), "task run", args, true, out, warn)
     }
 
     fn start_task(
@@ -4636,15 +4771,34 @@ impl Steps for TaskSteps<'_> {
         match phase {
             Phase::Run(location) => {
                 let (args, slot) = self.run_args(issue, location);
-                self.start_child(issue, Some(slot), "task run", args, true, out)
+                let id = format!("issue-{issue}");
+                self.start_child(id, Some(slot), "task run", args, true, out)
             }
             Phase::Resume | Phase::ShouldFix => {
                 let should_fix = phase == Phase::ShouldFix;
                 match self.resume_args(issue, should_fix) {
-                    Ok((what, args)) => self.start_child(issue, None, what, args, !should_fix, out),
+                    Ok((what, args)) => {
+                        let id = format!("issue-{issue}");
+                        self.start_child(id, None, what, args, !should_fix, out)
+                    }
                     Err(ended) => Box::new(Ended(Some(ended))),
                 }
             }
+        }
+    }
+
+    fn start_job(
+        &self,
+        job: &JobStep,
+        slot: Location,
+        out: &mut dyn Write,
+        _warn: &mut dyn Write,
+    ) -> Box<dyn Started + '_> {
+        match self.job_command(job) {
+            Ok((id, what, args, obey_stop)) => {
+                self.start_child(id, Some(slot), what, args, obey_stop, out)
+            }
+            Err(ended) => Box::new(Ended(Some(ended))),
         }
     }
 
