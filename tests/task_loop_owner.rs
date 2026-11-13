@@ -205,8 +205,14 @@ fn each_child_is_given_the_loops_own_process() {
 
 // --- `sbxm status` ---
 
+/// A child of the loop that was killed: its record still says `running`.
+const DEAD_CHILD: u32 = 55;
+
+/// While the loop runs: only the killed child is gone.
+const LOOP_ALIVE: Gone = Gone(&[DEAD_CHILD]);
+
 fn current(base: &Path) -> Option<String> {
-    looping::work(base, &process(LOOP))
+    looping::work(base, &process(LOOP), &LOOP_ALIVE)
         .unwrap()
         .current
         .map(|c| c.id)
@@ -251,6 +257,49 @@ fn a_child_of_another_loop_in_this_loops_process_is_not_this_loops() {
     save(&env.base_dir(), 3, Stage::Working, LOOP, Some(OTHER_LOOP));
 
     assert_eq!(current(&env.base_dir()), None);
+}
+
+#[test]
+fn a_killed_child_of_the_loop_does_not_hide_its_running_child() {
+    // Review M-1: issue 9's child was killed and the task parked; the loop runs issue 3 now.
+    let env = TestEnv::new();
+    save(&env.base_dir(), 3, Stage::Working, CHILD, Some(LOOP));
+    save(&env.base_dir(), 9, Stage::Working, DEAD_CHILD, Some(LOOP));
+
+    assert_eq!(current(&env.base_dir()).as_deref(), Some("issue-3"));
+}
+
+#[test]
+fn a_killed_child_alone_is_no_current_task() {
+    let env = TestEnv::new();
+    save(&env.base_dir(), 9, Stage::Working, DEAD_CHILD, Some(LOOP));
+
+    assert_eq!(current(&env.base_dir()), None);
+}
+
+#[test]
+fn a_task_its_child_released_is_no_current_task() {
+    // The phase's own lock clears `process` as the child returns; `loop` stays.
+    let env = TestEnv::new();
+    let dir = save(&env.base_dir(), 9, Stage::Working, CHILD, Some(LOOP));
+    let mut rec = record::read(&dir.join("task.json")).unwrap();
+    rec.process = None;
+    record::write(&dir, &rec).unwrap();
+
+    assert_eq!(current(&env.base_dir()), None);
+}
+
+#[test]
+fn a_task_whose_lock_a_live_command_holds_is_still_the_loops() {
+    // Its recorded process is gone, but a live command holds its lock, as the Tasks section
+    // counts it: not interrupted.
+    let env = TestEnv::new();
+    let dir = save(&env.base_dir(), 3, Stage::Working, DEAD_CHILD, Some(LOOP));
+    let mut holder = serde_json::to_value(process(CHILD)).unwrap();
+    holder["token"] = serde_json::json!("t");
+    fs::write(dir.join("lock.json"), holder.to_string()).unwrap();
+
+    assert_eq!(current(&env.base_dir()).as_deref(), Some("issue-3"));
 }
 
 // --- The loop's restart recovery (decision 310(4)) ---

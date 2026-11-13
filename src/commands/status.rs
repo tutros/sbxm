@@ -244,7 +244,7 @@ fn loop_view(
     let (lock, file) = looping::read_lock_file(base, probe);
     let work = match (&lock, &file) {
         (looping::Lock::Running(_), Some(file)) => {
-            Some(looping::work_for(base, file).unwrap_or_default())
+            Some(looping::work_for(base, file, probe).unwrap_or_default())
         }
         _ => None,
     };

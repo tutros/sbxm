@@ -405,7 +405,7 @@ fn a_task_done_in_the_window_stays_done_after_the_merged_cleanup_archives_it() {
     let b = base.base_dir();
     save(&b, &finished(3, T0 - 10, true));
     assert_eq!(
-        looping::work(&b, &loop_process()).unwrap().done,
+        looping::work(&b, &loop_process(), &alive()).unwrap().done,
         ["issue-3"]
     );
 
@@ -418,7 +418,7 @@ fn a_task_done_in_the_window_stays_done_after_the_merged_cleanup_archives_it() {
     );
     assert!(!record::task_dir(&b, "issue-3").exists());
     assert_eq!(
-        looping::work(&b, &loop_process()).unwrap().done,
+        looping::work(&b, &loop_process(), &alive()).unwrap().done,
         ["issue-3"]
     );
 }
@@ -440,7 +440,7 @@ fn an_archived_task_counts_once_and_only_when_marked_and_finished_in_the_window(
         archive_and_remove(&b, &rec.id);
     }
 
-    let work = looping::work(&b, &loop_process()).unwrap();
+    let work = looping::work(&b, &loop_process(), &alive()).unwrap();
 
     assert_eq!(work.done, ["issue-2", "issue-3"]);
     assert_eq!(work.current, None);
@@ -466,7 +466,7 @@ fn two_numbered_archives_of_one_finished_task_count_as_one_done_task() {
     assert_ne!(second, merged::archive_dir(&b, "issue-3"));
     fs::remove_dir_all(record::task_dir(&b, "issue-3")).unwrap();
 
-    let work = looping::work(&b, &loop_process()).unwrap();
+    let work = looping::work(&b, &loop_process(), &alive()).unwrap();
 
     assert_eq!(work.done, ["issue-3"]);
 }
@@ -484,7 +484,7 @@ fn an_older_archive_outside_the_window_does_not_hide_a_numbered_one_inside_it() 
     assert_ne!(second, merged::archive_dir(&b, "issue-3"));
     fs::remove_dir_all(record::task_dir(&b, "issue-3")).unwrap();
 
-    let work = looping::work(&b, &loop_process()).unwrap();
+    let work = looping::work(&b, &loop_process(), &alive()).unwrap();
 
     assert_eq!(work.done, ["issue-3"]);
 }
@@ -498,7 +498,7 @@ fn an_archived_running_record_is_not_the_loops_task() {
     save(&b, &running(8, Stage::Working));
     archive_and_remove(&b, "issue-8");
 
-    let work = looping::work(&b, &loop_process()).unwrap();
+    let work = looping::work(&b, &loop_process(), &alive()).unwrap();
 
     assert_eq!(work, Work::default());
 }
@@ -536,7 +536,7 @@ fn archived_records_behind_a_link_are_not_read() {
             }
         }
 
-        let work = looping::work(&b, &loop_process()).unwrap();
+        let work = looping::work(&b, &loop_process(), &alive()).unwrap();
 
         assert!(work.done.is_empty(), "{link_at}: {work:?}");
     }

@@ -196,7 +196,7 @@ fn running_loop(base_dir: &Path, probe: &dyn ProcessProbe) -> Option<(String, St
         )),
         Lock::Running(process) => {
             let at = file
-                .and_then(|file| looping::work_for(base_dir, &file).ok())
+                .and_then(|file| looping::work_for(base_dir, &file, probe).ok())
                 .map_or_else(String::new, |work| match &work.listed {
                     Some(listed) => match listed.position() {
                         Some(n) => format!(", task {n} of {}", listed.total()),
