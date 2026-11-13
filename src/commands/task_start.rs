@@ -458,8 +458,9 @@ fn start(
     let asides = std::sync::Mutex::new(aside_by_id);
     let settle_warnings: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
     // The picks labeled `ready-for-worker`, once chosen: a start by hand takes the label off each
-    // the moment its record exists, as the loop does, so the issue leaves the loop's queue (issue
-    // 623). A child of the loop leaves it to the loop. A failed removal is only a warning.
+    // the moment its first record is written, before its sandbox is made, as the loop does, so
+    // the issue leaves the loop's queue (issue 623). A child of the loop leaves it to the loop. A
+    // failed removal is only a warning.
     let labeled: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
     let label_warnings: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
     let unlabel = |number: u32| {
@@ -479,7 +480,6 @@ fn start(
         }
     };
     let on_prepared = |number: u32| {
-        unlabel(number);
         let id = format!("issue-{number}");
         let Some(aside) = asides.lock().unwrap().remove(&id) else {
             return;
@@ -519,21 +519,16 @@ fn start(
             .collect();
         writeln!(out, "Starting {} ...", names.join(", "))?;
         Ok(task_log::live(out, |progress| {
-            pipeline::start_at(&ctx, &selection.picks, location, &on_prepared, progress)
+            let hooks = pipeline::Hooks {
+                recorded: &unlabel,
+                prepared: &on_prepared,
+            };
+            pipeline::start_at(&ctx, &selection.picks, location, &hooks, progress)
         }))
     })();
 
     for warning in settle_warnings.into_inner().unwrap() {
         writeln!(warn, "warning: {warning}")?;
-    }
-    // A task whose preparation failed after writing its record still exists, for `task resume`:
-    // its label goes too.
-    let left = labeled.lock().unwrap().clone();
-    for number in left {
-        let id = format!("issue-{number}");
-        if record::task_dir(&base_dir, &id).join("task.json").is_file() {
-            unlabel(number);
-        }
     }
     for warning in label_warnings.into_inner().unwrap() {
         writeln!(warn, "warning: {warning}")?;

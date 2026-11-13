@@ -11,7 +11,7 @@ use common::task_fixture::{
     CLAUDE_DONE, CODEX_DONE, Fixture, Play, Probe, backend, fixture, fixture_with, issue_text, ok,
     open_issue, play, play_reviews, play_tasks, source,
 };
-use sbxm::backend::{ExecOutput, FakeBackend, Location};
+use sbxm::backend::{CreateSpec, ExecOutput, FakeBackend, Location};
 use sbxm::commands::{task_run, task_start};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{GitHubBackend, Issue};
@@ -75,8 +75,8 @@ fn labels_now(github: &FakeGitHub) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The worker's sandbox plays its commits; each `claude` call first notes the GitHub calls made
-/// so far, so a test sees what had happened by the time the worker ran.
+/// The worker's sandbox plays its commits; its create first notes the GitHub calls made so far
+/// (once), so a test sees what had happened while the sandbox was being made.
 fn playing(f: &Fixture, github: &Arc<FakeGitHub>, seen: &Arc<Mutex<Vec<GhCall>>>) -> FakeBackend {
     let worker = play_tasks(
         &f.env.base_dir(),
@@ -87,15 +87,24 @@ fn playing(f: &Fixture, github: &Arc<FakeGitHub>, seen: &Arc<Mutex<Vec<GhCall>>>
             bundle_bytes: None,
         },
     );
-    let (github, seen) = (Arc::clone(github), Arc::clone(seen));
     backend()
         .with_exec_output_matching("claude", ok(CLAUDE_DONE))
-        .with_exec_hook(move |sandbox, spec| {
-            if spec.argv.iter().any(|a| a.contains("claude")) && seen.lock().unwrap().is_empty() {
-                *seen.lock().unwrap() = github.calls();
-            }
-            worker(sandbox, spec);
-        })
+        .with_exec_hook(worker)
+        .with_create_hook(noting(github, seen))
+}
+
+/// A create hook that notes the GitHub calls made by the first create.
+fn noting(
+    github: &Arc<FakeGitHub>,
+    seen: &Arc<Mutex<Vec<GhCall>>>,
+) -> impl Fn(&CreateSpec) + Send + Sync + 'static {
+    let (github, seen) = (Arc::clone(github), Arc::clone(seen));
+    move |_| {
+        let mut seen = seen.lock().unwrap();
+        if seen.is_empty() {
+            *seen = github.calls();
+        }
+    }
 }
 
 struct Out {
@@ -137,7 +146,8 @@ fn a_start_by_hand_takes_the_label_off_once_the_record_exists() {
 
     out.result.unwrap();
     assert!(task_json(&f).is_file());
-    // Taken off before the worker ran: the record was written then, the label gone with it.
+    // Taken off while the sandbox was being made: the record is written before it, the label
+    // gone with it.
     assert!(seen.lock().unwrap().contains(&removal()), "{:?}", seen);
     assert_eq!(removals(&gh), 1, "{:?}", gh.calls());
     assert_eq!(labels_now(&gh), vec!["size:S".to_owned()]);
@@ -291,10 +301,10 @@ fn a_spec_task_makes_no_label_call() {
     assert_eq!(removals(&gh), 0, "{:?}", gh.calls());
 }
 
-/// A local start whose sandbox can't be made keeps no record of the task: the issue is still
-/// free, so it keeps its label.
+/// A local start whose sandbox can't be made removes its record again, but its label went when
+/// the record was written, as the loop's does (its watcher sees the record appear).
 #[test]
-fn a_local_start_whose_sandbox_fails_keeps_the_label() {
+fn a_local_start_whose_sandbox_fails_has_taken_the_label_off_with_its_record() {
     let f = fixture();
     let gh = Arc::new(github(&[READY]));
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -304,11 +314,11 @@ fn a_local_start_whose_sandbox_fails_keeps_the_label() {
 
     assert!(out.result.is_err());
     assert!(!task_json(&f).exists());
-    assert_eq!(removals(&gh), 0, "{:?}", gh.calls());
+    assert_eq!(removals(&gh), 1, "{:?}", gh.calls());
 }
 
-/// A cloud start whose warm-up fails keeps its record, `prepared/failed`, for `task resume`
-/// (issue 560): the issue is taken, so its label goes even though the preparation failed.
+/// A cloud start takes the label off while its sandbox is being made, and one whose warm-up fails
+/// keeps its record, `prepared/failed`, for `task resume` (issue 560): the issue stays taken.
 #[test]
 fn a_cloud_start_whose_warm_up_fails_still_takes_the_label_off() {
     let f = fixture_with(
@@ -319,7 +329,8 @@ fn a_cloud_start_whose_warm_up_fails_still_takes_the_label_off() {
         "[template]\nstrict = true\nallow = [\"crates.io\"]\n",
     );
     cargo_base(&f);
-    let gh = github(&[READY]);
+    let gh = Arc::new(github(&[READY]));
+    let seen = Arc::new(Mutex::new(Vec::new()));
     let b = cloud_task::cloud_backend(&f.env.tmp.path().join("cloud-fs"), "issue-41", &[CLEAN])
         .with_cloud_allow(&[
             "api.anthropic.com",
@@ -335,7 +346,8 @@ fn a_cloud_start_whose_warm_up_fails_still_takes_the_label_off() {
                 stderr: "no network\n".into(),
                 exit_code: Some(101),
             },
-        );
+        )
+        .with_create_hook(noting(&gh, &seen));
     let mut opts = start_options(&f);
     opts.location = Some(Location::Cloud);
     let (mut out, mut warn) = (Vec::new(), Vec::new());
@@ -344,13 +356,14 @@ fn a_cloud_start_whose_warm_up_fails_still_takes_the_label_off() {
         &f.env.config_dir(),
         &opts,
         &b,
-        &gh,
+        gh.as_ref(),
         &Probe,
         &mut out,
         &mut warn,
     );
 
     assert!(result.is_err());
+    assert!(seen.lock().unwrap().contains(&removal()), "{:?}", seen);
     let out = String::from_utf8(out).unwrap();
     assert!(out.contains("warm-up"), "{out}");
     assert!(task_json(&f).is_file(), "{out}");

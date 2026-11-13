@@ -1116,8 +1116,19 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
 /// checked first, its text is the worker's input, and its branch is the one of the pull request
 /// it continues, if any.
 pub fn prepare_at(ctx: &Ctx, issue: &IssueText, location: Location) -> Result<Prepared> {
+    prepare_recorded(ctx, issue, location, &|| {})
+}
+
+/// [`prepare_at`], calling `on_recorded` the moment the task's first record is written, before
+/// its sandbox is made (issue 623).
+fn prepare_recorded(
+    ctx: &Ctx,
+    issue: &IssueText,
+    location: Location,
+    on_recorded: &dyn Fn(),
+) -> Result<Prepared> {
     let id = format!("issue-{}", issue.number);
-    prepare_source(ctx, &id, Source::Issue(issue), location)
+    prepare_source_with(ctx, &id, Source::Issue(issue), location, on_recorded)
 }
 
 /// The issue worker's prompt, rendered: `continues` is the pull request the issue belongs to and
@@ -1386,6 +1397,17 @@ fn fix_startable(base_dir: &Path, id: &str, pr: &PrInfo) -> Result<(u32, String)
 /// Spec §5.1 steps 1 and 2 for either source, here or in the cloud: the one preparation
 /// [`prepare_at`] and [`prepare_spec_resolved`] share (milestone 4 slice 5b).
 fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Result<Prepared> {
+    prepare_source_with(ctx, id, source, location, &|| {})
+}
+
+/// [`prepare_source`], calling `on_recorded` once the first record is written.
+fn prepare_source_with(
+    ctx: &Ctx,
+    id: &str,
+    source: Source,
+    location: Location,
+    on_recorded: &dyn Fn(),
+) -> Result<Prepared> {
     let global = GlobalConfig::load(ctx.config_dir)?;
     let meta = record::task_dir(&global.base_dir, id);
     let workspace = global.base_dir.join("tasks").join(id);
@@ -1633,6 +1655,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
             session: None,
         });
         record::write(&meta, task)?;
+        on_recorded();
 
         match cloud_ttl {
             None => {
@@ -1838,7 +1861,19 @@ pub fn start_with(
     numbers: &[u32],
     on_prepared: &(dyn Fn(u32) + Sync),
 ) -> Vec<TaskReport> {
-    start_at(ctx, numbers, Location::Local, on_prepared, &quiet)
+    let hooks = Hooks {
+        recorded: &|_| {},
+        prepared: on_prepared,
+    };
+    start_at(ctx, numbers, Location::Local, &hooks, &quiet)
+}
+
+/// What [`start_at`] calls back with an issue's number, from that issue's own thread.
+pub struct Hooks<'a> {
+    /// The moment the task's first record is written, before its sandbox is made (issue 623).
+    pub recorded: &'a (dyn Fn(u32) + Sync),
+    /// The moment its preparation succeeds: see [`start_with`].
+    pub prepared: &'a (dyn Fn(u32) + Sync),
 }
 
 /// [`start_with`] at `location` (milestone 4 slice 5b): in the cloud, each issue gets its own cloud
@@ -1849,7 +1884,7 @@ pub fn start_at(
     ctx: &Ctx,
     numbers: &[u32],
     location: Location,
-    on_prepared: &(dyn Fn(u32) + Sync),
+    hooks: &Hooks,
     progress: &dyn Fn(&str),
 ) -> Vec<TaskReport> {
     // Each line comes with a channel to say it was printed: its phase starts only then.
@@ -1866,7 +1901,7 @@ pub fn start_at(
                             let _ = done.recv();
                         }
                     };
-                    start_one(ctx, number, location, on_prepared, &progress)
+                    start_one(ctx, number, location, hooks, &progress)
                 })
             })
             .collect();
@@ -1906,7 +1941,7 @@ fn start_one(
     ctx: &Ctx,
     number: u32,
     location: Location,
-    on_prepared: &(dyn Fn(u32) + Sync),
+    hooks: &Hooks,
     progress: &dyn Fn(&str),
 ) -> TaskReport {
     let env = ctx.env_with(progress);
@@ -1916,10 +1951,11 @@ fn start_one(
     let mut started: Option<Prepared> = None;
     let result = (|| {
         let issue = ctx.github.issue(ctx.repo, number)?;
-        let prepared = started.insert(prepare_at(ctx, &issue, location)?);
+        let recorded = || (hooks.recorded)(number);
+        let prepared = started.insert(prepare_recorded(ctx, &issue, location, &recorded)?);
         warnings.clone_from(&prepared.warnings);
         events = std::mem::take(&mut prepared.events);
-        on_prepared(number);
+        (hooks.prepared)(number);
         let worked = run_worker_in(&env, prepared)?;
         // A failed worker is not gated; a timed-out one is (its partial commits count), except in
         // the cloud, where it stops the task (milestone 4 slice 3, behavior 2), as a spec task's.
