@@ -375,11 +375,12 @@ impl Loop<'_> {
             QueuedWhat::Pr { pr, fix, task } => {
                 let (pr, fix, task) = (*pr, *fix, task.clone());
                 let command = if fix { "fix" } else { "review" };
-                let ended = match end.kind() {
-                    ChildKind::Ready => {
+                let ended = match (interrupted(end), end.kind()) {
+                    (Some(ended), _) => ended,
+                    (None, ChildKind::Ready) => {
                         Ended::new(Outcome::Done, format!("`task {command} --pr {pr}` ended"))
                     }
-                    _ => Ended::new(Outcome::Failed, format!("{:#}", end.error())),
+                    (None, _) => Ended::new(Outcome::Failed, format!("{:#}", end.error())),
                 };
                 match task {
                     Some(id) => ended.task(id),
@@ -418,7 +419,8 @@ impl Loop<'_> {
         self.job_done(&taken, &label, read, started, ended, out, warn)
     }
 
-    /// How a job's child ended, as [`Self::phase`] reads a phase run here: `None` when ready; a
+    /// How a job's child ended, as [`Self::phase`] reads a phase run here: `None` when ready; one
+    /// that wrote no outcome is `interrupted` ([`interrupted`]); a
     /// lapsed sign-in is `stopped` and stops the loop; a missing secret is `failed` and stops it;
     /// anything else is `failed`, with `what` before the error. `resume`: the task the child
     /// works on and the command that continues it, named in a sign-in stop once its record
@@ -429,6 +431,9 @@ impl Loop<'_> {
         resume: Option<(&str, String)>,
         end: &PhaseEnd,
     ) -> Option<Ended> {
+        if let Some(ended) = interrupted(end) {
+            return Some(ended);
+        }
         let e = end.error();
         match end.kind() {
             ChildKind::Ready => None,
@@ -1216,6 +1221,18 @@ enum QueuedWhat {
         id: String,
         should_fix: bool,
     },
+}
+
+/// A job whose child ended without writing an outcome (killed or crashed): `interrupted`, as a
+/// job a stopped loop left running is, and never run again (issue 633).
+fn interrupted(end: &PhaseEnd) -> Option<Ended> {
+    match end {
+        PhaseEnd::Missing(why) => Some(Ended::new(
+            Outcome::Interrupted,
+            format!("{why}; not run again"),
+        )),
+        PhaseEnd::Outcome(_) | PhaseEnd::Unreadable { .. } => None,
+    }
 }
 
 /// Queued job `path` as its file says now, without taking it; `None` for one that can't be read

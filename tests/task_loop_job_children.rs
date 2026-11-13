@@ -567,6 +567,12 @@ mod play {
                     }
                     self.play.events.borrow_mut().push(format!("end {name}"));
                     (self.play.on_job_end)(name);
+                    // `Environment` stands for a child killed before it wrote an outcome.
+                    if *kind == Kind::Environment {
+                        return Some(PhaseEnd::Missing(
+                            "the task's child sbxm was killed and wrote no outcome".into(),
+                        ));
+                    }
                     let detail = if *kind == Kind::Ready {
                         ""
                     } else {
@@ -1167,6 +1173,28 @@ mod queued {
         );
         assert_eq!(starts(&play), ["start fix 150 cloud"], "{}", run.out);
         assert!(!run.out.contains("resolving it with"), "{}", run.out);
+    }
+
+    #[test]
+    fn a_job_child_killed_before_its_outcome_is_reported_interrupted_and_not_run_again() {
+        let f = fixture(Some(2));
+        loop_pr(&f.base(), 50, 150, Location::Cloud);
+        let gh = github(&[]).with_pr(pr(150));
+        f.queue("fix-150.json", r#"{"kind": "fix", "pr": 150}"#, 1);
+        let play = Play::new(&f.base()).job("fix 150", 2, Kind::Environment);
+
+        let run = run_loop(&f, &play, &gh, &never, &[]);
+
+        run.result.unwrap();
+        assert_eq!(starts(&play), ["start fix 150 cloud"], "{}", run.out);
+        assert!(
+            run.out.contains(
+                "job fix #150: interrupted: the task's child sbxm was killed and wrote no \
+                 outcome; not run again"
+            ),
+            "{}",
+            run.out
+        );
     }
 
     #[test]
