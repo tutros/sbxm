@@ -348,8 +348,8 @@ pub struct Request<'a> {
 
 /// The tag to create `request.sandbox` from, `None` for the install steps: a profile without
 /// `[template]` never asks `sbx`; an unusable template refuses a strict profile (decision 200)
-/// and warns once otherwise (decision 203). A strict profile is refused with `pi`, whose kit
-/// allows a host strict mode can't close yet (decision 231).
+/// and warns once otherwise (decision 203). A strict `pi` or `codex` sandbox is then held to its
+/// allow list by [`denied_hosts`] and [`check_kit_rules`] (decisions 221, 323).
 pub fn choose(
     request: &Request,
     backend: &dyn SandboxBackend,
@@ -358,14 +358,6 @@ pub fn choose(
     let Some(table) = &request.merged.template else {
         return Ok(None);
     };
-    if table.strict && request.harness == Harness::Pi {
-        bail!(
-            "strict profile '{}' can't be used with the pi harness yet: pi's own kit allows \
-             registry.npmjs.org, which strict mode can't close (decision 231); set strict = false \
-             in the profile, or use --harness claude or codex",
-            request.profile_name
-        );
-    }
     match usable(request, backend)? {
         Ok(tag) => Ok(Some(tag)),
         Err((reason, fix)) if table.strict => bail!("{reason}; {fix}"),
@@ -513,7 +505,7 @@ const CODEX_PROVIDER_HOSTS: [&str; 6] = [
 ];
 
 /// The other hosts the built-in `codex` kit allows (`sbx` 0.46.0, decision 221(a)). They can't be
-/// read before the sandbox exists, so sbxm keeps the list; [`check_codex_rules`] catches a newer
+/// read before the sandbox exists, so sbxm keeps the list; [`check_kit_rules`] catches a newer
 /// kit that adds one.
 const CODEX_EXTRA_HOSTS: [&str; 9] = [
     "github.com",
@@ -527,41 +519,65 @@ const CODEX_EXTRA_HOSTS: [&str; 9] = [
     "ports.ubuntu.com",
 ];
 
-/// For a strict `codex` sandbox from `template`, the hosts it is created with `--deny-network`
-/// for: every extra host of the `codex` kit not in `[template].allow`, possibly none (decision
-/// 221). `None` for any other sandbox, which [`check_codex_rules`] then leaves unchecked.
+/// The Anthropic host the built-in `pi` kit allows, which a strict `pi` sandbox keeps (decision
+/// 323; provider secret `anthropic`).
+const PI_PROVIDER_HOSTS: [&str; 1] = ["api.anthropic.com"];
+
+/// The other hosts the built-in `pi` kit allows (`sbx` 0.46.0, the real check of issue #266,
+/// decision 323), written as the kit's rule writes them. Like [`CODEX_EXTRA_HOSTS`], sbxm keeps
+/// the list and [`check_kit_rules`] catches a newer kit that adds one.
+const PI_EXTRA_HOSTS: [&str; 2] = ["registry.npmjs.org", "platform.claude.com:443"];
+
+/// The provider hosts and the extra hosts of the kit of a harness whose strict sandboxes sbxm
+/// can hold to their allow list (decisions 221, 323); `None` for any other harness.
+fn strict_kit_hosts(
+    harness: Harness,
+) -> Option<(&'static [&'static str], &'static [&'static str])> {
+    match harness {
+        Harness::Codex => Some((&CODEX_PROVIDER_HOSTS, &CODEX_EXTRA_HOSTS)),
+        Harness::Pi => Some((&PI_PROVIDER_HOSTS, &PI_EXTRA_HOSTS)),
+        Harness::Claude | Harness::Antigravity => None,
+    }
+}
+
+/// For a strict `codex` or `pi` sandbox from `template`, the hosts it is created with
+/// `--deny-network` for: every extra host of the harness's kit whose host (without a port) isn't in
+/// `[template].allow`, possibly none (decisions 221, 323). `None` for any other sandbox, which
+/// [`check_kit_rules`] then leaves unchecked.
 pub fn denied_hosts(
     merged: &Profile,
     harness: Harness,
     template: Option<&str>,
 ) -> Option<Vec<String>> {
-    match (&merged.template, harness, template) {
-        (Some(table), Harness::Codex, Some(_)) if table.strict => Some(
-            CODEX_EXTRA_HOSTS
-                .iter()
-                .filter(|host| !allows(&table.allow, host))
-                .map(|host| (*host).to_owned())
-                .collect(),
-        ),
-        _ => None,
-    }
+    let (table, (_, extra)) = match (&merged.template, strict_kit_hosts(harness), template) {
+        (Some(table), Some(hosts), Some(_)) if table.strict => (table, hosts),
+        _ => return None,
+    };
+    Some(
+        extra
+            .iter()
+            .filter(|host| !allows(&table.allow, host_of(host)))
+            .map(|host| (*host).to_owned())
+            .collect(),
+    )
 }
 
-/// After a strict `codex` sandbox is created and before any agent command: every host an allow
-/// rule scoped to the sandbox allows must be an OpenAI host, in `[template].allow` or denied by a
-/// rule, or the sandbox is removed and refused, so a newer `codex` kit can't widen it silently
-/// (decision 221). It fails closed: no kit rule at all is refused too, and global rules are the
-/// user's own (decision 232).
-pub fn check_codex_rules(
+/// After a strict `codex` or `pi` sandbox is created and before any agent command: every host an
+/// allow rule scoped to the sandbox allows must be a provider host of the harness, in
+/// `[template].allow` or denied by a rule, or the sandbox is removed and refused, so a newer kit
+/// can't widen it silently (decisions 221, 323). It fails closed: no kit rule at all is refused
+/// too, and global rules are the user's own (decision 232).
+pub fn check_kit_rules(
     profile_name: &str,
     merged: &Profile,
+    harness: Harness,
     sandbox: &str,
     backend: &dyn SandboxBackend,
     denied: Option<&[String]>,
 ) -> Result<()> {
-    if denied.is_none() {
+    let (Some(_), Some((provider, _))) = (denied, strict_kit_hosts(harness)) else {
         return Ok(());
-    }
+    };
     let allow = merged
         .template
         .as_ref()
@@ -600,7 +616,8 @@ pub fn check_codex_rules(
         return Err(refuse(
             format!(
                 "sbx reported no network rule '{kit}' for {sandbox}, so sbxm can't see what the \
-                 codex kit allows"
+                 {} kit allows",
+                harness.as_str()
             ),
             "Set strict = false, or update sbxm if a newer sbx renamed the rule",
         ));
@@ -609,9 +626,7 @@ pub fn check_codex_rules(
         .iter()
         .flat_map(|rule| rule.resources.iter().map(move |r| (rule, host_of(r))))
         .find(|(_, host)| {
-            !CODEX_PROVIDER_HOSTS.contains(host)
-                && !allows(allow, host)
-                && !deny_rules.contains(host)
+            !provider.contains(host) && !allows(allow, host) && !deny_rules.contains(host)
         });
     if let Some((rule, host)) = unexpected {
         return Err(refuse(
@@ -620,7 +635,10 @@ pub fn check_codex_rules(
                  doesn't list in [template].allow and sbxm doesn't deny",
                 rule.name, profile_name
             ),
-            "Add the host to [template].allow if codex may reach it, or set strict = false",
+            &format!(
+                "Add the host to [template].allow if {} may reach it, or set strict = false",
+                harness.as_str()
+            ),
         ));
     }
     Ok(())

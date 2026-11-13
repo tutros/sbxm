@@ -170,9 +170,10 @@ pub fn run(
         deny_network: deny_network.clone().unwrap_or_default(),
         ttl: None,
     })?;
-    template::check_codex_rules(
+    template::check_kit_rules(
         profile_name,
         &profile,
+        options.harness,
         &sandbox,
         backend,
         deny_network.as_deref(),

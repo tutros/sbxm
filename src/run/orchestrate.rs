@@ -249,10 +249,12 @@ impl Pair<'_> {
                 true,
             );
         }
-        // A strict `codex` sandbox is held to its allow list before the agent runs (decision 221).
-        if let Err(e) = template::check_codex_rules(
+        // A strict `codex` or `pi` sandbox is held to its allow list before the agent runs (decisions
+        // 221, 323).
+        if let Err(e) = template::check_kit_rules(
             &harness_kits.profile,
             &harness_kits.loaded,
+            harness_kits.harness,
             &self.sandbox,
             self.backend,
             harness_kits.deny_network.as_deref(),

@@ -2456,8 +2456,8 @@ pub(super) fn plan_sandbox(
 }
 
 impl SandboxPlan {
-    /// Creates `sandbox` over `workspace`, then holds a strict `codex` sandbox to its allow list
-    /// (decisions 221, 232).
+    /// Creates `sandbox` over `workspace`, then holds a strict `codex` or `pi` sandbox to its
+    /// allow list (decisions 221, 232, 323).
     pub(super) fn create(
         &self,
         backend: &dyn SandboxBackend,
@@ -2479,9 +2479,10 @@ impl SandboxPlan {
                 ttl: None,
             })
             .with_context(|| format!("cannot create sandbox {sandbox}"))?;
-        template::check_codex_rules(
+        template::check_kit_rules(
             &self.profile_name,
             &self.profile,
+            harness,
             sandbox,
             backend,
             self.deny_network.as_deref(),
