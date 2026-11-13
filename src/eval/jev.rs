@@ -903,7 +903,7 @@ pub struct JevRun {
 /// the repeat, so a rerun or another run never meets them.
 pub fn names(run_id: &str, repeat: u32) -> (String, String) {
     (
-        crate::run::sandbox_name(run_id, crate::run::JEV, repeat),
+        crate::run::sandbox_name(run_id, crate::run::JEV, repeat.into()),
         format!("sbxm-jev-{run_id}-{repeat}"),
     )
 }

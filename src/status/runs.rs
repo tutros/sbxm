@@ -166,7 +166,7 @@ fn read_run(id: &str, dir: &Path) -> Result<(RunInfo, Vec<String>), String> {
     let wave: Vec<String> = if running < repeat {
         (0..contestants.len())
             .filter(|&i| !saved[i].contains(&running))
-            .map(|i| format!("sbxm-run-{id}-{i}-{running}"))
+            .map(|i| crate::run::sandbox_name(id, &i.to_string(), running))
             .collect()
     } else {
         Vec::new()

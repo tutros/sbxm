@@ -13,17 +13,16 @@ pub const JUDGE: &str = "judge";
 pub const JEV: &str = "jev";
 
 /// The sandbox of one part of run `run_id` in one repeat: `sbxm-run-<id>-<part>-<repeat>`, the
-/// part a contestant's index, [`JUDGE`] or [`JEV`]. Every run sandbox is named here, so
+/// part a contestant's index, [`JUDGE`] or [`JEV`], capped at 63 characters (issue 556). Every run sandbox is named here, so
 /// [`names_sandbox_of`] (`sbxm status`'s owner) knows them all.
-pub fn sandbox_name(run_id: &str, part: &str, repeat: u32) -> String {
-    format!("sbxm-run-{run_id}-{part}-{repeat}")
+pub fn sandbox_name(run_id: &str, part: &str, repeat: u64) -> String {
+    crate::sandbox_name::capped("sbxm-run-", run_id, &format!("-{part}-{repeat}"))
 }
 
 /// Whether `name` is one [`sandbox_name`] makes for run `run_id`.
 pub fn names_sandbox_of(name: &str, run_id: &str) -> bool {
     let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
-    name.strip_prefix("sbxm-run-")
-        .and_then(|rest| rest.strip_prefix(run_id))
+    crate::sandbox_name::after_id(name, "sbxm-run-", run_id)
         .and_then(|rest| rest.strip_prefix('-'))
         .and_then(|rest| rest.split_once('-'))
         .is_some_and(|(part, repeat)| {

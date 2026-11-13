@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
@@ -94,6 +94,42 @@ impl SbxBackend {
         Ok(())
     }
 
+    /// Runs `sbx create` with stdin and stdout attached, like [`Self::run_sbx`], and its stderr
+    /// both shown as it comes and kept: a failure's error carries what `sbx` said (issue 556).
+    fn create_keeping_stderr(&self, args: Vec<OsString>, sandbox: &str) -> Result<()> {
+        let mut child = self
+            .command()
+            .args(&args)
+            .stderr(Stdio::piped())
+            .spawn()
+            .context(SBX_MISSING)?;
+        let mut kept = StderrTail::default();
+        if let Some(mut pipe) = child.stderr.take() {
+            let mut screen = std::io::stderr();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let _ = screen.write_all(&chunk[..n]);
+                        let _ = screen.flush();
+                        kept.push(&chunk[..n]);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+        }
+        let status = child.wait().context(SBX_MISSING)?;
+        if !status.success() {
+            bail!(
+                "{}",
+                create_failed(sandbox, &status.to_string(), &kept.kept)
+            );
+        }
+        Ok(())
+    }
+
     /// Refuses a call whose command line or output only the cloud has.
     fn cloud_only(&self, what: &str) -> Result<()> {
         if self.location == Location::Local {
@@ -136,7 +172,7 @@ impl SandboxBackend for SbxBackend {
     }
 
     fn create(&self, spec: &CreateSpec) -> Result<()> {
-        self.run_sbx(create_args(spec, self.location)?, &spec.name)
+        self.create_keeping_stderr(create_args(spec, self.location)?, &spec.name)
     }
 
     fn copy_in(&self, sandbox: &str, host: &Path, path: &str) -> Result<()> {
@@ -610,6 +646,68 @@ fn parse_custom_secrets(json: &str) -> Result<Vec<CustomSecret>> {
     }
     let ls: SecretLs = parse_json(json, "sbx secret ls --json")?;
     Ok(ls.custom_secrets)
+}
+
+/// How many bytes of `sbx create`'s stderr its error keeps, from the end.
+const STDERR_KEPT: usize = 2000;
+
+/// The end of `sbx create`'s stderr so far: at most twice [`STDERR_KEPT`] bytes plus one read.
+/// Only whole words are kept: a word whose start was dropped is dropped to its end, across as
+/// many reads as it takes, so the masking never meets a secret's tail without its prefix (review
+/// M-2, twice).
+#[derive(Default)]
+struct StderrTail {
+    kept: Vec<u8>,
+    /// The last byte dropped was inside a word: what comes before the next whitespace is its rest.
+    in_dropped_word: bool,
+}
+
+impl StderrTail {
+    /// Adds `chunk`. Past twice [`STDERR_KEPT`] the start goes, up to and including the first
+    /// whitespace after the cut; with none, all of it goes and the word goes on being dropped.
+    fn push(&mut self, mut chunk: &[u8]) {
+        if self.in_dropped_word {
+            match chunk.iter().position(u8::is_ascii_whitespace) {
+                Some(at) => {
+                    self.in_dropped_word = false;
+                    chunk = &chunk[at + 1..];
+                }
+                None => return,
+            }
+        }
+        let kept = &mut self.kept;
+        kept.extend_from_slice(chunk);
+        if kept.len() > 2 * STDERR_KEPT {
+            let cut = kept.len() - STDERR_KEPT;
+            match kept[cut..].iter().position(u8::is_ascii_whitespace) {
+                Some(at) => drop(kept.drain(..=cut + at)),
+                None => {
+                    kept.clear();
+                    self.in_dropped_word = true;
+                }
+            }
+        }
+    }
+}
+
+/// The error of an `sbx create` that failed with `status`: `sbx`'s stderr, trimmed, with values
+/// that look like secrets masked as `run.log` masks them, then cut to its last [`STDERR_KEPT`]
+/// bytes, so the error (and `run.log`, which gets it) names the cause (issue 556).
+fn create_failed(sandbox: &str, status: &str, stderr: &[u8]) -> String {
+    // Masked before it is cut, so a cut never leaves part of a secret the mask can't see (M-2).
+    let text = crate::task::runlog::redact(String::from_utf8_lossy(stderr).trim());
+    let reason = if text.is_empty() {
+        "no output from sbx on stderr".to_owned()
+    } else if text.len() > STDERR_KEPT {
+        let mut start = text.len() - STDERR_KEPT;
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        format!("...{}", text[start..].trim_start())
+    } else {
+        text
+    };
+    format!("`sbx create` failed for sandbox {sandbox} ({status}): {reason}")
 }
 
 /// `sbx`'s stderr, or its stdout when stderr is empty: S11 didn't check which one carries a
@@ -1419,6 +1517,123 @@ mod template_tests {
                 size: 734_437_048,
             }
         );
+    }
+
+    #[test]
+    fn a_failed_create_names_what_sbx_said_on_stderr() {
+        let error = create_failed(
+            "sbxm-task-x-claude",
+            "exit status: 1",
+            b"\nERROR: name too long\n  ",
+        );
+        assert_eq!(
+            error,
+            "`sbx create` failed for sandbox sbxm-task-x-claude (exit status: 1): ERROR: name too long"
+        );
+        let silent = create_failed("s", "exit status: 1", b" \n");
+        assert!(silent.ends_with("no output from sbx on stderr"), "{silent}");
+    }
+
+    #[test]
+    fn a_failed_creates_stderr_is_masked_and_cut_to_its_end() {
+        let secret = format!("token sk-{} rejected", "a".repeat(30));
+        let error = create_failed("s", "exit status: 1", secret.as_bytes());
+        assert!(!error.contains("sk-aaaa"), "{error}");
+        assert!(error.contains("[redacted]"), "{error}");
+
+        let long = format!("{}THE END", "x".repeat(3 * STDERR_KEPT));
+        let error = create_failed("s", "exit status: 1", long.as_bytes());
+        assert!(error.ends_with("THE END"), "{error}");
+        assert!(error.len() < STDERR_KEPT + 100, "{}", error.len());
+    }
+
+    /// Whether `text` has a run of 16 `a`s: a fragment of the dummy token the redactor no longer
+    /// sees as one.
+    fn token_fragment(text: &str) -> bool {
+        text.contains(&"a".repeat(16))
+    }
+
+    fn dummy_token() -> String {
+        format!("sk-{}", "a".repeat(30))
+    }
+
+    #[test]
+    fn a_token_across_the_final_cut_leaves_no_fragment() {
+        let stderr = format!("{}\n{}", dummy_token(), "x".repeat(STDERR_KEPT - 20));
+        let error = create_failed("s", "exit status: 1", stderr.as_bytes());
+        assert!(!token_fragment(&error), "{error}");
+        assert!(error.ends_with("xxxx"), "{error}");
+    }
+
+    #[test]
+    fn a_token_across_the_rolling_cut_leaves_no_fragment() {
+        let mut kept = StderrTail::default();
+        // The token starts at STDERR_KEPT + 500; the second chunk makes the buffer evict
+        // everything before STDERR_KEPT + 510, inside the token.
+        let first = format!("{} {}\n", "x".repeat(STDERR_KEPT + 499), dummy_token());
+        kept.push(first.as_bytes());
+        kept.push("z".repeat(STDERR_KEPT - 25).as_bytes());
+        assert!(kept.kept.len() <= 2 * STDERR_KEPT, "{}", kept.kept.len());
+        let error = create_failed("s", "exit status: 1", &kept.kept);
+        assert!(!token_fragment(&error), "{error}");
+        assert!(error.ends_with("zzzz"), "{error}");
+    }
+
+    /// Review M-2 (repeat): `chunks`, read one by one, as the error shows them.
+    fn error_after_reads(chunks: &[Vec<u8>]) -> (String, usize) {
+        let mut kept = StderrTail::default();
+        let mut most = 0;
+        for chunk in chunks {
+            kept.push(chunk);
+            most = most.max(kept.kept.len());
+        }
+        (create_failed("s", "exit status: 1", &kept.kept), most)
+    }
+
+    #[test]
+    fn a_token_cleared_whole_leaves_no_tail_from_the_next_read() {
+        let mut first = b"sk-".to_vec();
+        first.extend(b"a".repeat(4093));
+        let mut second = b"a".repeat(907);
+        second.extend(b"\nERROR synthetic create failed\n");
+        let (error, _) = error_after_reads(&[first, second]);
+        assert!(!token_fragment(&error), "{error}");
+        assert!(error.ends_with("ERROR synthetic create failed"), "{error}");
+    }
+
+    #[test]
+    fn a_token_continued_over_many_reads_leaves_no_tail() {
+        let mut chunks = vec![[b"sk-".to_vec(), b"a".repeat(4093)].concat()];
+        for _ in 0..5 {
+            chunks.push(b"a".repeat(4096));
+        }
+        chunks.push(b"a".repeat(100));
+        chunks.push(b"aaa\tERROR after a long token\n".to_vec());
+        let (error, most) = error_after_reads(&chunks);
+        assert!(!token_fragment(&error), "{error}");
+        assert!(error.ends_with("ERROR after a long token"), "{error}");
+        assert!(most <= 2 * STDERR_KEPT + 4096, "{most}");
+    }
+
+    #[test]
+    fn a_token_cut_while_its_separator_is_still_to_come_leaves_no_tail() {
+        // The eviction cut lands inside a token whose whitespace comes in a later read.
+        let first = format!("{} sk-{}", "x".repeat(STDERR_KEPT), "a".repeat(30));
+        let second = format!("{}\nERROR tail\n", "a".repeat(STDERR_KEPT));
+        let (error, _) = error_after_reads(&[first.into_bytes(), second.into_bytes()]);
+        assert!(!token_fragment(&error), "{error}");
+        assert!(error.ends_with("ERROR tail"), "{error}");
+    }
+
+    #[test]
+    fn ordinary_stderr_survives_the_rolling_buffer() {
+        let mut kept = StderrTail::default();
+        for i in 0..1000 {
+            kept.push(format!("line {i}\n").as_bytes());
+        }
+        assert!(kept.kept.len() <= 2 * STDERR_KEPT, "{}", kept.kept.len());
+        let error = create_failed("s", "exit status: 1", &kept.kept);
+        assert!(error.ends_with("line 999"), "{error}");
     }
 
     #[test]

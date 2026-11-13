@@ -91,7 +91,7 @@ pub fn execute_with(
                         contestant,
                         index: i,
                         repeat,
-                        sandbox: super::sandbox_name(&roots.id, &i.to_string(), repeat),
+                        sandbox: super::sandbox_name(&roots.id, &i.to_string(), repeat.into()),
                         workspace: roots
                             .workspaces
                             .join(i.to_string())
