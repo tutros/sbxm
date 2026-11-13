@@ -605,8 +605,10 @@ fn may_start(
     {
         return Ok(false);
     }
-    // A stop asked during the reads that counted the awaiting PRs: nothing starts.
-    Ok(lp.awaiting_room(live.len(), out, warn)? && !lp.stopping())
+    // A stop asked during the reads that counted the awaiting PRs: nothing starts. A job child
+    // that may open a PR counts with the tasks (issue 633, answer 5).
+    let running = live.len() + lp.jobs.iter().filter(|j| j.opens_pr()).count();
+    Ok(lp.awaiting_room(running, out, warn)? && !lp.stopping())
 }
 
 /// Sleeps one [`TICK`] while children run and none ended in this pass.
@@ -1098,14 +1100,15 @@ fn task_ended(
 
 impl Loop<'_> {
     /// Whether the PRs awaiting the user leave room for one more child with `running` running
-    /// (317(6)), checked before each start; says once when they don't.
+    /// (317(6)), checked before each start; says once when they don't. With no child of any
+    /// kind running, [`Loop::wait_for_prs`] waited for them already.
     fn awaiting_room(
         &mut self,
         running: usize,
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<bool> {
-        if running == 0 {
+        if running == 0 && self.jobs.is_empty() {
             return Ok(true);
         }
         let awaiting = self.awaiting_prs(warn)?.len();

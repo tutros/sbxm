@@ -1191,6 +1191,13 @@ pub(super) struct Queued {
     what: QueuedWhat,
 }
 
+impl Queued {
+    /// Whether it may open a PR: a `spec` job (issue 633, answer 5).
+    pub(super) fn opens_pr(&self) -> bool {
+        matches!(self.what, QueuedWhat::Spec { .. })
+    }
+}
+
 /// Which queued job a child runs.
 enum QueuedWhat {
     /// `task review --pr N`, or (`fix`) `task fix --pr N`; `task`: the task it works on.

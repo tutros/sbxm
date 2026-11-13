@@ -1349,3 +1349,146 @@ mod runs {
         assert!(log.contains("#1 Fix 1"), "{log}");
     }
 }
+
+// --- the 5-PR pause ---
+
+mod pr_cap {
+    use std::cell::Cell;
+    use std::fs;
+
+    use sbxm::backend::Location;
+    use sbxm::task::outcome::Kind;
+
+    use super::play::*;
+
+    /// Loop PRs 150 and up awaiting the user, `n` of them, on `gh`.
+    fn awaiting(
+        f: &Fixture,
+        gh: sbxm::github::fake::FakeGitHub,
+        n: u32,
+    ) -> sbxm::github::fake::FakeGitHub {
+        let mut gh = gh;
+        for i in 0..n {
+            loop_pr(&f.base(), 50 + i, 150 + i, Location::Cloud);
+            gh = gh.with_pr(pr(150 + i));
+        }
+        gh
+    }
+
+    #[test]
+    fn a_spec_job_child_counts_with_the_tasks_toward_five() {
+        let f = fixture(Some(2));
+        let specs = f.env.tmp.path().join("specs");
+        fs::create_dir_all(&specs).unwrap();
+        fs::write(specs.join("retro.md"), "# Retro\n").unwrap();
+        let value = toml::Value::String(specs.to_str().unwrap().to_owned());
+        f.env.set_config(&format!("specs_dir = {value}"));
+        f.queue("s.json", r#"{"kind": "spec", "file": "retro.md"}"#, 1);
+        let gh = awaiting(&f, github(&[(1, &[]), (2, &[])]), 3)
+            .with_pr(pr(101))
+            .with_pr(pr(102))
+            .with_pr(pr(SPEC_PR))
+            .with_auto_merge(101)
+            .with_auto_merge(102);
+        let play = Play::new(&f.base())
+            .job("spec retro.md", 400, Kind::Ready)
+            .issue(1, 10)
+            .issue(2, 1);
+
+        let run = run_loop(&f, &play, &gh, &never, &[1, 2]);
+
+        run.result.unwrap();
+        // 3 awaiting and the spec job: 4, so #1 starts; with #1, 5, so #2 waits for its end.
+        assert!(
+            run.out
+                .contains("paused: 3 PRs await you and 2 tasks run, 5 in all"),
+            "{}",
+            run.out
+        );
+        assert!(play.at("start 1 cloud") < play.at("end 1"));
+        assert!(
+            play.at("finish 1") < play.at("start 2 cloud"),
+            "{}",
+            run.out
+        );
+        assert!(
+            play.at("start 2 cloud") < play.at("end spec retro.md"),
+            "{}",
+            run.out
+        );
+    }
+
+    #[test]
+    fn a_fix_job_child_does_not_count_so_an_issue_starts_at_four_awaiting() {
+        let f = fixture(Some(2));
+        f.queue("fix.json", r#"{"kind": "fix", "pr": 150}"#, 1);
+        let gh = awaiting(&f, github(&[(1, &[])]), 4)
+            .with_pr(pr(101))
+            .with_auto_merge(101);
+        let play = Play::new(&f.base())
+            .job("fix 150", 400, Kind::Ready)
+            .issue(1, 3);
+
+        let run = run_loop(&f, &play, &gh, &never, &[1]);
+
+        run.result.unwrap();
+        assert!(
+            play.at("start 1 local") < play.at("end fix 150"),
+            "{}",
+            run.out
+        );
+    }
+
+    #[test]
+    fn at_five_awaiting_a_fix_job_starts_and_an_issue_does_not() {
+        let f = fixture(Some(2));
+        f.queue("fix.json", r#"{"kind": "fix", "pr": 150}"#, 1);
+        let gh = awaiting(&f, github(&[(1, &[])]), 5);
+        let ended = Cell::new(false);
+        let play = Play::new(&f.base())
+            .job("fix 150", 400, Kind::Ready)
+            .on_job_end(|_| ended.set(true));
+        let stop = || ended.get();
+
+        let run = run_loop(&f, &play, &gh, &stop, &[1]);
+
+        run.result.unwrap();
+        assert_eq!(starts(&play), ["start fix 150 cloud"], "{}", run.out);
+        assert!(
+            run.out
+                .contains("paused: 5 PRs await you and 0 tasks run, 5 in all"),
+            "{}",
+            run.out
+        );
+    }
+}
+
+// --- with `cloud_slots` unset, as before ---
+
+mod one_at_a_time {
+    use sbxm::backend::Location;
+    use sbxm::github::Mergeable;
+
+    use super::play::*;
+
+    #[test]
+    fn with_cloud_slots_unset_resolves_and_jobs_run_in_the_loops_process() {
+        let f = fixture(None);
+        loop_pr(&f.base(), 50, 150, Location::Local);
+        loop_pr(&f.base(), 51, 151, Location::Local);
+        let gh = github(&[]).with_pr(pr(150)).with_pr(pr(151));
+        gh.set_mergeable(150, Mergeable::Conflicting);
+        f.queue("fix-151.json", r#"{"kind": "fix", "pr": 151}"#, 1);
+        let play = Play::new(&f.base());
+
+        let run = run_loop(&f, &play, &gh, &never, &[]);
+
+        run.result.unwrap();
+        assert_eq!(
+            play.events(),
+            ["in-process fix 150", "in-process fix 151"],
+            "{}",
+            run.out
+        );
+    }
+}

@@ -60,6 +60,14 @@ pub(super) enum Work {
     },
 }
 
+impl JobChild<'_> {
+    /// Whether it may open a PR: a `spec` job's children count toward the PRs awaiting the user
+    /// with the task children (issue 633, answer 5).
+    pub fn opens_pr(&self) -> bool {
+        matches!(&self.work, Work::Queued(queued) if queued.opens_pr())
+    }
+}
+
 impl<'a> Loop<'a> {
     /// Whether a job child runs on PR `pr` (317(7)).
     pub(super) fn pr_busy(&self, pr: u32) -> bool {
