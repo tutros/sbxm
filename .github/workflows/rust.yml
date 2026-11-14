@@ -13,14 +13,49 @@ env:
   CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
+  # Ubuntu runs every test in one job, docs-only changes included (their docs tests are here).
   build:
 
     strategy:
-      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest]
 
     runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+    # Third-party actions are pinned to a full commit SHA, the release tag in the comment (issue 395).
+    # Its default key is the OS, the rustc version and Cargo.lock.
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+    - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      with:
+        tool: cargo-nextest
+    # No separate `cargo build`: the tests build the binary they run themselves.
+    # nextest runs every test binary at once, one process per test; `cargo test` ran the
+    # binaries one after another.
+    - name: Run tests
+      run: cargo nextest run
+    # nextest doesn't run doc tests.
+    - name: Run doc tests
+      run: cargo test --doc
+
+  # The Windows tests split over 3 runners (issue 656): the tests are CPU-bound on a runner's 4 cores, so only more
+  # runners make them faster. Each shard compiles everything and runs a third of the tests; together they run each
+  # test once. The required check is the summary job below, not these.
+  windows-shard:
+
+    name: windows shard ${{ matrix.shard }} of 3
+
+    strategy:
+      # One red shard doesn't cancel the others: their times are part of the measure.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+
+    runs-on: windows-latest
+
+    outputs:
+      docs_only: ${{ steps.changes.outputs.docs_only }}
 
     steps:
     # A pull request checks out its merge commit; depth 2 brings in its first parent, the base.
@@ -28,7 +63,7 @@ jobs:
       with:
         fetch-depth: 2
     # Docs-only: every changed file is a `*.md` outside `prompts/` (compiled into the binary)
-    # and outside `.github/`. Then the Windows job skips the rest and still reports success; Ubuntu
+    # and outside `.github/`. Then the shards skip the rest and the summary job passes; Ubuntu
     # runs everything, docs tests included (issue 406). A push runs everything.
     - name: List changed files
       id: changes
@@ -51,29 +86,55 @@ jobs:
           fi
         fi
         build=true
-        if [ "$docs_only" = true ] && [ "${{ matrix.os }}" = windows-latest ]; then
+        if [ "$docs_only" = true ]; then
           build=false
         fi
         echo "docs_only=$docs_only build=$build"
+        echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
         echo "build=$build" >> "$GITHUB_OUTPUT"
-    # Third-party actions are pinned to a full commit SHA, the release tag in the comment (issue 395).
-    # Its default key is the OS, the rustc version and Cargo.lock.
     - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       if: steps.changes.outputs.build == 'true'
     - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
       if: steps.changes.outputs.build == 'true'
       with:
         tool: cargo-nextest
-    # No separate `cargo build`: the tests build the binary they run themselves.
-    # nextest runs every test binary at once, one process per test; `cargo test` ran the
-    # binaries one after another.
+    # `count:K/3` gives each test to exactly one of the 3 shards.
     - name: Run tests
       if: steps.changes.outputs.build == 'true'
-      run: cargo nextest run
-    # nextest doesn't run doc tests.
+      run: cargo nextest run --partition count:${{ matrix.shard }}/3
+    # nextest doesn't run doc tests; shard 1 runs them all.
     - name: Run doc tests
-      if: steps.changes.outputs.build == 'true'
+      if: steps.changes.outputs.build == 'true' && matrix.shard == 1
       run: cargo test --doc
+
+  # The required check `build (windows-latest)` (the name the matrix job had before issue 656; branch protection
+  # requires it). It passes on a docs-only pull request, and otherwise only when every shard succeeded: a shard
+  # failed, cancelled or skipped fails it. No other job may take this name.
+  windows-summary:
+
+    name: build (windows-latest)
+
+    needs: windows-shard
+    if: always()
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check the shards
+      shell: bash
+      env:
+        DOCS_ONLY: ${{ needs.windows-shard.outputs.docs_only }}
+        SHARDS: ${{ needs.windows-shard.result }}
+      run: |
+        echo "docs_only=$DOCS_ONLY shards=$SHARDS"
+        if [ "$DOCS_ONLY" = true ]; then
+          echo "docs-only change: the Windows tests are skipped"
+          exit 0
+        fi
+        if [ "$SHARDS" != success ]; then
+          echo "the Windows shards ended $SHARDS, not success"
+          exit 1
+        fi
 
   # The Pester tests of `scripts/` (issue 546): a job of its own, so it is its own required check, not behind the Rust
   # build. It runs on every pull request and push, with no docs-only skip, so the check is never missing.
