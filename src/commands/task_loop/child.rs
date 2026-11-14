@@ -69,6 +69,11 @@ pub trait Spawner {
     }
     /// Ends every running child at once: the loop's second Ctrl-C.
     fn stop(&self);
+    /// Takes in `process`, a child of a dead loop this loop adopted (issue 643), so that
+    /// [`Self::stop`] ends it too. A `Spawner` that only plays children needs no other.
+    fn adopt(&self, process: &Process) {
+        let _ = process;
+    }
 }
 
 /// A started child, polled for its exit.
@@ -93,6 +98,8 @@ type Slot = Arc<Mutex<Option<std::process::Child>>>;
 pub struct ChildSpawner {
     exe: PathBuf,
     running: Mutex<Vec<Slot>>,
+    /// The adopted children (issue 643): ended with the spawner's own at a stop.
+    adopted: Mutex<Vec<Process>>,
 }
 
 impl ChildSpawner {
@@ -100,6 +107,7 @@ impl ChildSpawner {
         Self {
             exe,
             running: Mutex::new(Vec::new()),
+            adopted: Mutex::new(Vec::new()),
         }
     }
 
@@ -165,6 +173,39 @@ impl Spawner for ChildSpawner {
                 let _ = running.wait();
             }
         }
+        for process in self
+            .adopted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+        {
+            end_adopted(process);
+        }
+    }
+
+    fn adopt(&self, process: &Process) {
+        self.adopted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(process.clone());
+    }
+}
+
+/// Ends the adopted child `process` if it still runs: its pid with the same start time, read in
+/// the one look the end acts on, so a reused pid is never ended (decision 163).
+fn end_adopted(process: &Process) {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    let pid = Pid::from_u32(process.pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    if let Some(found) = system.process(pid)
+        && crate::run::results::format_timestamp(found.start_time()) == process.started_at
+    {
+        found.kill();
     }
 }
 
@@ -236,11 +277,20 @@ pub(super) struct Adopted<'a> {
     pub elsewhere: PathBuf,
     /// `[issue-3 cloud]`: the window's prefix for its lines.
     pub label: String,
+    /// Whether the loop was asked to stop.
+    pub stop_asked: &'a dyn Fn() -> bool,
+    /// The loop's stop file, whose path the dead loop gave the child (the same base dir).
+    pub stop_file: PathBuf,
 }
 
 impl super::Started for Adopted<'_> {
     fn poll(&mut self, out: &mut dyn std::io::Write) -> Option<super::PhaseEnd> {
         if self.process.alive(self.probe) {
+            // A first Ctrl-C reaches its slot wait through the stop file, as for the loop's own
+            // child ([`STOP_FILE_ENV`]).
+            if (self.stop_asked)() && !exists(&self.stop_file) {
+                let _ = std::fs::write(&self.stop_file, "");
+            }
             return None;
         }
         let ended = super::PhaseEnd::read(&self.dir, &self.elsewhere, "ended");

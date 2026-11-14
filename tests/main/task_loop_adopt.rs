@@ -168,6 +168,8 @@ struct Play<'a> {
     base: PathBuf,
     script: RefCell<HashMap<u32, VecDeque<(u32, Act)>>>,
     events: &'a Mutex<Vec<String>>,
+    /// The adopted processes the loop handed over for its second Ctrl-C.
+    handed: RefCell<Vec<Process>>,
 }
 
 impl<'a> Play<'a> {
@@ -176,6 +178,7 @@ impl<'a> Play<'a> {
             base: base.to_owned(),
             script: RefCell::default(),
             events,
+            handed: RefCell::default(),
         }
     }
 
@@ -328,6 +331,10 @@ impl Steps for Play<'_> {
     fn room(&self) -> Result<()> {
         Ok(())
     }
+
+    fn adopted(&self, process: &Process) {
+        self.handed.borrow_mut().push(process.clone());
+    }
 }
 
 struct Fixture {
@@ -424,6 +431,10 @@ struct Run {
     events: Vec<String>,
     /// The loop's lock as the loop's first sleep saw it.
     lock: Option<String>,
+    /// Whether the loop's stop file was there at one of its sleeps.
+    stop_file: bool,
+    /// The adopted processes the loop handed over for its second Ctrl-C.
+    handed: Vec<Process>,
 }
 
 impl Run {
@@ -471,11 +482,16 @@ fn run_loop(
     }
     let lock = RefCell::new(None);
     let lock_file = lock_path(&f.base());
+    let stop_file = std::cell::Cell::new(false);
+    let stop_path = task_loop::stop_path(&f.base());
     let env = Env {
         now: &|| clock.load(Ordering::SeqCst),
         sleep: &|d: Duration| {
             if lock.borrow().is_none() {
                 *lock.borrow_mut() = fs::read_to_string(&lock_file).ok();
+            }
+            if stop_path.exists() {
+                stop_file.set(true);
             }
             clock.fetch_add(d.as_secs(), Ordering::SeqCst);
         },
@@ -505,6 +521,8 @@ fn run_loop(
         out: String::from_utf8(out).unwrap() + &String::from_utf8(warn).unwrap(),
         events,
         lock: lock.into_inner(),
+        stop_file: stop_file.get(),
+        handed: play.handed.take(),
     }
 }
 
@@ -888,6 +906,119 @@ fn a_stop_while_an_adopted_child_runs_starts_nothing_and_the_loop_exits_after_it
     assert!(run.starts().is_empty(), "{:?}\n{}", run.events, run.out);
     assert_eq!(run.events, ["end 3 adopted", "finish 3"], "{}", run.out);
     assert!(run.out.contains("stopped on request"), "{}", run.out);
+}
+
+// --- review M-3: Ctrl-C reaches an adopted child as any child ---
+
+#[test]
+fn the_loop_hands_each_adopted_process_over_for_its_second_ctrl_c() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        adoptable(&f.base(), 3, Location::Cloud, CHILD);
+        adoptable(&f.base(), 4, Location::Local, CHILD_2);
+        let gh = github(&[]);
+
+        let run = run_loop(
+            &f,
+            &gh,
+            &[(CHILD, 3, 10, Act::Ready), (CHILD_2, 4, 10, Act::Ready)],
+            &[],
+            &never,
+        );
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert_eq!(
+            run.handed,
+            [Process::new(CHILD, 0), Process::new(CHILD_2, 0)],
+            "{cloud_slots:?}"
+        );
+    }
+}
+
+#[test]
+fn a_first_ctrl_c_reaches_an_adopted_childs_slot_wait_through_the_stop_file() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        adoptable(&f.base(), 3, Location::Cloud, CHILD);
+        let gh = github(&[]);
+
+        let run = run_loop(&f, &gh, &[(CHILD, 3, 60, Act::Ready)], &[], &|| true);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert!(run.stop_file, "{cloud_slots:?}\n{}", run.out);
+        assert!(!task_loop::stop_path(&f.base()).exists());
+    }
+}
+
+/// A process that runs for a minute, and its identity as the system sees it.
+fn long_process() -> (std::process::Child, Process) {
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = std::process::Command::new("ping");
+        c.args(["-n", "60", "127.0.0.1"]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut c = std::process::Command::new("sleep");
+        c.arg("60");
+        c
+    };
+    let child = command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let started = record::SystemProbe.start_time(pid).expect("its start time");
+    (child, Process::new(pid, started))
+}
+
+fn exits_within(child: &mut std::process::Child, limit: Duration) -> bool {
+    let from = std::time::Instant::now();
+    while from.elapsed() < limit {
+        if child.try_wait().unwrap().is_some() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+#[test]
+fn the_second_ctrl_c_stop_ends_an_adopted_process() {
+    use sbxm::commands::task_loop::child::{ChildSpawner, Spawner};
+    let (mut child, process) = long_process();
+    let spawner = ChildSpawner::new(PathBuf::from("unused"));
+
+    spawner.adopt(&process);
+    spawner.stop();
+
+    let ended = exits_within(&mut child, Duration::from_secs(20));
+    if !ended {
+        let _ = child.kill();
+    }
+    assert!(ended, "the adopted process still runs");
+}
+
+#[test]
+fn the_second_ctrl_c_stop_never_ends_a_reused_pid() {
+    use sbxm::commands::task_loop::child::{ChildSpawner, Spawner};
+    let (mut child, process) = long_process();
+    let spawner = ChildSpawner::new(PathBuf::from("unused"));
+    // The recorded process started 5 s earlier: the pid now names another one.
+    let mut recorded = process.clone();
+    recorded.started_at = sbxm::run::results::format_timestamp(
+        sbxm::run::results::parse_timestamp(&process.started_at).unwrap() - 5,
+    );
+
+    spawner.adopt(&recorded);
+    spawner.stop();
+
+    let ended = exits_within(&mut child, Duration::from_secs(1));
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(!ended, "a process that is not the adopted one was ended");
 }
 
 // --- boundary case 9: `cloud_slots` unset ---

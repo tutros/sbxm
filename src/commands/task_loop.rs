@@ -265,6 +265,12 @@ pub trait Steps {
     fn finish_spec(&self, spec: &Path, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         bail!("no finish of {} here", spec.display())
     }
+    /// Takes in `process`, a child of a dead loop the loop adopted (issue 643), so the loop's
+    /// second Ctrl-C ends it with the children it started. [`TaskSteps`] hands it to its
+    /// spawner; a `Steps` that only plays phases needs no other.
+    fn adopted(&self, process: &Process) {
+        let _ = process;
+    }
     /// The free-disk check of `sbx`'s sandbox drive: an error while it is under `min_free_disk`.
     fn room(&self) -> Result<()>;
     /// [`Self::room`] for a step that runs in `location` (`None`: as `[sandbox] location` says):
@@ -4129,6 +4135,9 @@ fn run_loop(
     let result = lp.cut_off(dead.as_ref(), out, warn).and_then(|due| {
         // The children that outlived the dead loop, adopted (issue 643).
         let adopted = lp.adopt(dead.as_ref(), out)?;
+        for a in &adopted {
+            lp.steps.adopted(&a.process);
+        }
         let named = adopted.iter().map(|a| queue::AdoptedChild {
             issue: a.issue,
             owner: a.owner.clone(),
@@ -5112,6 +5121,10 @@ impl Started for ChildPhase<'_> {
 }
 
 impl Steps for TaskSteps<'_> {
+    fn adopted(&self, process: &Process) {
+        self.spawner.adopt(process);
+    }
+
     fn run(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
         self.run_at(issue, None, out, warn)
     }

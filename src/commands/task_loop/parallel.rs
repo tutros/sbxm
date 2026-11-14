@@ -192,6 +192,8 @@ impl<'a> Loop<'a> {
             dir: self.task_dir(a.issue),
             elsewhere: crate::task::outcome::loop_file(&self.base_dir, &id),
             label: format!("[{id} {}]", a.slot.as_str()),
+            stop_asked: self.env.stop_requested,
+            stop_file: super::stop_path(&self.base_dir),
         })
     }
 
