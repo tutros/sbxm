@@ -56,7 +56,7 @@ use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
 use crate::task::{
     findings, finish, location, lock, loop_log, medium, next, pipeline, pr_fix, real_check, resume,
-    trial, window,
+    select, trial, window,
 };
 
 mod check;
@@ -798,9 +798,12 @@ struct Loop<'a> {
     default_location: Location,
     /// Whether the loop waits for its running children to end before it stops (issue 615).
     draining: bool,
-    /// The issue of a running child that waits out a usage limit: no step of the loop's own
-    /// starts a task meanwhile (issue 615, answer 4).
-    usage_hold: Option<u32>,
+    /// The running children that wait out a usage limit: no step of the loop's own that would use
+    /// a provider one holds starts meanwhile (317(10)).
+    usage_holds: Vec<parallel::Hold>,
+    /// `sbxm-task.toml` as the loop read it: the worker and reviewer harnesses whose providers a
+    /// step uses (317(10)).
+    roles: TaskConfig,
     /// The job children running (issue 633): resolves, log-fixes and queued jobs.
     jobs: Vec<job_children::JobChild<'a>>,
     /// The queued `run` jobs taken in this pass, started as task children before any new issue
@@ -1447,6 +1450,18 @@ impl Loop<'_> {
                 });
                 continue;
             }
+            // A Related partner with a task (decision 317(9)): it waits until that task's record
+            // is gone, as for a dependency, rather than being refused for the run.
+            let related = self.related_tasks(open, number)?;
+            if !related.is_empty() {
+                let reason = related_reason(&related);
+                self.say_once(out, format!("skipped #{number}{title}: {reason}"))?;
+                waiting.push(Skipped {
+                    issue: number,
+                    reason,
+                });
+                continue;
+            }
             tried.insert(number);
             let problems =
                 pipeline::preflight_issues(self.config_dir, &self.repo, self.github, &[number])?;
@@ -1473,6 +1488,18 @@ impl Loop<'_> {
 
     fn unmerged_dependencies(&self, open: &[Issue], body: &str) -> Vec<String> {
         unmerged_dependencies(self.github, &self.repo, open, body)
+    }
+
+    /// The issues with a task that issue `number` is related to: a task record, or a running
+    /// child whose record may not be written yet.
+    fn related_tasks(&self, open: &[Issue], number: u32) -> Result<Vec<u32>> {
+        let mut related = pipeline::related_tasks_in(&self.base_dir, open, number)?;
+        for n in select::related_among(open, number, &self.running_issues) {
+            if !related.contains(&n) {
+                related.push(n);
+            }
+        }
+        Ok(related)
     }
 
     /// One task, to its PR or its parking (decision 245(d)). `label`: its issue has the loop's
@@ -2248,7 +2275,7 @@ impl Loop<'_> {
             }
             // A resolve whose slot a child holds, or that a child's usage limit holds back, waits
             // for a later pass (issue 615): the loop never waits while it supervises children.
-            if let Some(waits) = self.wait_reason(self.fix_slot(number), true) {
+            if let Some(waits) = self.wait_reason(self.fix_slot(number), &self.task_providers()) {
                 let line = format!(
                     "{pr_named}: its resolve waits for {waits}; tried again at a later pass",
                     pr_named = self.pr_named(number)
@@ -3056,7 +3083,9 @@ impl Loop<'_> {
                 } else if self.pr_busy(number) {
                     // One child per PR at a time (issue 633).
                     Some("the job running on it".to_owned())
-                } else if let Some(waits) = self.wait_reason(self.fix_slot(number), true) {
+                } else if let Some(waits) =
+                    self.wait_reason(self.fix_slot(number), &self.task_providers())
+                {
                     // A child holds its slot or its usage limit holds it back (issue 615): a
                     // later pass, never a wait.
                     Some(waits)
@@ -3592,6 +3621,12 @@ fn waiting_reason(unmerged: &[String]) -> String {
     format!("depends on {}, not merged", unmerged.join(", "))
 }
 
+/// Why an issue related to issues with a task waits (decision 317(9)).
+fn related_reason(related: &[u32]) -> String {
+    let list: Vec<String> = related.iter().map(|n| format!("#{n} (related)")).collect();
+    format!("waits for {}", list.join(", "))
+}
+
 /// Why an issue `task run` would refuse before any write is passed over.
 fn refused_reason(reason: &str) -> String {
     format!("refused before any write: {reason}")
@@ -3811,6 +3846,7 @@ fn run_loop(
     }
     let task_config = TaskConfig::load(&opts.repo_root)?;
     let default_location = pipeline::choose_location(None, &task_config);
+    let roles = task_config.clone();
     let settings = task_config.task_loop;
     let global = GlobalConfig::load(config_dir)?;
     // Several children at once only with `cloud_slots` set (decision 321(5)); the local ones as
@@ -3915,7 +3951,8 @@ fn run_loop(
         children: Vec::new(),
         default_location,
         draining: false,
-        usage_hold: None,
+        usage_holds: Vec::new(),
+        roles,
         jobs: Vec::new(),
         run_jobs: Vec::new(),
         running_issues: Vec::new(),

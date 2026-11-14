@@ -1120,6 +1120,18 @@ pub fn preflight_issues_in(
     Ok(problems)
 }
 
+/// The issues with a task record under `base_dir` that issue `number` is related to (decision
+/// 317(9)): `task loop` waits for each record to be gone instead of refusing `number`, which
+/// [`preflight_issues_in`] does.
+pub fn related_tasks_in(base_dir: &Path, open: &[Issue], number: u32) -> Result<Vec<u32>> {
+    let taken: Vec<u32> = record::load_all(base_dir)?
+        .into_iter()
+        .filter(|r| r.kind == Kind::Issue)
+        .map(|r| r.number)
+        .collect();
+    Ok(select::related_among(open, number, &taken))
+}
+
 /// Spec §5.1 steps 1 and 2: checks, then the task's folders, `repo.git`, the worker's clone,
 /// `issue.md` and the prompt, the sandbox and the first record. Here; [`prepare_at`] takes the
 /// location.
