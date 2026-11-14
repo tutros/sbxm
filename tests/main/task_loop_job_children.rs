@@ -172,10 +172,14 @@ mod commands {
     }
 
     #[test]
-    fn a_review_runs_as_a_task_review_child() {
+    fn a_review_runs_as_a_task_review_child_with_force() {
         let (args, out, ended) = start(&JobStep::Review { pr: 150 }, Location::Local);
 
-        assert_eq!(args, ["task", "review", "--pr", "150", "--repo", "o/r"]);
+        // Issue 649: a queued review reviews an already-reviewed head too.
+        assert_eq!(
+            args,
+            ["task", "review", "--pr", "150", "--force", "--repo", "o/r"]
+        );
         assert!(out.contains("[pr-150 local] task review started"), "{out}");
         assert_eq!(ended, ready());
     }
