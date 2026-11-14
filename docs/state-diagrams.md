@@ -135,7 +135,7 @@ flowchart TD
   RVW --> MF{must-fix?}
   MF -- 0, narrow --> RVW
   MF -- 0, full --> RDY([ready ok])
-  MF -- >0, Repeat of --> ST1([ready, stopped: repeat-finding])
+  MF -- >0, second Repeat of --> ST1([ready, stopped: repeat-finding])
   MF -- >0, budget used --> ST2([ready, stopped: rounds-exhausted])
   MF -- >0, rounds left --> FX2[fix round] --> GT
 ```

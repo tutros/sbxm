@@ -3999,8 +3999,11 @@ pub(super) fn review_rounds(
         // change anything (issue 161). `round` is already in memory, not freshly read from
         // files, so moving one would not free it.
         let next = review_round_after(prepared, round, false)?;
+        let input = fix_input(env, prepared, None)?;
         if repeat {
-            // Set before the fix round writes the record, so a resume can't tolerate a second.
+            // Spent only once the round can start (its input read, no ambiguous create in the
+            // way), and before it writes the record, so a resume can't tolerate a second.
+            super::resume::refuse_ambiguous(&prepared.record, "run a fix round")?;
             prepared.record.repeat_tolerated = true;
             (env.progress)(&format!(
                 "{}: review round {round} repeats a must-fix finding, tolerated once: one more \
@@ -4008,7 +4011,7 @@ pub(super) fn review_rounds(
                 prepared.record.id
             ));
         }
-        run_fix_round(env, prepared, None)?;
+        start_fix_round(env, prepared, &input)?;
         prepared.record.round += 1;
         report.fix_ran = true;
         if pass_gates(env, prepared, &mut report, "after-fix")? {

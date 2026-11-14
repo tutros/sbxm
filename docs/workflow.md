@@ -161,7 +161,10 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     (one that could not run at all stops the task without spending any). Rounds
     after the first review only the commits made since the last one, and one more review of everything confirms a
     clean one before the task is `ready`. If the budget runs out with findings still open, the task is still
-    `ready`, with `stopped` set to `rounds-exhausted` in `task.json`, and `task finish` opens its PR as a draft whose
+    `ready`, with `stopped` set to `rounds-exhausted` in `task.json`. A must-fix finding that validly repeats an
+    earlier one (`Repeat of:`) is tolerated once per task with one more fix round while the budget has one (issue
+    647); the second such repeat stops the task with `stopped` set to `repeat-finding`, rounds left or not. Either
+    way the task is `ready`, and `task finish` opens its PR as a draft whose
     body lists the reason and the must-fix findings left (issue 120); a clean task gets a normal PR. A task that
     continues an open PR puts the same list in its comment on that PR instead (it can't make the PR a draft).
   - **The worker's hand-backs are on the PR (decision 283):** the PR description `task finish` opens, a draft's too,
