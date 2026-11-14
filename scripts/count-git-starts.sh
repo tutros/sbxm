@@ -1,5 +1,6 @@
 #!/bin/sh
-# Counts the `git` process starts of one test file (issue #444). Run by hand, never in CI:
+# Counts the `git` process starts of one test file, a module of tests/main (issues #444, #473).
+# Run by hand, never in CI:
 #   scripts/count-git-starts.sh task_merged        (or: just count-git-starts task_merged)
 #   scripts/count-git-starts.sh task_merged 395    (exits 1 when sbxm's own starts are over 395)
 # A counting `git` wrapper goes first on PATH and logs one line per start, then runs the real git.
@@ -30,9 +31,9 @@ COUNTLOG_GITSTARTS="$work/starts.log"
 export COUNTLOG_GITSTARTS
 : > "$COUNTLOG_GITSTARTS"
 # Build first with the real git, so only the test run is counted.
-cargo test --test "$test_name" --no-run
+cargo test --test main --no-run
 run_status=0
-PATH="$work/bin:$PATH" cargo test --test "$test_name" >/dev/null 2>&1 || run_status=$?
+PATH="$work/bin:$PATH" cargo test --test main "$test_name::" >/dev/null 2>&1 || run_status=$?
 if [ "$run_status" -ne 0 ]; then echo "the test run failed (exit $run_status); the counts below are partial" >&2; fi
 echo "git starts by caller:"
 awk '{n[$1]++} END {for (k in n) printf "%6d %s\n", n[k], k}' "$COUNTLOG_GITSTARTS" | sort -k2

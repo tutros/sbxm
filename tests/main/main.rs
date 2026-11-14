@@ -1,5 +1,7 @@
-//! The integration tests, built as one test binary (issue 473): one module per test file.
-//! Run one file's tests with `cargo test --test main <file>::`.
+//! The integration tests, built as one test binary (issue 473): one module per test file, so a
+//! test's name starts with its file's (`cargo test --test main <file>::` runs one file's tests).
+//! The files directly in `tests/` are binaries of their own: the real-`sbx` tests, and the tests
+//! that set state for their whole process (`test_layout` lists them).
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -274,6 +276,7 @@ mod template_build;
 mod template_kit;
 mod template_ls_rm;
 mod test_gate;
+mod test_layout;
 mod titles;
 mod trailer_warning;
 mod warm_home_target;

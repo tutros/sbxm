@@ -1,7 +1,7 @@
 //! Issue #632: a documentation-only change runs a smaller check in the worker. The worker prompt
 //! and the `sdlc-implementation` skill say the same thing: every changed file is a `.md` file and
 //! none is under `prompts/` (those are compiled into the binary), so the worker runs
-//! `cargo fmt --check` and the `tests/docs_*.rs` tests; any other change runs the full gate list.
+//! `cargo fmt --check` and the `tests/main/docs_*.rs` tests; any other change runs the full gate list.
 
 use std::fs;
 use std::path::Path;
@@ -9,7 +9,7 @@ use std::path::Path;
 use sbxm::task::config::Prompts;
 use sbxm::task::prompts::{self, Role};
 
-const DOCS_TESTS: &str = "cargo test --test 'docs_*'";
+const DOCS_TESTS: &str = "cargo test --test main docs_";
 
 fn worker_prompt() -> String {
     let template = prompts::template(Role::Worker, &Prompts::default()).unwrap();

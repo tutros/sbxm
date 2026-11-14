@@ -387,7 +387,7 @@ fn render_never_opens_a_model_file() {
 
 // ---- the real model (decision 166): needs model files on disk, no network ----
 
-/// `cargo test --test eval_cosine -- --ignored`, with `SBXM_TEST_MODEL_DIR`
+/// `cargo test --test main eval_cosine:: -- --ignored`, with `SBXM_TEST_MODEL_DIR`
 /// pointing at a folder holding the five files named in
 /// `cosine::MODEL_FILES` (fetched by hand from `cosine::MODEL_URL_PREFIX`).
 #[test]
