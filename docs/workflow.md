@@ -149,8 +149,8 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     line naming the reviewed commit), a draft's failing review included, when that review covered the PR's head.
     `task review --pr N` then refuses that head before anything is written (`already reviewed at <commit>`;
     `--force` reviews it anyway), but only when the review's `sbxm/review` status is on it: a head with none is
-    reviewed again with no flag, so a queued `review` job runs too, and a status that can't be read is refused
-    and says so (issue 586); a later commit on the PR (a hand fix, a rebase) is reviewed as usual. Only the
+    reviewed again with no flag, and a status that can't be read is refused and says so (issue 586); a queued
+    `review` job passes `--force`, so it reviews that head too (issue 649); a later commit on the PR (a hand fix, a rebase) is reviewed as usual. Only the
     issue task's own `task.json` on this machine decides, never a comment on GitHub; with no task folder recording
     the PR, the review runs as before. A task that continued an open PR and spec tasks (which open no PR) are
     unchanged.

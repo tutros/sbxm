@@ -228,8 +228,8 @@ pub trait Steps {
     /// `task rm --merged --yes`: removes the tasks whose PRs GitHub merged, archiving their text
     /// records first (decisions 195, 293).
     fn rm_merged(&self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
-    /// `task review --pr N`, for a queued `review` job (issue 525). A `Steps` that never runs
-    /// one needs no other.
+    /// `task review --pr N --force`, for a queued `review` job (issues 525, 649). A
+    /// `Steps` that never runs one needs no other.
     fn review_pr(&self, pr: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         bail!("no review of PR #{pr} here")
     }
@@ -4686,8 +4686,11 @@ impl TaskSteps<'_> {
                 (id, "task fix", args, false)
             }
             JobStep::Review { pr } => {
+                // A queued review is a deliberate request: it reviews a head already reviewed too
+                // (issue 649).
                 let mut args = words(&["task", "review", "--pr"]);
                 args.push(pr.to_string());
+                args.push("--force".to_owned());
                 args.extend(repo);
                 (format!("pr-{pr}"), "task review", args, false)
             }
@@ -5063,7 +5066,8 @@ impl Steps for TaskSteps<'_> {
                     time_limit: None,
                     profile: None,
                     resolved_spec_id: None,
-                    force: false,
+                    // A queued review reviews a head already reviewed too (issue 649).
+                    force: true,
                     disk: self.disk.clone(),
                     location: None,
                     identity: None,

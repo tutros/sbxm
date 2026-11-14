@@ -947,7 +947,8 @@ is `sbxm status`) and no remove (delete the file). One job per `*.json` file, in
 {"kind": "template", "profile": "sbxm-dev", "harness": "claude", "warm": true}
 ```
 
-`review` runs `task review --pr N` and `fix` runs `task fix --pr N` (with `check_run`, `--check-run ID`), both only
+`review` runs `task review --pr N --force`, so it reviews the PR's head even when that commit is already reviewed
+(issue 649; a closed, merged or fork PR is still refused as such), and `fix` runs `task fix --pr N` (with `check_run`, `--check-run ID`), both only
 for a PR sbxm opened (a task record of the repo, live or archived, names it as its PR); a merged or closed PR is
 skipped. `run` takes an issue as the loop takes one it picked (`task run`, finish, auto-merge, findings filed),
 refused for any reason `task loop --check` would give. `rm-merged` runs `task rm --merged --yes`. `spec` (issue 524)
