@@ -415,6 +415,11 @@ fn rows_in(text: &str, issue: u32) -> (usize, bool) {
     (rows.len(), logged)
 }
 
+/// Whether the log `text` has a row for issue `issue`.
+pub fn has_row(text: &str, issue: u32) -> bool {
+    rows_in(text, issue).1
+}
+
 /// Appends `row` to the log at `path` (decision 245(h)), with the header naming `repo` first when
 /// the file is new. Returns `false`, writing nothing, when the issue already has a row there: a
 /// loop run again after being killed doesn't log a task twice.

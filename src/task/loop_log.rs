@@ -232,6 +232,23 @@ fn mark_skipped(log: &Path) -> Result<()> {
 
 /// The earlier logs under `base_dir` without a marker, oldest first, `own` left out.
 fn unmarked_logs(base_dir: &Path, own: &Path) -> Result<Vec<PathBuf>> {
+    let mut logs = logs(base_dir, own)?;
+    logs.retain(|l| fs::symlink_metadata(marker(l)).is_err());
+    Ok(logs)
+}
+
+/// The logs under `base_dir` of loops that started at `started_at` or later, oldest first, `own`
+/// left out, posted or not: one loop runs at a time, so these are the logs of the loop that
+/// started then, and of none before it (issue 657).
+pub fn since(base_dir: &Path, started_at: u64, own: &Path) -> Result<Vec<PathBuf>> {
+    let first = path(base_dir, started_at);
+    let mut logs = logs(base_dir, own)?;
+    logs.retain(|l| l.file_name() >= first.file_name());
+    Ok(logs)
+}
+
+/// Every log under `base_dir`, oldest first, `own` left out.
+fn logs(base_dir: &Path, own: &Path) -> Result<Vec<PathBuf>> {
     let dir = base_dir.join(".sbxm").join("loop-logs");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -249,7 +266,7 @@ fn unmarked_logs(base_dir: &Path, own: &Path) -> Result<Vec<PathBuf>> {
     }
     // `<date>-<HHMMSS>` names sort by start.
     logs.sort();
-    logs.retain(|l| l.as_path() != own && fs::symlink_metadata(marker(l)).is_err());
+    logs.retain(|l| l.as_path() != own);
     Ok(logs)
 }
 

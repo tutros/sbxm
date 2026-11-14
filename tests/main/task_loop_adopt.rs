@@ -21,7 +21,7 @@ use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState};
 use sbxm::status::looping;
 use sbxm::task::outcome::{self, Kind, Outcome};
-use sbxm::task::queue::{AdoptedChild, LockFile, lock_path};
+use sbxm::task::queue::{self, AdoptedChild, LockFile, lock_path};
 use sbxm::task::record::{
     self, NewTask, Process, ProcessProbe, Record, ReviewResult, Stage, Status,
 };
@@ -1088,6 +1088,297 @@ fn a_clean_start_adopts_nothing() {
     assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
     assert!(run.events.is_empty(), "{:?}\n{}", run.events, run.out);
     assert!(!run.out.contains("adopted"), "{}", run.out);
+}
+
+// --- issue 657: a dead loop's child that ended with its outcome before the takeover ---
+
+/// Issue `issue`'s task as a child of the loop `owner` left it when it ended after `act` with
+/// `end` as its `outcome.json` (none: no file), before the new loop started: its process gone.
+fn ended_under(base: &Path, issue: u32, act: Act, end: Option<Outcome>, owner: Process) {
+    write_record(base, issue, act, Some(Location::Cloud));
+    let dir = record::task_dir(base, &format!("issue-{issue}"));
+    let mut rec = read(base, issue);
+    rec.process = Some(Process::new(GONE_CHILD, 0));
+    rec.loop_owner = Some(owner);
+    record::write(&dir, &rec).unwrap();
+    if let Some(end) = end {
+        outcome::write(&dir, &end).unwrap();
+    }
+}
+
+/// Issue `issue`'s task, a child of [`DEAD_LOOP`] that ended at `ready` with an `ok` outcome.
+fn ended_ready(base: &Path, issue: u32) {
+    ended_under(
+        base,
+        issue,
+        Act::Ready,
+        Some(Outcome::new(Kind::Ready, None, "")),
+        Process::new(DEAD_LOOP, 0),
+    );
+}
+
+#[test]
+fn a_dead_loops_task_that_ended_ready_before_the_takeover_is_finished_with_one_row() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        ended_ready(&f.base(), 3);
+        let gh = github(&[]);
+
+        let run = run_loop(&f, &gh, &[], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert!(run.starts().is_empty(), "{:?}\n{}", run.events, run.out);
+        assert_eq!(run.events, ["finish 3"], "{}", run.out);
+        let rec = read(&f.base(), 3);
+        assert_eq!(rec.stage, Stage::Finished);
+        assert!(rec.pr.is_some());
+        let rows = rows(&f, 3);
+        assert_eq!(rows.len(), 1, "{}", f.log_text());
+        // Its own start, 09:00:00, not the new loop's.
+        assert!(rows[0].contains("| cloud | 09:00:00 |"), "{}", rows[0]);
+        assert!(rows[0].contains("PR #103, clean"), "{}", rows[0]);
+        // Its process is gone: nothing to hand over for a second Ctrl-C.
+        assert!(run.handed.is_empty(), "{:?}", run.handed);
+    }
+}
+
+#[test]
+fn a_dead_loops_task_that_ended_ready_at_low_risk_gets_its_pr_armed() {
+    let f = fixture(Some(2), true);
+    ended_ready(&f.base(), 3);
+    let dir = record::task_dir(&f.base(), "issue-3");
+    let mut rec = read(&f.base(), 3);
+    let review = rec.review.as_mut().unwrap();
+    review.risk = sbxm::task::risk::Level::Low;
+    review.commit = Some(HEAD.into());
+    record::write(&dir, &rec).unwrap();
+    let gh = FakeGitHub::default()
+        .with_user("me")
+        .with_default_branch("main")
+        .with_branch_head("main", HEAD)
+        .with_pr(pr(103))
+        .with_open_issues(Vec::new());
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    let rows = rows(&f, 3);
+    assert_eq!(rows.len(), 1, "{}", f.log_text());
+    assert!(rows[0].contains("auto-merge armed"), "{}", rows[0]);
+}
+
+#[test]
+fn two_dead_loops_tasks_that_ended_ready_are_both_finished_with_a_row_each() {
+    let f = fixture(Some(2), true);
+    ended_ready(&f.base(), 3);
+    ended_ready(&f.base(), 4);
+    let gh = github(&[]);
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    assert_eq!(run.events, ["finish 3", "finish 4"], "{}", run.out);
+    assert_eq!(rows(&f, 3).len(), 1, "{}", f.log_text());
+    assert_eq!(rows(&f, 4).len(), 1, "{}", f.log_text());
+}
+
+#[test]
+fn a_dead_loops_task_that_ended_ready_with_a_work_stop_gets_its_draft_pr() {
+    let f = fixture(Some(2), true);
+    ended_ready(&f.base(), 3);
+    let dir = record::task_dir(&f.base(), "issue-3");
+    let mut rec = read(&f.base(), 3);
+    rec.stopped = Some(record::Stopped::RepeatFinding);
+    rec.review.as_mut().unwrap().must_fix = 1;
+    record::write(&dir, &rec).unwrap();
+    let gh = github(&[]);
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    assert_eq!(run.events, ["finish 3"], "{}", run.out);
+    let rows = rows(&f, 3);
+    assert_eq!(rows.len(), 1, "{}", f.log_text());
+    assert!(
+        rows[0].contains("draft PR #103, work stop: repeat-finding, must-fix 1"),
+        "{}",
+        rows[0]
+    );
+}
+
+#[test]
+fn a_dead_loops_task_that_ended_failed_is_resumed_once_as_its_own_childs_would_be() {
+    let f = fixture(Some(2), true);
+    ended_under(
+        &f.base(),
+        3,
+        Act::Fail,
+        Some(Outcome::new(Kind::Failed, None, "resume failed")),
+        Process::new(DEAD_LOOP, 0),
+    );
+    let gh = github(&[]);
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    assert_eq!(run.starts(), ["start 3 resume cloud"], "{}", run.out);
+    run.at("finish 3");
+    assert_eq!(rows(&f, 3).len(), 1, "{}", f.log_text());
+}
+
+#[test]
+fn a_dead_loops_task_that_ended_with_no_outcome_is_cut_off_and_resumed_once_not_finished() {
+    let f = fixture(Some(2), true);
+    ended_under(&f.base(), 3, Act::Crash, None, Process::new(DEAD_LOOP, 0));
+    let dir = record::task_dir(&f.base(), "issue-3");
+    let mut rec = read(&f.base(), 3);
+    rec.status = Status::Running;
+    record::write(&dir, &rec).unwrap();
+    let gh = github(&[]);
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    assert!(run.out.contains("cut off at working"), "{}", run.out);
+    assert_eq!(run.starts(), ["start 3 resume cloud"], "{}", run.out);
+    assert!(run.at("start 3 resume cloud") < run.at("finish 3"));
+}
+
+#[test]
+fn a_task_that_ended_ready_under_a_command_run_by_hand_is_left_alone() {
+    let f = fixture(Some(2), true);
+    ended_under(
+        &f.base(),
+        3,
+        Act::Ready,
+        Some(Outcome::new(Kind::Ready, None, "")),
+        Process::new(HAND, 0),
+    );
+    let dir = record::task_dir(&f.base(), "issue-3");
+    let mut rec = read(&f.base(), 3);
+    rec.loop_owner = None;
+    record::write(&dir, &rec).unwrap();
+    let gh = github(&[]);
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    assert!(run.events.is_empty(), "{:?}\n{}", run.events, run.out);
+    assert!(rows(&f, 3).is_empty(), "{}", f.log_text());
+}
+
+#[test]
+fn a_dead_loops_task_finished_by_hand_before_the_start_is_not_finished_again() {
+    let f = fixture(Some(2), true);
+    ended_ready(&f.base(), 3);
+    let dir = record::task_dir(&f.base(), "issue-3");
+    let mut rec = read(&f.base(), 3);
+    rec.stage = Stage::Finished;
+    rec.pr = Some(format!("https://github.com/{REPO}/pull/103"));
+    record::write(&dir, &rec).unwrap();
+    let gh = github(&[]);
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    assert!(run.events.is_empty(), "{:?}\n{}", run.events, run.out);
+    assert!(rows(&f, 3).is_empty(), "{}", f.log_text());
+}
+
+#[test]
+fn a_clean_start_finishes_no_task_that_ended_ready() {
+    let f = fixture(Some(2), false);
+    ended_ready(&f.base(), 3);
+    let gh = github(&[]);
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    assert!(run.events.is_empty(), "{:?}\n{}", run.events, run.out);
+    assert!(rows(&f, 3).is_empty(), "{}", f.log_text());
+}
+
+#[test]
+fn a_dead_loops_task_of_another_repo_that_ended_ready_is_left_alone() {
+    let f = fixture(Some(2), true);
+    ended_ready(&f.base(), 3);
+    let dir = record::task_dir(&f.base(), "issue-3");
+    let mut rec = read(&f.base(), 3);
+    rec.repo = "o/other".into();
+    record::write(&dir, &rec).unwrap();
+    let gh = github(&[]);
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    assert!(run.events.is_empty(), "{:?}\n{}", run.events, run.out);
+    assert_eq!(read(&f.base(), 3).stage, Stage::Ready);
+}
+
+/// A log of a loop that started at `at`, with a row for issue `issue`.
+fn earlier_log(f: &Fixture, at: u64, issue: u32, outcome: &str) {
+    let row = queue::Row {
+        issue,
+        title: format!("Fix {issue}"),
+        size: None,
+        slot: Some(Location::Cloud),
+        started: TASK_START,
+        ready: None,
+        worker_s: None,
+        reviewer_s: None,
+        rounds: None,
+        must_fix: None,
+        outcome: outcome.into(),
+        stops: Vec::new(),
+        idle_before: None,
+    };
+    let log = sbxm::task::loop_log::path(&f.base(), at);
+    assert!(queue::append_row(&log, REPO, &row).unwrap());
+}
+
+#[test]
+fn a_dead_loops_task_that_loop_parked_with_a_row_is_left_parked() {
+    let f = fixture(Some(2), true);
+    ended_under(
+        &f.base(),
+        3,
+        Act::Fail,
+        Some(Outcome::new(Kind::Failed, None, "resume failed")),
+        Process::new(DEAD_LOOP, 0),
+    );
+    earlier_log(&f, TASK_START + 60, 3, "parked at working");
+    let gh = github(&[]);
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    assert!(run.events.is_empty(), "{:?}\n{}", run.events, run.out);
+    assert!(rows(&f, 3).is_empty(), "{}", f.log_text());
+}
+
+#[test]
+fn a_row_in_the_log_of_a_loop_from_before_the_dead_one_does_not_count() {
+    // The dead loop started at 08:30; a loop before it parked the task once, at 08:00.
+    let dead = Process::new(DEAD_LOOP, TASK_START - 1_800);
+    let f = fixture(Some(2), false);
+    let lock = lock_path(&f.base());
+    fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    fs::write(&lock, serde_json::to_string(&dead).unwrap()).unwrap();
+    ended_under(
+        &f.base(),
+        3,
+        Act::Ready,
+        Some(Outcome::new(Kind::Ready, None, "")),
+        dead,
+    );
+    earlier_log(&f, TASK_START - 3_600, 3, "parked at working");
+    let gh = github(&[]);
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    assert_eq!(run.events, ["finish 3"], "{}", run.out);
+    assert_eq!(rows(&f, 3).len(), 1, "{}", f.log_text());
 }
 
 // --- `sbxm status` lists an adopted child as the loop's ---
