@@ -179,15 +179,6 @@ fn interrupted(base: &Path, rec: &Record, probe: &dyn ProcessProbe) -> bool {
     rec.is_interrupted(probe) && !lock::held_alive(&record::task_dir(base, &rec.id), probe)
 }
 
-/// Whether `rec` is the task of a child the lock's loop adopted (issue 643): an issue it names
-/// in [`LockFile::adopted`], still owned by the dead loop that started that child. A command run
-/// by hand that took the task since owns it, and alive, so it is not the loop's.
-fn adopted(file: &LockFile, rec: &Record, probe: &dyn ProcessProbe) -> bool {
-    file.adopted.contains(&rec.number)
-        && rec.id == format!("issue-{}", rec.number)
-        && rec.owner().is_some_and(|owner| !owner.alive(probe))
-}
-
 /// [`work`] for the whole lock file: with [`Work::listed`] for a loop started with `--issue`.
 pub fn work_for(base: &Path, file: &LockFile, probe: &dyn ProcessProbe) -> anyhow::Result<Work> {
     let lock = &file.process;
@@ -203,7 +194,7 @@ pub fn work_for(base: &Path, file: &LockFile, probe: &dyn ProcessProbe) -> anyho
         if rec.stage == Stage::Finished {
             finished.push(rec);
         } else if rec.status == Status::Running
-            && (rec.owner() == Some(lock) || adopted(file, rec, probe))
+            && (rec.owner() == Some(lock) || file.adopted.iter().any(|a| a.is(rec)))
             && !interrupted(base, rec, probe)
         {
             running.push(rec);

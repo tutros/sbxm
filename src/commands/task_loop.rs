@@ -503,11 +503,11 @@ impl LoopLock {
 
     /// Names the issues whose children this loop adopted (issue 643) in its lock, for `sbxm
     /// status`.
-    fn adopted(&mut self, issues: Vec<u32>) -> Result<()> {
-        if issues.is_empty() {
+    fn adopted(&mut self, children: Vec<queue::AdoptedChild>) -> Result<()> {
+        if children.is_empty() {
             return Ok(());
         }
-        self.file.adopted = issues;
+        self.file.adopted = children;
         self.rewrite()
     }
 
@@ -541,14 +541,15 @@ impl Drop for LoopLock {
 /// lock whose process is alive refuses the second loop; one whose process is gone is taken over.
 /// A loop started with `--issue` writes its list and its `--cap` into the lock too, for `sbxm
 /// status` (issue 477); a labeled-queue loop writes its process alone, as before.
-/// Returns the lock and, when it took over a lock whose process is gone, that dead loop's
-/// process (decision 310: the tasks it was running are resumed).
+/// Returns the lock and, when it took over a lock whose process is gone, that dead loop's lock
+/// (decision 310: the tasks it was running are resumed; issue 643: its live children, and the
+/// ones it adopted, are adopted).
 fn take_lock(
     base_dir: &Path,
     opts: &Options,
     probe: &dyn ProcessProbe,
     warn: &mut dyn Write,
-) -> Result<(LoopLock, Option<Process>)> {
+) -> Result<(LoopLock, Option<queue::LockFile>)> {
     let path = queue::lock_path(base_dir);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
@@ -587,18 +588,18 @@ fn take_lock(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
-        let held: Process = serde_json::from_str(&text).with_context(|| {
+        let held: queue::LockFile = serde_json::from_str(&text).with_context(|| {
             format!(
                 "cannot read the loop lock {}; if no `sbxm task loop` is running, delete it",
                 path.display()
             )
         })?;
-        if held.alive(probe) {
+        if held.process.alive(probe) {
             bail!(
                 "a `sbxm task loop` is already running (process {}, started {}); wait for it to \
                  stop, or stop it",
-                held.pid,
-                held.started_at
+                held.process.pid,
+                held.process.started_at
             );
         }
         // Removed only if it is still the dead loop's: a loop that took over meanwhile is live.
@@ -607,7 +608,7 @@ fn take_lock(
             writeln!(
                 warn,
                 "took over the lock of a loop that is no longer running (process {}, started {})",
-                held.pid, held.started_at
+                held.process.pid, held.process.started_at
             )?;
             dead = Some(held);
         }
@@ -669,6 +670,15 @@ struct Adopted {
     /// The failures in a row it had already: 1 when it is the one resume a loop took after a
     /// cut-off ([`RESUMED_HOOK`], decision 310), so a failure of it parks it.
     failures: u32,
+    /// The owner its record names: the loop that started it.
+    owner: Process,
+}
+
+/// Whether the dead loop whose lock this loop took over owns `rec`: the loop its child recorded,
+/// else its process (decision 322), or a child it had adopted from the loop before it, still that
+/// loop's (issue 643, review M-1).
+fn dead_owns(dead: &queue::LockFile, rec: &Record) -> bool {
+    rec.owner() == Some(&dead.process) || dead.adopted.iter().any(|a| a.is(rec))
 }
 
 /// What became of an adopted child that ended with no outcome.
@@ -1716,14 +1726,13 @@ impl Loop<'_> {
     /// The tasks a loop was running when it died (decision 310), to be continued once, as the
     /// loop's one resume after an environment stop: this repo's issue tasks not finished and
     /// interrupted as `task status` decides it, that are either owned by `dead`, the loop whose
-    /// lock this loop took over ([`Record::owner`]: the loop its child recorded, else its process,
-    /// decision 322), or still owed their resume from an earlier start ([`Owed`]). A newly found
+    /// lock this loop took over ([`dead_owns`]), or still owed their resume from an earlier start ([`Owed`]). A newly found
     /// one is marked as owed, under its lock, before anything else runs, so a loop that stops or
     /// fails before the resume leaves it to the next loop. One whose resume was taken already, and
     /// was cut off again, is parked with its log row instead.
     fn cut_off(
         &mut self,
-        dead: Option<&Process>,
+        dead: Option<&queue::LockFile>,
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<VecDeque<Held>> {
@@ -1742,8 +1751,9 @@ impl Loop<'_> {
                 && rec.pr.is_none()
                 && rec.is_interrupted(self.probe);
             let owed = Owed::of(&rec);
-            // Owned by `dead`: the loop its child recorded, else the process (decision 322).
-            let by_dead = dead.is_some() && rec.owner() == dead;
+            // Owned by `dead`: the loop its child recorded, else the process (decision 322), or a
+            // child `dead` had adopted (issue 643).
+            let by_dead = dead.is_some_and(|dead| dead_owns(dead, &rec));
             // Owed for the process still recorded: a command run by hand since then took it.
             let owed_here = matches!(&owed, Owed::Due(p) if rec.process.as_ref() == Some(p));
             if ours && (by_dead || owed_here) {
@@ -1817,11 +1827,15 @@ impl Loop<'_> {
     }
 
     /// The children that outlived `dead`, the loop whose lock this loop took over (issue 643):
-    /// this repo's issue tasks, not finished and with no PR, that `dead` owns ([`Record::owner`])
+    /// this repo's issue tasks, not finished and with no PR, that `dead` owns ([`dead_owns`])
     /// and whose recorded process is alive, by its identity (decision 322), not its bare pid. The
     /// loop adopts each as its own child: it holds its slot and counts toward [`PR_CAP`] while it
     /// runs, and the loop acts on its end. A task run by hand, or none taken over: nothing.
-    fn adopt(&mut self, dead: Option<&Process>, out: &mut dyn Write) -> Result<Vec<Adopted>> {
+    fn adopt(
+        &mut self,
+        dead: Option<&queue::LockFile>,
+        out: &mut dyn Write,
+    ) -> Result<Vec<Adopted>> {
         let Some(dead) = dead else {
             return Ok(Vec::new());
         };
@@ -1838,8 +1852,11 @@ impl Loop<'_> {
                 && rec.id == format!("issue-{}", rec.number)
                 && rec.stage != Stage::Finished
                 && rec.pr.is_none()
-                && rec.owner() == Some(dead);
+                && dead_owns(dead, &rec);
             let Some(process) = rec.process.clone().filter(|p| ours && p.alive(self.probe)) else {
+                continue;
+            };
+            let Some(owner) = rec.owner().cloned() else {
                 continue;
             };
             found.push(Adopted {
@@ -1851,6 +1868,7 @@ impl Loop<'_> {
                     .unwrap_or_else(|| self.now()),
                 slot: rec.location,
                 failures: u32::from(matches!(Owed::of(&rec), Owed::Taken)),
+                owner,
                 title: rec.title,
                 process,
             });
@@ -4111,7 +4129,11 @@ fn run_loop(
     let result = lp.cut_off(dead.as_ref(), out, warn).and_then(|due| {
         // The children that outlived the dead loop, adopted (issue 643).
         let adopted = lp.adopt(dead.as_ref(), out)?;
-        if let Err(e) = lock.adopted(adopted.iter().map(|a| a.issue).collect()) {
+        let named = adopted.iter().map(|a| queue::AdoptedChild {
+            issue: a.issue,
+            owner: a.owner.clone(),
+        });
+        if let Err(e) = lock.adopted(named.collect()) {
             lp.warn_once(
                 warn,
                 format!(

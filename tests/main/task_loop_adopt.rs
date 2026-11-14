@@ -21,7 +21,7 @@ use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState};
 use sbxm::status::looping;
 use sbxm::task::outcome::{self, Kind, Outcome};
-use sbxm::task::queue::{LockFile, lock_path};
+use sbxm::task::queue::{AdoptedChild, LockFile, lock_path};
 use sbxm::task::record::{
     self, NewTask, Process, ProcessProbe, Record, ReviewResult, Stage, Status,
 };
@@ -38,6 +38,10 @@ const TASK_START: u64 = START - 3_600;
 const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 /// The loop that died, whose lock the new loop takes over.
 const DEAD_LOOP: u32 = 77;
+/// A loop that adopted the dead loop's children and died too (review M-1).
+const SECOND_LOOP: u32 = 98;
+/// A child of the dead loop that died after its loop did.
+const GONE_CHILD: u32 = 87;
 /// The dead loop's children that outlived it.
 const CHILD: u32 = 88;
 const CHILD_2: u32 = 89;
@@ -70,7 +74,7 @@ struct Probe<'a> {
 impl ProcessProbe for Probe<'_> {
     fn start_time(&self, pid: u32) -> Option<u64> {
         let mut gone = self.gone.lock().unwrap();
-        if pid == DEAD_LOOP || gone.contains(&pid) {
+        if [DEAD_LOOP, SECOND_LOOP, GONE_CHILD].contains(&pid) || gone.contains(&pid) {
             return None;
         }
         if let Some(&(issue, at, act)) = self.ends.get(&pid)
@@ -706,6 +710,98 @@ fn an_adopted_first_run_that_fails_gets_its_one_resume() {
     }
 }
 
+// --- review M-1: a child adopted by a loop that died too ---
+
+/// The lock of [`SECOND_LOOP`], dead, which had adopted issue 3's child from [`DEAD_LOOP`].
+fn second_loop_died(f: &Fixture) {
+    let lock = LockFile {
+        process: Process::new(SECOND_LOOP, 0),
+        issues: Vec::new(),
+        cap: None,
+        progress: None,
+        adopted: vec![adopted_from_dead(3)],
+    };
+    fs::write(lock_path(&f.base()), serde_json::to_string(&lock).unwrap()).unwrap();
+}
+
+#[test]
+fn a_child_the_dead_loop_had_adopted_is_adopted_again_and_finished_once() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        second_loop_died(&f);
+        adoptable(&f.base(), 3, Location::Cloud, CHILD);
+        let gh = github(&[]);
+
+        let run = run_loop(&f, &gh, &[(CHILD, 3, 10, Act::Ready)], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert_eq!(
+            run.events,
+            ["end 3 adopted", "finish 3"],
+            "{cloud_slots:?}\n{}",
+            run.out
+        );
+        let rows = rows(&f, 3);
+        assert_eq!(rows.len(), 1, "{}", f.log_text());
+        assert!(rows[0].contains("| cloud | 09:00:00 |"), "{}", rows[0]);
+        // Named again in the new loop's lock, with its first owner.
+        let lock: LockFile = serde_json::from_str(run.lock.as_deref().expect("a lock")).unwrap();
+        assert_eq!(lock.adopted, [adopted_from_dead(3)]);
+    }
+}
+
+#[test]
+fn a_child_the_dead_loop_had_adopted_that_died_since_is_resumed_once() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        second_loop_died(&f);
+        running(
+            &f.base(),
+            3,
+            Location::Cloud,
+            Process::new(GONE_CHILD, 0),
+            Some(DEAD_LOOP),
+        );
+        let gh = github(&[]);
+
+        let run = run_loop(&f, &gh, &[], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert!(run.out.contains("resuming it once"), "{}", run.out);
+        run.at("finish 3");
+        assert_eq!(
+            read(&f.base(), 3).hooks[RESUMED_HOOK],
+            serde_json::json!(true)
+        );
+    }
+}
+
+#[test]
+fn a_task_of_an_issue_the_dead_loop_had_adopted_that_a_command_by_hand_took_is_left() {
+    let f = fixture(Some(2), true);
+    second_loop_died(&f);
+    // The hand command took the task after the adoption, and died too.
+    running(
+        &f.base(),
+        3,
+        Location::Cloud,
+        Process::new(GONE_CHILD, 0),
+        None,
+    );
+    let before =
+        fs::read_to_string(record::task_dir(&f.base(), "issue-3").join("task.json")).unwrap();
+    let gh = github(&[]);
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    assert!(run.events.is_empty(), "{:?}\n{}", run.events, run.out);
+    assert_eq!(
+        fs::read_to_string(record::task_dir(&f.base(), "issue-3").join("task.json")).unwrap(),
+        before
+    );
+}
+
 // --- boundary case 5: a live task run by hand is not adopted ---
 
 #[test]
@@ -880,7 +976,18 @@ fn lock_file(adopted: &[u32]) -> LockFile {
         issues: Vec::new(),
         cap: None,
         progress: None,
-        adopted: adopted.to_vec(),
+        adopted: adopted
+            .iter()
+            .map(|&issue| adopted_from_dead(issue))
+            .collect(),
+    }
+}
+
+/// Issue `issue`'s child, adopted from [`DEAD_LOOP`].
+fn adopted_from_dead(issue: u32) -> AdoptedChild {
+    AdoptedChild {
+        issue,
+        owner: Process::new(DEAD_LOOP, 0),
     }
 }
 
@@ -894,7 +1001,7 @@ fn the_loop_names_the_children_it_adopted_in_its_lock() {
 
     assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
     let lock: LockFile = serde_json::from_str(run.lock.as_deref().expect("a lock")).unwrap();
-    assert_eq!(lock.adopted, [3]);
+    assert_eq!(lock.adopted, [adopted_from_dead(3)]);
 }
 
 #[test]

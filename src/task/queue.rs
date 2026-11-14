@@ -45,10 +45,29 @@ pub struct LockFile {
     /// from the task records instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<Progress>,
-    /// The issues whose tasks' children outlived the loop whose lock this loop took over, which it
-    /// adopted (issue 643): `sbxm status` lists each as this loop's while that child runs.
+    /// The children of a dead loop this loop adopted (issue 643): `sbxm status` lists each as this
+    /// loop's while it runs, and a loop that takes this lock over once this one is gone adopts
+    /// them in turn (review M-1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub adopted: Vec<u32>,
+    pub adopted: Vec<AdoptedChild>,
+}
+
+/// A child a loop adopted (issue 643): its issue's task, and the owner its record names, the dead
+/// loop that started it. A command that takes the task since records another owner, so the task
+/// is no longer the adopted child's.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdoptedChild {
+    pub issue: u32,
+    pub owner: record::Process,
+}
+
+impl AdoptedChild {
+    /// Whether `rec` is this child's task, still owned by the loop that started it.
+    pub fn is(&self, rec: &record::Record) -> bool {
+        rec.number == self.issue
+            && rec.id == format!("issue-{}", self.issue)
+            && rec.owner() == Some(&self.owner)
+    }
 }
 
 /// Where a loop started with `--issue` is in its list, as the loop itself records it (issue 493):
