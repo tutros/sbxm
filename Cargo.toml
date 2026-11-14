@@ -24,3 +24,9 @@ unicode-width = "0.2.2"
 assert_cmd = "2.2.2"
 insta = "1.48.0"
 tempfile = "3.27.0"
+
+# `sbxm` hashes its own executable for every `run.log` header (decision 170), once per process:
+# unoptimized, that took 3 s on the debug test binary, paid by every test under nextest's one
+# process per test (issue 395).
+[profile.dev.package.sha2]
+opt-level = 3
