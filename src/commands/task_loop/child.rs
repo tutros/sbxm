@@ -19,6 +19,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::disk;
+use crate::task::outcome;
+use crate::task::record::{Process, ProcessProbe};
 
 /// The environment variable naming the loop's stop file to a child whose slot wait obeys it.
 pub const STOP_FILE_ENV: &str = "SBXM_LOOP_STOP_FILE";
@@ -218,6 +220,38 @@ impl Running for Started {
                 errors,
             },
         }))
+    }
+}
+
+/// A child of a loop that died, adopted by the loop that took over its lock (issue 643): a
+/// process this loop didn't start, so it is watched through the probe, its recorded identity
+/// (decision 322) rather than its bare pid, and once it is gone its task's `outcome.json` says
+/// how it ended, as for the loop's own child.
+pub(super) struct Adopted<'a> {
+    pub process: Process,
+    pub probe: &'a dyn ProcessProbe,
+    /// Its task folder, where it writes its outcome.
+    pub dir: PathBuf,
+    /// Where it writes its outcome when its task has no folder.
+    pub elsewhere: PathBuf,
+    /// `[issue-3 cloud]`: the window's prefix for its lines.
+    pub label: String,
+}
+
+impl super::Started for Adopted<'_> {
+    fn poll(&mut self, out: &mut dyn std::io::Write) -> Option<super::PhaseEnd> {
+        if self.process.alive(self.probe) {
+            return None;
+        }
+        let ended = super::PhaseEnd::read(&self.dir, &self.elsewhere, "ended");
+        let _ = outcome::remove_file(&self.elsewhere);
+        let _ = writeln!(
+            out,
+            "{} adopted child ended: {}",
+            self.label,
+            ended.summary()
+        );
+        Some(ended)
     }
 }
 

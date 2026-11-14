@@ -45,6 +45,10 @@ pub struct LockFile {
     /// from the task records instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<Progress>,
+    /// The issues whose tasks' children outlived the loop whose lock this loop took over, which it
+    /// adopted (issue 643): `sbxm status` lists each as this loop's while that child runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adopted: Vec<u32>,
 }
 
 /// Where a loop started with `--issue` is in its list, as the loop itself records it (issue 493):

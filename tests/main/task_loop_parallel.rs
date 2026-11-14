@@ -116,6 +116,7 @@ mod status_children {
             issues: issues.to_vec(),
             cap: None,
             progress: None,
+            adopted: Vec::new(),
         };
         fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
         let gh = FakeGitHub::default();
