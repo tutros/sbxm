@@ -633,9 +633,9 @@ fn sync(lp: &mut Loop, live: &[Live]) {
 
 /// Whether a new task may start now, checked before every start, a held or owed task's too
 /// (issue 615): not while the loop stops, a child waits out a usage limit of the worker's or the
-/// reviewer's provider (317(10)), `--cap`
-/// is reached, or the PRs awaiting the user plus the running children reach [`PR_CAP`]
-/// (317(6)); the stop is asked again after those reads. Its slot is checked by the caller.
+/// reviewer's provider (317(10)), `--cap` is reached, or the PRs awaiting the user plus the
+/// running children reach [`PR_CAP`] (317(6)); the stop is asked again after those reads. Its
+/// slot is checked by the caller.
 fn may_start(
     lp: &mut Loop,
     opts: &Options,
