@@ -420,9 +420,9 @@ allow = []         # required: the hosts a sandbox created from the template may
   kit adds (GitHub, npm, Ubuntu, Docker) that isn't in `[template].allow`, and is removed again if `sbx` reports the
   kit allowing anything else, or if sbxm can't read its network rules. A `*.<domain>` entry in `[template].allow`
   covers every host under the domain but not the domain itself (`*.github.com` doesn't allow `github.com`). A strict
-  `pi` sandbox is created the same way with `--deny-network` for the hosts the built-in `pi` kit adds besides
-  `api.anthropic.com`: `registry.npmjs.org` and `platform.claude.com:443`, each unless `[template].allow` names its
-  host (`platform.claude.com`, without the port), and is checked the same way after its creation.
+  `pi` sandbox is created the same way with `--deny-network registry.npmjs.org` unless `[template].allow` names that
+  host, and is checked the same way after its creation; it keeps `api.anthropic.com` and `platform.claude.com` (Pi
+  refreshes its OAuth token there).
 - **Disk:** a template takes 1 to 3 GB on the drive of `sbx`'s state. A build replaces the previous one unless that
   one is in use; `rm`, `task rm` and `task rm --merged` never remove a template; `template rm` does. `doctor` lists
   them all with their total size, kept previous images included. "In use" means recorded in a project's `state.json`
