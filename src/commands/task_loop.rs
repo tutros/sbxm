@@ -666,6 +666,9 @@ struct Adopted {
     slot: Location,
     /// Its process, as its record names it.
     process: Process,
+    /// The failures in a row it had already: 1 when it is the one resume a loop took after a
+    /// cut-off ([`RESUMED_HOOK`], decision 310), so a failure of it parks it.
+    failures: u32,
 }
 
 /// What became of an adopted child that ended with no outcome.
@@ -1847,6 +1850,7 @@ impl Loop<'_> {
                     .and_then(|s| crate::run::results::parse_timestamp(&s.at))
                     .unwrap_or_else(|| self.now()),
                 slot: rec.location,
+                failures: u32::from(matches!(Owed::of(&rec), Owed::Taken)),
                 title: rec.title,
                 process,
             });
@@ -4276,7 +4280,15 @@ fn work(
                     CutOff::Left(line) => Ok(End::Taken(line)),
                 }
             } else {
-                lp.task(a.issue, false, 0, Some(ended), &mut stops, out, warn)
+                lp.task(
+                    a.issue,
+                    false,
+                    a.failures,
+                    Some(ended),
+                    &mut stops,
+                    out,
+                    warn,
+                )
             };
             (a.issue, a.title, None, a.started, stops, ended, None)
         } else {

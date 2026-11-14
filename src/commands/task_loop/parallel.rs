@@ -600,7 +600,7 @@ pub(super) fn work<'a>(
             stops: Vec::new(),
             slot: a.slot,
             label: false,
-            failures: 0,
+            failures: a.failures,
             should_fix_ran: false,
             ran: true,
             resuming: true,

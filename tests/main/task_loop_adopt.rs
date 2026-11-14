@@ -51,6 +51,8 @@ enum Act {
     Ready,
     /// Killed: no outcome, the record left at `working`.
     Crash,
+    /// Fails, saying so in its `outcome.json`, the record left at `working`.
+    Fail,
 }
 
 /// The processes: every pid is alive (started at 0) except the dead loop, the ones gone, and an
@@ -76,9 +78,14 @@ impl ProcessProbe for Probe<'_> {
         {
             gone.insert(pid);
             write_record(&self.base, issue, act, None);
-            if act == Act::Ready {
-                let dir = record::task_dir(&self.base, &format!("issue-{issue}"));
-                outcome::write(&dir, &Outcome::new(Kind::Ready, None, "")).unwrap();
+            let dir = record::task_dir(&self.base, &format!("issue-{issue}"));
+            match act {
+                Act::Ready => outcome::write(&dir, &Outcome::new(Kind::Ready, None, "")).unwrap(),
+                Act::Fail => {
+                    outcome::write(&dir, &Outcome::new(Kind::Failed, None, "resume failed"))
+                        .unwrap()
+                }
+                Act::Crash => {}
             }
             self.events
                 .lock()
@@ -123,7 +130,7 @@ fn write_record(base: &Path, issue: u32, act: Act, location: Option<Location>) {
                 ..ReviewResult::default()
             });
         }
-        Act::Crash => {
+        Act::Crash | Act::Fail => {
             rec.stage = Stage::Working;
             rec.status = Status::Failed;
         }
@@ -191,6 +198,7 @@ impl<'a> Play<'a> {
         match act {
             Act::Ready => PhaseEnd::Outcome(Outcome::new(Kind::Ready, None, "")),
             Act::Crash => PhaseEnd::Missing("the task's child sbxm was killed".into()),
+            Act::Fail => PhaseEnd::Outcome(Outcome::new(Kind::Failed, None, "played failure")),
         }
     }
 }
@@ -256,7 +264,7 @@ impl Steps for Play<'_> {
         self.event(format!("end {issue} {act:?}"));
         match act {
             Act::Ready => Ok(()),
-            Act::Crash => Err(anyhow!("played failure")),
+            Act::Crash | Act::Fail => Err(anyhow!("played failure")),
         }
     }
 
@@ -272,7 +280,7 @@ impl Steps for Play<'_> {
         self.event(format!("end {issue} {act:?}"));
         match act {
             Act::Ready => Ok(()),
-            Act::Crash => Err(anyhow!("played failure")),
+            Act::Crash | Act::Fail => Err(anyhow!("played failure")),
         }
     }
 
@@ -643,6 +651,59 @@ fn an_adopted_child_that_was_a_resume_already_taken_and_ends_with_no_outcome_is_
     let rows = rows(&f, 3);
     assert_eq!(rows.len(), 1, "{}", f.log_text());
     assert!(rows[0].contains("parked at working"), "{}", rows[0]);
+}
+
+// --- review M-2: adoption keeps the task's recovery budget ---
+
+/// Issue 3's child, adopted, is the one resume a loop took already (decision 310).
+fn adoptable_taken_resume(f: &Fixture) {
+    adoptable(&f.base(), 3, Location::Cloud, CHILD);
+    let mut rec = read(&f.base(), 3);
+    rec.hooks = serde_json::json!({ RESUMED_HOOK: true });
+    record::write(&record::task_dir(&f.base(), "issue-3"), &rec).unwrap();
+}
+
+#[test]
+fn an_adopted_resume_already_taken_that_fails_is_parked_with_no_second_resume() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        adoptable_taken_resume(&f);
+        let gh = github(&[]);
+
+        let run = run_loop(&f, &gh, &[(CHILD, 3, 10, Act::Fail)], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert_eq!(
+            run.events,
+            ["end 3 adopted"],
+            "{cloud_slots:?}\n{}",
+            run.out
+        );
+        let rows = rows(&f, 3);
+        assert_eq!(rows.len(), 1, "{cloud_slots:?}\n{}", f.log_text());
+        assert!(rows[0].contains("parked at working"), "{}", rows[0]);
+        assert!(read(&f.base(), 3).pr.is_none());
+    }
+}
+
+#[test]
+fn an_adopted_first_run_that_fails_gets_its_one_resume() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        adoptable(&f.base(), 3, Location::Cloud, CHILD);
+        let gh = github(&[]);
+
+        let run = run_loop(&f, &gh, &[(CHILD, 3, 10, Act::Fail)], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert_eq!(
+            run.events[..2],
+            ["end 3 adopted", "start 3 resume cloud"],
+            "{cloud_slots:?}\n{}",
+            run.out
+        );
+        run.at("finish 3");
+    }
 }
 
 // --- boundary case 5: a live task run by hand is not adopted ---
