@@ -238,7 +238,7 @@ pub fn largest_first(open: &[Issue]) -> Vec<u32> {
     queue
 }
 
-/// Every `#<n>` on an issue body's `**Depends on:**` line, in order.
+/// Every `#<n>` in an issue body's `**Depends on:**` field, over all its lines, in order.
 pub fn depends_on(body: &str) -> Vec<u32> {
     super::select::field_numbers(body, "Depends on")
 }

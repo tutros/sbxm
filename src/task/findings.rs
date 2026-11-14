@@ -405,26 +405,60 @@ pub fn link_ids(text: &str, ids: &BTreeMap<String, u32>) -> String {
     text
 }
 
+/// One line of a body, as `field_lines` reads it.
+pub(crate) struct FieldLine<'a> {
+    /// The line with its line ending.
+    pub raw: &'a str,
+    /// The line without its `\n` or `\r\n`.
+    pub content: &'a str,
+    /// The field of those asked for that the line belongs to, if any.
+    pub field: Option<&'a str>,
+    /// The line starts that field (`**<field>:**`).
+    pub starts: bool,
+}
+
+/// Every line of `body`, each with the `**<field>:**` field of `fields` it belongs to (issue
+/// 514). A field starts on a line beginning `**<field>:**` and runs to the next bold field,
+/// comment or blank line, so `file-findings` and the loop read the same lines.
+pub(crate) fn field_lines<'a>(
+    body: &'a str,
+    fields: &'a [&'a str],
+) -> impl Iterator<Item = FieldLine<'a>> {
+    let mut current = None;
+    body.split_inclusive('\n').map(move |raw| {
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        let content = line.strip_suffix('\r').unwrap_or(line);
+        let start = fields.iter().copied().find(|field| {
+            content
+                .strip_prefix("**")
+                .and_then(|rest| rest.strip_prefix(*field))
+                .is_some_and(|rest| rest.starts_with(":**"))
+        });
+        if start.is_some() {
+            current = start;
+        } else if content.is_empty() || content.starts_with("**") || content.starts_with("<!--") {
+            current = None;
+        }
+        FieldLine {
+            raw,
+            content,
+            field: current,
+            starts: start.is_some(),
+        }
+    })
+}
+
 /// An existing issue's body with finding ids rewritten to `#n` inside its `Depends on` and
 /// `Related` fields, and nothing else, so hand edits elsewhere stay. A field runs to the next
 /// bold field, comment or blank line.
 pub fn update_link_fields(body: &str, ids: &BTreeMap<String, u32>) -> String {
     let mut out = String::with_capacity(body.len());
-    let mut in_field = false;
-    for raw in body.split_inclusive('\n') {
-        let line = raw.trim_end_matches('\n');
-        let content = line.strip_suffix('\r').unwrap_or(line);
-        let start = content.starts_with("**Depends on:**") || content.starts_with("**Related:**");
-        if start {
-            in_field = true;
-        } else if content.is_empty() || content.starts_with("**") || content.starts_with("<!--") {
-            in_field = false;
-        }
-        if in_field {
-            out.push_str(&link_ids(content, ids));
-            out.push_str(&raw[content.len()..]);
+    for line in field_lines(body, &["Depends on", "Related"]) {
+        if line.field.is_some() {
+            out.push_str(&link_ids(line.content, ids));
+            out.push_str(&line.raw[line.content.len()..]);
         } else {
-            out.push_str(raw);
+            out.push_str(line.raw);
         }
     }
     out
