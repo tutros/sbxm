@@ -8,9 +8,10 @@
 //!   `run-local` and `run-cloud` pin it. An issue whose place is full keeps its place in the
 //!   queue, and the first issue in order that fits a free slot starts instead.
 //! - **The loop's own steps never wait for a slot:** a resolve, a log-fix or a queued job whose
-//!   slot a child holds is postponed to a later pass.
+//!   slot a child holds is postponed to a later pass; once free, they start as job children
+//!   ([`super::job_children`], issue 633) before any new issue.
 //! - **Pauses:** no new task while any child waits out a usage limit, or while the PRs awaiting
-//!   the user plus the running children reach [`PR_CAP`] (317(6)).
+//!   the user plus the running task children and `spec` job children reach [`PR_CAP`] (317(6)).
 //! - **Records:** one log row per task as it ends, in finish order, with its slot; children are
 //!   finished one at a time, in this process.
 //! - **Stop:** a stop request, or a stop that needs the user (a lapsed sign-in, two parked in a
@@ -24,7 +25,7 @@ use anyhow::{Result, anyhow};
 
 use super::{
     Cause, End, Halt, Held, Loop, LoopLock, Options, PAUSE_POLL, PR_CAP, Phase, RESUMED_HOOK,
-    Retry, Started, first_line, needs_user, note, sign_in_stop,
+    Retry, Started, first_line, jobs as queued, needs_user, note, sign_in_stop,
 };
 use crate::backend::Location;
 use crate::task::outcome;
@@ -108,6 +109,12 @@ struct Live<'a> {
     /// For a task tried again: how, whether it was cut off, and the resume it owed.
     retried: Option<(Retry, bool, Option<serde_json::Value>)>,
     idle_before: Option<u64>,
+    /// For a queued `run` job's task (issue 633): its job, whose result its end writes instead
+    /// of a task's row.
+    job: Option<queued::JobFile>,
+    /// For a queued `run` job's task: why its child ended without an outcome; its job then ends
+    /// `interrupted`.
+    interrupted: Option<String>,
 }
 
 impl Live<'_> {
@@ -154,7 +161,8 @@ impl<'a> Loop<'a> {
             return false;
         };
         let at = location.unwrap_or(self.default_location);
-        let held = self.children.iter().filter(|&&l| l == at).count();
+        let taken = self.run_jobs.iter().filter(|r| r.slot == at).count();
+        let held = self.children.iter().filter(|&&l| l == at).count() + self.jobs_in(at) + taken;
         held >= slots.of(at) as usize
     }
 
@@ -168,7 +176,7 @@ impl<'a> Loop<'a> {
 
     /// Whether a running task is to stop short at its next step: a stop request, or a stop of
     /// the loop's that waits for the running children to end.
-    fn stopping(&self) -> bool {
+    pub(super) fn stopping(&self) -> bool {
         self.draining || (self.env.stop_requested)()
     }
 
@@ -270,7 +278,16 @@ impl<'a> Loop<'a> {
         let Some(ended) = polled else {
             return Ok(None);
         };
+        let ended = ended.masked();
         t.phase = None;
+        // A queued `run` job's child that wrote no outcome (issue 633): its job is interrupted,
+        // never resumed or run again, as any job child's.
+        if t.job.is_some()
+            && let super::PhaseEnd::Missing(why) = &ended
+        {
+            t.interrupted = Some(why.clone());
+            return Ok(Some(Err(Halt::Stopped)));
+        }
         match self.phase_ended(t, ended, out, warn)? {
             Some(end) => Ok(Some(end)),
             None => self.next_phase(t, out, warn),
@@ -434,6 +451,8 @@ impl<'a> Loop<'a> {
             room_since: None,
             retried: Some((again.retry, again.cut_off, None)),
             idle_before: None,
+            job: None,
+            interrupted: None,
         }))
     }
 }
@@ -466,7 +485,7 @@ pub(super) fn work<'a>(
     // would at a stop, and the loop stops with them.
     match result {
         Ok(stop) => Ok(stop),
-        Err(e) if live.is_empty() => Err(e),
+        Err(e) if live.is_empty() && lp.jobs.is_empty() => Err(e),
         Err(e) => {
             pass.halt.get_or_insert(e);
             lp.draining = true;
@@ -510,7 +529,15 @@ fn run<'a>(
             }
         }
         sync(lp, live);
-        if live.is_empty() {
+        // The job children too (issue 633), each end acted on at once.
+        let (jobs_ended, halt) = lp.supervise_jobs(out, warn)?;
+        ended_any |= jobs_ended;
+        if let Some(e) = halt {
+            lp.draining = true;
+            pass.halt.get_or_insert(e);
+        }
+        let busy = !live.is_empty() || !lp.jobs.is_empty();
+        if !busy {
             if let Some(e) = pass.halt.take() {
                 left(pass, out)?;
                 return Err(e);
@@ -530,11 +557,11 @@ fn run<'a>(
         let stopping = lp.stopping()
             || opts
                 .cap
-                .is_some_and(|cap| pass.tasks_run + live.len() as u32 >= cap);
+                .is_some_and(|cap| pass.tasks_run + tasks(live) >= cap);
         // The loop's own steps and new starts: at the first pass, whenever a child ended or none
         // runs, and every [`PAUSE_POLL`] meanwhile.
         let now = lp.now();
-        let due_check = live.is_empty()
+        let due_check = !busy
             || ended_any
             || pass
                 .checked
@@ -551,9 +578,16 @@ fn run<'a>(
     }
 }
 
+/// How many of the running task children are the loop's own tasks: a queued `run` job's isn't
+/// one, for `--cap` (issue 633).
+fn tasks(live: &[Live]) -> u32 {
+    live.iter().filter(|t| t.job.is_none()).count() as u32
+}
+
 /// What the loop's own steps read of the running children: their slots and a usage hold.
 fn sync(lp: &mut Loop, live: &[Live]) {
     lp.children = live.iter().map(|t| t.slot).collect();
+    lp.running_issues = live.iter().map(|t| t.issue).collect();
     lp.usage_hold = live.iter().find(|t| t.limited).map(|t| t.issue);
 }
 
@@ -582,17 +616,17 @@ fn may_start(
     }
     if opts
         .cap
-        .is_some_and(|cap| pass.tasks_run + live.len() as u32 >= cap)
+        .is_some_and(|cap| pass.tasks_run + tasks(live) >= cap)
     {
         return Ok(false);
     }
     // A stop asked during the reads that counted the awaiting PRs: nothing starts.
-    Ok(lp.awaiting_room(live.len(), out, warn)? && !lp.stopping())
+    Ok(lp.awaiting_room(out, warn)? && !lp.stopping())
 }
 
 /// Sleeps one [`TICK`] while children run and none ended in this pass.
 fn continue_or_sleep(lp: &Loop, live: &[Live], ended_any: bool) {
-    if !live.is_empty() && !ended_any {
+    if (!live.is_empty() || !lp.jobs.is_empty()) && !ended_any {
         (lp.env.sleep)(TICK);
     }
 }
@@ -613,7 +647,10 @@ fn steps_and_starts<'a>(
     let go_on = lp.resolve_conflicts(out, warn)? && {
         lp.check_runs(out, warn)?;
         lp.recheck_waiting(out, warn)?;
-        lp.drain_jobs(out, warn)? && {
+        let drained = lp.drain_jobs(out, warn);
+        // The `run` jobs it took start as task children, whatever came after them.
+        start_run_jobs(lp, lock, pass, live, out, warn)?;
+        drained? && {
             lp.notify_awaiting(out, warn)?;
             true
         }
@@ -623,7 +660,7 @@ fn steps_and_starts<'a>(
     }
     // The PRs awaiting the user (317(6)): with no child running, waited for as before; with
     // some, counted with them before each start ([`Loop::awaiting_room`]).
-    if live.is_empty() && !lp.wait_for_prs(out, warn)? {
+    if live.is_empty() && lp.jobs.is_empty() && !lp.wait_for_prs(out, warn)? {
         return Ok(None);
     }
     let mut started_any = false;
@@ -659,7 +696,7 @@ fn steps_and_starts<'a>(
             out,
         )?;
         let Some(issue) = next else {
-            if !live.is_empty() || started_any || !pass.due.is_empty() {
+            if !live.is_empty() || !lp.jobs.is_empty() || started_any || !pass.due.is_empty() {
                 break;
             }
             if opts.wait {
@@ -718,7 +755,7 @@ fn steps_and_starts<'a>(
         writeln!(
             out,
             "task {}: #{issue} {title} (size {}), {}",
-            pass.tasks_run as usize + live.len() + 1,
+            pass.tasks_run + tasks(live) + 1,
             size.as_deref().unwrap_or("unknown"),
             slot.as_str()
         )?;
@@ -751,6 +788,8 @@ fn steps_and_starts<'a>(
                 .is_empty()
                 .then(|| pass.idle_from.map(|end| started.saturating_sub(end)))
                 .flatten(),
+            job: None,
+            interrupted: None,
         };
         started_any = true;
         match lp.next_phase(&mut t, out, warn)? {
@@ -760,6 +799,52 @@ fn steps_and_starts<'a>(
         sync(lp, live);
     }
     Ok(None)
+}
+
+/// The queued `run` jobs taken in this pass (issue 633), each started as a task child in the
+/// slot its labels chose, as the loop starts an issue it picked itself; its end writes the job's
+/// result ([`task_ended`]).
+fn start_run_jobs<'a>(
+    lp: &mut Loop<'a>,
+    lock: &mut LoopLock,
+    pass: &mut Pass,
+    live: &mut Vec<Live<'a>>,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    for run in std::mem::take(&mut lp.run_jobs) {
+        // Taken: never picked again as new work in this loop (issue 633).
+        pass.tried.insert(run.issue);
+        let mut t = Live {
+            issue: run.issue,
+            title: run.title,
+            size: run.size,
+            started: lp.now(),
+            stops: Vec::new(),
+            slot: run.slot,
+            label: run.labeled,
+            failures: 0,
+            should_fix_ran: false,
+            ran: false,
+            resuming: false,
+            pending: None,
+            phase: None,
+            usage: None,
+            usage_waited: Duration::ZERO,
+            limited: false,
+            room_since: None,
+            retried: None,
+            idle_before: None,
+            job: Some(run.file),
+            interrupted: None,
+        };
+        match lp.next_phase(&mut t, out, warn)? {
+            None => live.push(t),
+            Some(end) => task_ended(lp, lock, pass, t, end, live.is_empty(), out, warn)?,
+        }
+        sync(lp, live);
+    }
+    Ok(())
 }
 
 /// A held or cut-off task tried again: started, or ended at once. `true` when it started.
@@ -795,7 +880,7 @@ fn start_again<'a>(
     writeln!(
         out,
         "task {}: #{issue} {} (size {}), tried again",
-        pass.tasks_run as usize + live.len() + 1,
+        pass.tasks_run + tasks(live) + 1,
         again.title,
         again.size.as_deref().unwrap_or("unknown")
     )?;
@@ -836,6 +921,8 @@ fn start_again<'a>(
                 room_since: None,
                 retried: Some((retry, cut_off, owed)),
                 idle_before: None,
+                job: None,
+                interrupted: None,
             };
             task_ended(lp, lock, pass, t, end, live.is_empty(), out, warn)?;
             Ok(false)
@@ -858,6 +945,14 @@ fn task_ended(
     warn: &mut dyn Write,
 ) -> Result<()> {
     let issue = t.issue;
+    // A queued `run` job's task (issue 633): its job's result, not a task's row.
+    if let Some(job) = t.job {
+        if let Some(stop) = lp.run_job_ended(job, issue, end, t.interrupted, out, warn)? {
+            lp.draining = true;
+            pass.halt.get_or_insert(stop);
+        }
+        return Ok(());
+    }
     let row = |outcome: String, ready: Option<u64>, t: &Live, lp: &Loop| {
         let rec = lp.record(issue);
         let duration = |agent: Option<&record::Agent>| agent?.run.as_ref().map(|r| r.duration_s);
@@ -1022,27 +1117,31 @@ fn task_ended(
 }
 
 impl Loop<'_> {
-    /// Whether the PRs awaiting the user leave room for one more child with `running` running
-    /// (317(6)), checked before each start; says once when they don't.
-    fn awaiting_room(
-        &mut self,
-        running: usize,
-        out: &mut dyn Write,
-        warn: &mut dyn Write,
-    ) -> Result<bool> {
-        if running == 0 {
+    /// Whether the PRs awaiting the user leave room for one more child that may open a PR
+    /// (317(6)), checked before each such start, a new issue's or a queued `run` or `spec` job's
+    /// (issue 633); says once when they don't.
+    fn awaiting_room(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<bool> {
+        let Some((awaiting, running)) = self.pr_room_full(warn)? else {
             return Ok(true);
-        }
-        let awaiting = self.awaiting_prs(warn)?.len();
-        if awaiting + running < PR_CAP {
-            return Ok(true);
-        }
+        };
         let line = format!(
             "paused: {awaiting} PRs await you and {running} tasks run, {PR_CAP} in all; no new \
              task starts until one ends or merges"
         );
         self.say_once(out, line)?;
         Ok(false)
+    }
+
+    /// The PRs awaiting the user and the running children that may open one, when together they
+    /// reach [`PR_CAP`] (317(6)); `None` while one more may start. The running ones: every task
+    /// child (a queued `run` job's too), each `run` job taken in this pass, and each `spec` job
+    /// child (issue 633, answer 5).
+    pub(super) fn pr_room_full(&mut self, warn: &mut dyn Write) -> Result<Option<(usize, usize)>> {
+        let running = self.children.len()
+            + self.run_jobs.len()
+            + self.jobs.iter().filter(|j| j.opens_pr()).count();
+        let awaiting = self.awaiting_prs(warn)?.len();
+        Ok((awaiting + running >= PR_CAP).then_some((awaiting, running)))
     }
 
     /// Queued job `path`'s label, where it runs (`None`: as `[sandbox] location` says) as the

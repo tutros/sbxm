@@ -1149,20 +1149,30 @@ fn run() -> anyhow::Result<()> {
                     ignore_disk,
                     no_wait,
                 },
-        } => commands::template_build::run(
-            &config::config_dir()?,
-            &commands::template_build::Options {
-                profile,
-                harness,
-                disk: sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
-                now: None,
-                warm,
-            },
-            &SbxBackend::LOCAL,
-            &sbxm::task::record::SystemProbe,
-            &mut Local::new(std::io::stdout()),
-            &mut Local::new(std::io::stderr()),
-        ),
+        } => {
+            let config_dir = config::config_dir()?;
+            // A loop's child writes how it ended where the loop named (issue 633).
+            task::outcome::recorded(
+                &mut Local::new(std::io::stdout()),
+                &mut Local::new(std::io::stderr()),
+                |_, out, warn| {
+                    commands::template_build::run(
+                        &config_dir,
+                        &commands::template_build::Options {
+                            profile,
+                            harness,
+                            disk: sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
+                            now: None,
+                            warm,
+                        },
+                        &SbxBackend::LOCAL,
+                        &sbxm::task::record::SystemProbe,
+                        out,
+                        warn,
+                    )
+                },
+            )
+        }
         Command::Template {
             command: TemplateCommand::Ls,
         } => commands::template_ls::run(

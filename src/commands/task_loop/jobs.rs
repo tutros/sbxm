@@ -2,22 +2,28 @@
 //! resolves and its checks of the runs, the loop runs every job file in `<base>/.sbxm/queue/`,
 //! oldest first ([`jobs::pending`]), each ending with one result file. At its start it reports
 //! the jobs a stopped loop left in `queue/running/` as `interrupted`, without running them again.
+//! With `[resources] cloud_slots` set they run as children instead ([`Loop::start_jobs`], issue
+//! 633), and the loop goes on supervising its other children meanwhile.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 
+use super::job_children::{JobChild, Work};
 use super::{
-    Capture, Cause, Claimed, End, Halt, Loop, NeedsUser, Steps, check, first_line, needs_user,
-    says_sign_in, sign_in_stop,
+    Capture, Cause, Claimed, End, Halt, JobStep, Loop, NeedsUser, PR_CAP, PhaseEnd, Steps, check,
+    first_line, needs_user, says_sign_in, sign_in_stop,
 };
+use crate::backend::Location;
 use crate::commands::task_start::spec_flag;
 use crate::config::GlobalConfig;
 use crate::github::PrState;
+use crate::harness::Harness;
 use crate::notify::Notification;
 use crate::run::results::format_timestamp;
 use crate::task::jobs::{self, AsRead, Job, JobHarness, JobResult, Outcome, Running};
+use crate::task::outcome::Kind as ChildKind;
 use crate::task::queue::{self, Row};
 use crate::task::record::{self, Kind, Record, Stage};
 use crate::task::{location, lock, next, pipeline};
@@ -70,6 +76,9 @@ impl Loop<'_> {
     /// Runs every queued job, oldest first, a job written meanwhile too. `Ok(false)` when a stop
     /// was asked between jobs: the rest stay queued.
     pub(super) fn drain_jobs(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<bool> {
+        if self.slots.is_some() {
+            return self.start_jobs(out, warn);
+        }
         loop {
             let pending = jobs::pending(&self.base_dir)?;
             let Some(path) = pending.first() else {
@@ -92,6 +101,385 @@ impl Loop<'_> {
                 return Ok(false);
             }
             self.job(path, out, warn)?;
+        }
+    }
+
+    /// [`Self::drain_jobs`] for a loop with several children (issue 633): each queued job,
+    /// oldest first, started as a child while its slot is free, ahead of new issues (317(7)). A
+    /// job whose slot is taken waits, and the jobs after it in the same place wait too, so each
+    /// place runs its jobs oldest first; a job on a PR a job child runs on waits, keeping its
+    /// place, and the jobs after it that fit start. `rm-merged`, and a file that isn't a job,
+    /// run here at once. `Ok(false)` when a stop was asked: the rest stay queued.
+    fn start_jobs(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<bool> {
+        let mut held: Vec<Location> = Vec::new();
+        for path in jobs::pending(&self.base_dir)? {
+            if self.stopping() {
+                return Ok(false);
+            }
+            let job = peek(&path);
+            if let Some(Job::Review { pr } | Job::Fix { pr, .. }) = job
+                && self.pr_busy(pr)
+            {
+                let line = format!(
+                    "{}: waits for the job running on PR #{pr}; tried again at a later pass",
+                    job.as_ref().map(Job::label).unwrap_or_default()
+                );
+                self.say_once(out, line)?;
+                continue;
+            }
+            // One child per issue: a run of an issue a task child runs waits for it (issue 633).
+            if let Some(Job::Run { issue }) = job
+                && (self.running_issues.contains(&issue)
+                    || self.run_jobs.iter().any(|r| r.issue == issue))
+            {
+                let line = format!(
+                    "job run #{issue}: waits for #{issue}'s running task; tried again at a later \
+                     pass"
+                );
+                self.say_once(out, line)?;
+                continue;
+            }
+            // One child per task: a spec job of a file whose job runs waits for it (issue 633).
+            if let Some(Job::Spec { file }) = &job
+                && self.jobs.iter().any(|j| j.runs_spec(file))
+            {
+                let line = format!(
+                    "job spec {file}: waits for the job running on it; tried again at a later pass"
+                );
+                self.say_once(out, line)?;
+                continue;
+            }
+            let slot = match self.job_slot(&path) {
+                Some((label, at, task)) => {
+                    let place = at.unwrap_or(self.default_location);
+                    if held.contains(&place) {
+                        continue;
+                    }
+                    if let Some(waits) = self.wait_reason(at, task) {
+                        let line =
+                            format!("{label}: waits for {waits}; tried again at a later pass");
+                        self.say_once(out, line)?;
+                        held.push(place);
+                        continue;
+                    }
+                    Some(place)
+                }
+                None => None,
+            };
+            // A job that may open a PR is admitted by the PRs awaiting the user, as a new issue
+            // is (317(6), issue 633); it keeps its place, and the jobs that open none go on.
+            if let Some(job @ (Job::Run { .. } | Job::Spec { .. })) = &job
+                && let Some((awaiting, running)) = self.pr_room_full(warn)?
+            {
+                let line = format!(
+                    "{}: waits for room: {awaiting} PRs await you and {running} tasks run, \
+                     {PR_CAP} in all; tried again at a later pass",
+                    job.label()
+                );
+                self.say_once(out, line)?;
+                continue;
+            }
+            // A stop asked during the reads that found its slot: it stays queued.
+            if self.stopping() {
+                return Ok(false);
+            }
+            // Never a whole task in this process while children run: a job whose slot couldn't be
+            // read (a `run` job's issue, say) goes to its default place, and its own checks
+            // refuse it or start it there.
+            match job {
+                Some(Job::RmMerged {}) | None => self.job(&path, out, warn)?,
+                Some(_) => {
+                    let slot = slot.unwrap_or(self.default_location);
+                    self.start_queued(&path, slot, out, warn)?;
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Starts queued job `path` as a child in `slot` (issue 633), after the checks its run makes
+    /// first; one that ends at those checks, or that isn't a child's, ends here.
+    fn start_queued(
+        &mut self,
+        path: &Path,
+        slot: Location,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        let (taken, text) = jobs::take(&self.base_dir, path)?;
+        let started = self.now();
+        let read = AsRead::new(text.as_deref().unwrap_or_default());
+        let job = match text.and_then(|text| jobs::parse(&text)) {
+            Ok(job) => job,
+            Err(why) => {
+                let label = file_label(&taken);
+                let ended = Ended::new(Outcome::Refused, why);
+                return self.halt_after(&taken, &label, read, started, ended, out, warn);
+            }
+        };
+        let label = job.label();
+        writeln!(out, "{label}: started")?;
+        let (step, what) = match &job {
+            Job::Review { pr } | Job::Fix { pr, .. } => {
+                let (pr, fix) = (*pr, matches!(job, Job::Fix { .. }));
+                let task = match self.pr_job_ready(pr, fix) {
+                    Ok(task) => task,
+                    Err(ended) => {
+                        return self.halt_after(&taken, &label, read, started, ended, out, warn);
+                    }
+                };
+                self.mark(&taken, &read, started, task.clone())?;
+                let step = match job {
+                    Job::Fix { check_run, .. } => JobStep::Fix { pr, check_run },
+                    _ => JobStep::Review { pr },
+                };
+                (step, QueuedWhat::Pr { pr, fix, task })
+            }
+            Job::Template {
+                profile,
+                harness,
+                warm,
+            } => {
+                if let Err(ended) = self.template_ready(profile) {
+                    return self.halt_after(&taken, &label, read, started, ended, out, warn);
+                }
+                self.mark(&taken, &read, started, None)?;
+                let step = JobStep::Template {
+                    profile: profile.clone(),
+                    harness: harness.harness(),
+                    warm: warm.then(|| self.repo_root.clone()),
+                };
+                let what = QueuedWhat::Template {
+                    profile: profile.clone(),
+                    harness: harness.harness(),
+                };
+                (step, what)
+            }
+            Job::Spec { file } => {
+                let (spec, id) = match self.spec_ready(file) {
+                    Ok(found) => found,
+                    Err(ended) => {
+                        return self.halt_after(&taken, &label, read, started, ended, out, warn);
+                    }
+                };
+                self.mark(&taken, &read, started, Some(id.clone()))?;
+                let step = JobStep::RunSpec(spec.clone());
+                let what = QueuedWhat::Spec {
+                    spec,
+                    id,
+                    should_fix: false,
+                };
+                (step, what)
+            }
+            Job::Run { issue } => {
+                let issue = *issue;
+                let found = match self.run_ready(issue) {
+                    Ok(found) => found,
+                    Err(ended) => {
+                        return self.halt_after(&taken, &label, read, started, ended, out, warn);
+                    }
+                };
+                self.locations.insert(issue, found.location);
+                self.mark(&taken, &read, started, Some(format!("issue-{issue}")))?;
+                // Started as a task child by the loop's pass, before any new issue.
+                self.run_jobs.push(RunJob {
+                    file: JobFile {
+                        taken,
+                        label,
+                        read,
+                        started,
+                    },
+                    issue,
+                    title: found.title,
+                    size: found.size,
+                    labeled: found.labeled,
+                    slot: found.location.unwrap_or(self.default_location),
+                });
+                return Ok(());
+            }
+            _ => {
+                let ended = self.run_job(&job, &taken, &read, started, out, warn)?;
+                return self.halt_after(&taken, &label, read, started, ended, out, warn);
+            }
+        };
+        let queued = Queued {
+            file: JobFile {
+                taken,
+                label,
+                read,
+                started,
+            },
+            slot,
+            what,
+        };
+        self.start_queued_step(queued, &step, out, warn);
+        Ok(())
+    }
+
+    /// Starts `step` of `queued` as its child.
+    fn start_queued_step(
+        &mut self,
+        queued: Queued,
+        step: &JobStep,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) {
+        let pr = match queued.what {
+            QueuedWhat::Pr { pr, .. } => Some(pr),
+            QueuedWhat::Template { .. } | QueuedWhat::Spec { .. } => None,
+        };
+        let slot = queued.slot;
+        let phase = self.steps.start_job(step, slot, out, warn);
+        self.jobs.push(JobChild {
+            work: Work::Queued(queued),
+            pr,
+            slot,
+            phase,
+        });
+    }
+
+    /// [`Self::job_done`], its stop kept for the loop: draining, the running children first.
+    #[allow(clippy::too_many_arguments)]
+    fn halt_after(
+        &mut self,
+        taken: &Path,
+        label: &str,
+        read: AsRead,
+        started: u64,
+        ended: Ended,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        match self.job_done(taken, label, read, started, ended, out, warn)? {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// What a queued job's child's end does (issue 633): its result file, its log row and its
+    /// line, as for one run here. `Some` is the stop of the loop it asks for.
+    pub(super) fn queued_ended(
+        &mut self,
+        queued: Queued,
+        end: &PhaseEnd,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<anyhow::Error>> {
+        let ended = match &queued.what {
+            QueuedWhat::Spec {
+                spec,
+                id,
+                should_fix,
+            } => {
+                let (spec, id, should_fix) = (spec.clone(), id.clone(), *should_fix);
+                let flag = spec_flag(&spec);
+                let resume = Some((id.as_str(), format!("sbxm task resume {flag}")));
+                let what = if should_fix {
+                    "its should-fix round failed: "
+                } else {
+                    ""
+                };
+                let ended = match self.child_failed(what, resume, end) {
+                    Some(ended) => ended,
+                    // Its should-fix round next, as another child (decision 306).
+                    None if !should_fix && self.should_fix_due_of(&id) => {
+                        let step = JobStep::ShouldFixSpec(spec.clone());
+                        let queued = Queued {
+                            what: QueuedWhat::Spec {
+                                spec,
+                                id,
+                                should_fix: true,
+                            },
+                            ..queued
+                        };
+                        self.start_queued_step(queued, &step, out, warn);
+                        return Ok(None);
+                    }
+                    None => self.spec_finish(&spec, &id, out, warn)?,
+                };
+                Ended {
+                    flag: Some(flag),
+                    ..ended.task(id)
+                }
+            }
+            QueuedWhat::Pr { pr, fix, task } => {
+                let (pr, fix, task) = (*pr, *fix, task.clone());
+                let command = if fix { "fix" } else { "review" };
+                let ended = match (interrupted(end), end.kind()) {
+                    (Some(ended), _) => ended,
+                    (None, ChildKind::Ready) => {
+                        Ended::new(Outcome::Done, format!("`task {command} --pr {pr}` ended"))
+                    }
+                    (None, _) => Ended::new(Outcome::Failed, format!("{:#}", end.error())),
+                };
+                match task {
+                    Some(id) => ended.task(id),
+                    None => ended,
+                }
+            }
+            QueuedWhat::Template { profile, harness } => match self.child_failed("", None, end) {
+                Some(ended) => ended,
+                None => {
+                    let key = crate::template::key(profile, *harness);
+                    let built = match crate::template::Record::load(&self.base_dir, &key) {
+                        Ok(Some(rec)) => format!("built template {}", rec.tag),
+                        _ => format!("built the template of {profile}"),
+                    };
+                    Ended::new(Outcome::Done, built)
+                }
+            },
+        };
+        self.file_done(queued.file, ended, out, warn)
+    }
+
+    /// [`Self::job_done`] of job `file`.
+    fn file_done(
+        &mut self,
+        file: JobFile,
+        ended: Ended,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<anyhow::Error>> {
+        let JobFile {
+            taken,
+            label,
+            read,
+            started,
+        } = file;
+        self.job_done(&taken, &label, read, started, ended, out, warn)
+    }
+
+    /// How a job's child ended, as [`Self::phase`] reads a phase run here: `None` when ready; one
+    /// that wrote no outcome is `interrupted` ([`interrupted`]); a
+    /// lapsed sign-in is `stopped` and stops the loop; a missing secret is `failed` and stops it;
+    /// anything else is `failed`, with `what` before the error. `resume`: the task the child
+    /// works on and the command that continues it, named in a sign-in stop once its record
+    /// exists.
+    fn child_failed(
+        &self,
+        what: &str,
+        resume: Option<(&str, String)>,
+        end: &PhaseEnd,
+    ) -> Option<Ended> {
+        if let Some(ended) = interrupted(end) {
+            return Some(ended);
+        }
+        let e = end.error();
+        match end.kind() {
+            ChildKind::Ready => None,
+            ChildKind::SignedOut => {
+                let resume = resume.and_then(|(id, command)| self.record_of(id).map(|_| command));
+                let stop = sign_in_stop(e, resume);
+                Some(Ended {
+                    halt: Some(needs_user(Cause::SignIn, anyhow!("{stop:#}"))),
+                    ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
+                })
+            }
+            ChildKind::MissingSecret => Some(Ended {
+                halt: Some(needs_user(Cause::Secret, anyhow!("{e:#}"))),
+                ..Ended::new(Outcome::Failed, format!("{what}{e:#}"))
+            }),
+            _ => Some(Ended::new(Outcome::Failed, format!("{what}{e:#}"))),
         }
     }
 
@@ -183,6 +571,25 @@ impl Loop<'_> {
                 (job.label(), ended)
             }
         };
+        match self.job_done(&taken, &label, read, started, ended, out, warn)? {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// A job's end, in-process or as a child: its result file, its log row and its line; `Some`
+    /// is the stop of the loop it asked for, after its result is written.
+    #[allow(clippy::too_many_arguments)]
+    fn job_done(
+        &mut self,
+        taken: &Path,
+        label: &str,
+        read: AsRead,
+        started: u64,
+        ended: Ended,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<anyhow::Error>> {
         let rec = ended.task.as_deref().and_then(|id| {
             record::read(&record::task_dir(&self.base_dir, id).join("task.json")).ok()
         });
@@ -198,11 +605,8 @@ impl Loop<'_> {
                 .as_ref()
                 .and_then(|rec| next_of(rec, ended.flag.as_deref())),
         };
-        self.ended(&taken, &label, &result, started, out, warn)?;
-        match ended.halt {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        self.ended(taken, label, &result, started, out, warn)?;
+        Ok(ended.halt)
     }
 
     /// The PR a task produced or works on: the PR its finish opened, or a PR or fix task's own.
@@ -373,13 +777,9 @@ impl Loop<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<Ended> {
-        let config = match GlobalConfig::load(self.config_dir) {
-            Ok(config) => config,
-            Err(e) => return Ok(Ended::new(Outcome::Failed, format!("{e:#}"))),
-        };
-        let (spec, id) = match jobs::spec_file(self.config_dir, &config, file) {
+        let (spec, id) = match self.spec_ready(file) {
             Ok(found) => found,
-            Err(why) => return Ok(Ended::new(Outcome::Refused, why)),
+            Err(ended) => return Ok(ended),
         };
         self.mark(taken, read, started, Some(id.clone()))?;
         let ended = self.spec_task(&spec, &id, out, warn)?;
@@ -387,6 +787,15 @@ impl Loop<'_> {
             flag: Some(spec_flag(&spec)),
             ..ended.task(id)
         })
+    }
+
+    /// A `spec` job's file `file` in `specs_dir` and its task's id; `Err`: how the job ends
+    /// without running.
+    fn spec_ready(&self, file: &str) -> std::result::Result<(PathBuf, String), Ended> {
+        let config = GlobalConfig::load(self.config_dir)
+            .map_err(|e| Ended::new(Outcome::Failed, format!("{e:#}")))?;
+        jobs::spec_file(self.config_dir, &config, file)
+            .map_err(|why| Ended::new(Outcome::Refused, why))
     }
 
     /// A spec job's task `id` of file `spec`, from its run to its PR or its stop.
@@ -415,6 +824,19 @@ impl Loop<'_> {
         {
             return Ok(ended);
         }
+        self.spec_finish(spec, id, out, warn)
+    }
+
+    /// A spec job's task `id` of file `spec` after its run and its should-fix round: finished,
+    /// with its auto-merge, when it is ready and clean; `stopped` otherwise.
+    fn spec_finish(
+        &mut self,
+        spec: &Path,
+        id: &str,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Ended> {
+        let flag = spec_flag(spec);
         let Some(rec) = self.record_of(id) else {
             return Ok(Ended::new(
                 Outcome::Failed,
@@ -503,12 +925,8 @@ impl Loop<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<Ended> {
-        let config = match GlobalConfig::load(self.config_dir) {
-            Ok(config) => config,
-            Err(e) => return Ok(Ended::new(Outcome::Failed, format!("{e:#}"))),
-        };
-        if let Err(why) = jobs::template_profile(&config, profile) {
-            return Ok(Ended::new(Outcome::Refused, why));
+        if let Err(ended) = self.template_ready(profile) {
+            return Ok(ended);
         }
         self.mark(taken, read, started, None)?;
         let repo_root = self.repo_root.clone();
@@ -521,6 +939,13 @@ impl Loop<'_> {
                 Err(ended) => ended,
             },
         )
+    }
+
+    /// Whether a `template` job of `profile` may run: `Err` is how it ends without running.
+    fn template_ready(&self, profile: &str) -> std::result::Result<(), Ended> {
+        let config = GlobalConfig::load(self.config_dir)
+            .map_err(|e| Ended::new(Outcome::Failed, format!("{e:#}")))?;
+        jobs::template_profile(&config, profile).map_err(|why| Ended::new(Outcome::Refused, why))
     }
 
     /// Runs one phase of a queued `spec` or `template` job (issue 524) with its output captured,
@@ -588,38 +1013,9 @@ impl Loop<'_> {
         warn: &mut dyn Write,
     ) -> Result<Ended> {
         let command = if fix { "fix" } else { "review" };
-        if jobs::opener(&self.base_dir, &self.repo, pr).is_none() {
-            return Ok(Ended::new(
-                Outcome::Refused,
-                format!(
-                    "no task record of {} names PR #{pr} as its PR, live or archived, so sbxm \
-                     didn't open it; run `sbxm task {command} --pr {pr}` by hand instead",
-                    self.repo
-                ),
-            ));
-        }
-        let info = match self.github.pr(&self.repo, pr) {
-            Ok(info) => info,
-            Err(e) => {
-                return Ok(Ended::new(
-                    Outcome::Failed,
-                    format!("PR #{pr} could not be read: {e:#}"),
-                ));
-            }
-        };
-        match info.state {
-            PrState::Merged => {
-                return Ok(Ended::new(Outcome::Skipped, format!("PR #{pr} is merged")));
-            }
-            PrState::Closed => {
-                return Ok(Ended::new(Outcome::Skipped, format!("PR #{pr} is closed")));
-            }
-            PrState::Open => {}
-        }
-        let task = if fix {
-            record::fix_id(pr, &info.head_oid)
-        } else {
-            Some(format!("pr-{pr}"))
+        let task = match self.pr_job_ready(pr, fix) {
+            Ok(task) => task,
+            Err(ended) => return Ok(ended),
         };
         self.mark(taken, read, started, task.clone())?;
         let result = match (fix, check_run) {
@@ -637,6 +1033,35 @@ impl Loop<'_> {
         })
     }
 
+    /// Whether a `review` or (`fix`) `fix` job of PR `pr` may run: only of a PR sbxm opened
+    /// (answer 4), skipped when it is merged or closed. `Ok`: the task it works on, when known;
+    /// `Err`: how it ends without running.
+    fn pr_job_ready(&self, pr: u32, fix: bool) -> std::result::Result<Option<String>, Ended> {
+        let command = if fix { "fix" } else { "review" };
+        if jobs::opener(&self.base_dir, &self.repo, pr).is_none() {
+            return Err(Ended::new(
+                Outcome::Refused,
+                format!(
+                    "no task record of {} names PR #{pr} as its PR, live or archived, so sbxm \
+                     didn't open it; run `sbxm task {command} --pr {pr}` by hand instead",
+                    self.repo
+                ),
+            ));
+        }
+        let info = self.github.pr(&self.repo, pr).map_err(|e| {
+            Ended::new(
+                Outcome::Failed,
+                format!("PR #{pr} could not be read: {e:#}"),
+            )
+        })?;
+        match info.state {
+            PrState::Merged => Err(Ended::new(Outcome::Skipped, format!("PR #{pr} is merged"))),
+            PrState::Closed => Err(Ended::new(Outcome::Skipped, format!("PR #{pr} is closed"))),
+            PrState::Open if fix => Ok(record::fix_id(pr, &info.head_oid)),
+            PrState::Open => Ok(Some(format!("pr-{pr}"))),
+        }
+    }
+
     /// A `run` job: an open issue the loop would take (`task loop --check`'s reasons), then the
     /// task as the loop runs one it picked itself, to its PR or its parking.
     fn run_issue(
@@ -648,44 +1073,58 @@ impl Loop<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<Ended> {
-        let open = match self.github.issues_open(&self.repo) {
-            Ok(open) => open,
-            Err(e) => {
-                return Ok(Ended::new(
-                    Outcome::Failed,
-                    format!("the open issues could not be read: {e:#}"),
-                ));
-            }
-        };
-        let Some(found) = open.iter().find(|i| i.number == issue) else {
-            return Ok(Ended::new(
-                Outcome::Refused,
-                format!("#{issue} is not an open issue of {}", self.repo),
-            ));
-        };
-        let reasons = match check::reasons(self.config_dir, &self.repo, self.github, &open, found) {
-            Ok(reasons) => reasons,
-            Err(e) => {
-                return Ok(Ended::new(
-                    Outcome::Failed,
-                    format!("#{issue} could not be checked: {e:#}"),
-                ));
-            }
-        };
-        if !reasons.is_empty() {
-            return Ok(Ended::new(Outcome::Refused, reasons.join("; ")));
-        }
-        // Where its labels pin it (issue 600), refused as the loop's own pick refuses it: the
-        // reasons above read `cloud_slots` now, the loop when it started.
-        let location = match location::for_loop(&found.labels, self.cloud_slots) {
-            Ok(location) => location,
-            Err(reason) => return Ok(Ended::new(Outcome::Refused, reason)),
+        let location = match self.run_ready(issue) {
+            Ok(found) => found.location,
+            Err(ended) => return Ok(ended),
         };
         self.locations.insert(issue, location);
         let id = format!("issue-{issue}");
         self.mark(taken, read, started, Some(id.clone()))?;
         let mut stops = Vec::new();
-        let ended = match self.task(issue, true, 0, &mut stops, out, warn) {
+        let end = self.task(issue, true, 0, &mut stops, out, warn);
+        Ok(self.run_ended(issue, end).task(id))
+    }
+
+    /// Whether a `run` job of `issue` may run: an open issue the loop would take (`task loop
+    /// --check`'s reasons), with where its labels pin it. `Err`: how it ends without running.
+    fn run_ready(&self, issue: u32) -> std::result::Result<RunIssue, Ended> {
+        let open = self.github.issues_open(&self.repo).map_err(|e| {
+            Ended::new(
+                Outcome::Failed,
+                format!("the open issues could not be read: {e:#}"),
+            )
+        })?;
+        let Some(found) = open.iter().find(|i| i.number == issue) else {
+            return Err(Ended::new(
+                Outcome::Refused,
+                format!("#{issue} is not an open issue of {}", self.repo),
+            ));
+        };
+        let reasons = check::reasons(self.config_dir, &self.repo, self.github, &open, found)
+            .map_err(|e| {
+                Ended::new(
+                    Outcome::Failed,
+                    format!("#{issue} could not be checked: {e:#}"),
+                )
+            })?;
+        if !reasons.is_empty() {
+            return Err(Ended::new(Outcome::Refused, reasons.join("; ")));
+        }
+        // Where its labels pin it (issue 600), refused as the loop's own pick refuses it: the
+        // reasons above read `cloud_slots` now, the loop when it started.
+        let location = location::for_loop(&found.labels, self.cloud_slots)
+            .map_err(|reason| Ended::new(Outcome::Refused, reason))?;
+        Ok(RunIssue {
+            location,
+            title: found.title.clone(),
+            size: queue::size(&found.labels).map(str::to_owned),
+            labeled: found.labels.iter().any(|l| l == queue::READY_LABEL),
+        })
+    }
+
+    /// How a `run` job ends, from how its task ended.
+    fn run_ended(&self, issue: u32, end: std::result::Result<End, Halt>) -> Ended {
+        match end {
             Ok(End::Done { outcome, .. }) => Ended::new(Outcome::Done, outcome),
             Ok(End::Parked { .. }) if (self.env.stop_requested)() => {
                 Ended::new(Outcome::Stopped, "stopped on request")
@@ -733,9 +1172,120 @@ impl Loop<'_> {
                     ..Ended::new(Outcome::Stopped, stop)
                 }
             }
-        };
-        Ok(ended.task(id))
+        }
     }
+
+    /// What a `run` job's task's end does, once the loop supervised it as a task child (issue
+    /// 633): its result file, its log row and its line. `Some` is the stop of the loop it asks
+    /// for.
+    pub(super) fn run_job_ended(
+        &mut self,
+        file: JobFile,
+        issue: u32,
+        end: std::result::Result<End, Halt>,
+        interrupted_by: Option<String>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<anyhow::Error>> {
+        let ended = match interrupted_by {
+            Some(why) => interrupted_because(&why),
+            None => self.run_ended(issue, end),
+        };
+        let ended = ended.task(format!("issue-{issue}"));
+        self.file_done(file, ended, out, warn)
+    }
+}
+
+/// A `run` job's issue, as the loop takes it.
+struct RunIssue {
+    location: Option<Location>,
+    title: String,
+    size: Option<String>,
+    labeled: bool,
+}
+
+/// A `run` job taken, for the loop to start as a task child (issue 633).
+pub(super) struct RunJob {
+    pub file: JobFile,
+    pub issue: u32,
+    pub title: String,
+    pub size: Option<String>,
+    /// Its issue has the loop's label.
+    pub labeled: bool,
+    /// Where it runs.
+    pub slot: Location,
+}
+
+/// A queued job taken (issue 633): what its result needs.
+pub(super) struct JobFile {
+    /// Its file in `queue/running/`.
+    taken: PathBuf,
+    label: String,
+    read: AsRead,
+    started: u64,
+}
+
+/// A queued job running as a child (issue 633), with what its end needs.
+pub(super) struct Queued {
+    file: JobFile,
+    /// The slot its children hold.
+    slot: Location,
+    what: QueuedWhat,
+}
+
+impl Queued {
+    /// Whether it may open a PR: a `spec` job (issue 633, answer 5).
+    pub(super) fn opens_pr(&self) -> bool {
+        matches!(self.what, QueuedWhat::Spec { .. })
+    }
+
+    /// Whether it is a `spec` job of `file` in `specs_dir`.
+    pub(super) fn runs_spec(&self, file: &str) -> bool {
+        matches!(&self.what, QueuedWhat::Spec { spec, .. }
+            if spec.file_name() == Some(std::ffi::OsStr::new(file)))
+    }
+}
+
+/// Which queued job a child runs.
+enum QueuedWhat {
+    /// `task review --pr N`, or (`fix`) `task fix --pr N`; `task`: the task it works on.
+    Pr {
+        pr: u32,
+        fix: bool,
+        task: Option<String>,
+    },
+    /// `template build`.
+    Template { profile: String, harness: Harness },
+    /// `task run --spec`, then (`should_fix`) its should-fix round; then its finish here.
+    Spec {
+        spec: PathBuf,
+        id: String,
+        should_fix: bool,
+    },
+}
+
+/// A job whose child ended without writing an outcome (killed or crashed): `interrupted`, as a
+/// job a stopped loop left running is, and never run again (issue 633).
+fn interrupted(end: &PhaseEnd) -> Option<Ended> {
+    match end {
+        PhaseEnd::Missing(why) => Some(interrupted_because(why)),
+        PhaseEnd::Outcome(_) | PhaseEnd::Unreadable { .. } => None,
+    }
+}
+
+/// [`interrupted`], for a child that ended without an outcome for `why`.
+fn interrupted_because(why: &str) -> Ended {
+    Ended::new(Outcome::Interrupted, format!("{why}; not run again"))
+}
+
+/// Queued job `path` as its file says now, without taking it; `None` for one that can't be read
+/// or isn't a job (its run says why).
+fn peek(path: &Path) -> Option<Job> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    jobs::parse(&std::fs::read_to_string(path).ok()?).ok()
 }
 
 /// A job file's text in the log when it isn't a job: `job <file name>`.
