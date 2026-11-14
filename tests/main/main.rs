@@ -177,6 +177,7 @@ mod task_log_open;
 mod task_logs;
 mod task_long_name;
 mod task_loop;
+mod task_loop_adopt;
 mod task_loop_arm;
 mod task_loop_check;
 mod task_loop_check_fix;
