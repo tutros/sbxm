@@ -311,6 +311,7 @@ fn quiet_disk() -> sbxm::status::footer::Disk {
 
 fn env() -> Env {
     Env {
+        placement: Default::default(),
         now: Box::new(|| T0),
         sleep: Box::new(|_| {}),
         terminal: false,

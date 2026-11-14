@@ -324,6 +324,7 @@ fn frame(base: &Path, gh: &FakeGitHub) -> String {
         repo: Ok(REPO.into()),
     };
     let env = status::Env {
+        placement: Default::default(),
         now: Box::new(|| T0),
         sleep: Box::new(|_| {}),
         terminal: false,

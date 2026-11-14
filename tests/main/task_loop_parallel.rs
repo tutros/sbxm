@@ -124,6 +124,7 @@ mod status_children {
             repo: Ok("o/r".into()),
         };
         let env = Env {
+            placement: Default::default(),
             now: Box::new(|| T0),
             sleep: Box::new(|_| {}),
             terminal: false,
@@ -279,7 +280,7 @@ mod started_child {
 
 use crate::common;
 
-mod several {
+pub(crate) mod several {
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, VecDeque};
     use std::fs;

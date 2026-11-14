@@ -117,6 +117,33 @@ pub struct Resources {
     /// hash.
     #[serde(default, skip_serializing)]
     pub cloud_slots: Option<u32>,
+    /// Where the loop starts its next issue while `cloud_slots` is set (issue 648). Not per
+    /// sandbox, so not part of any config hash.
+    #[serde(default, skip_serializing)]
+    pub placement: Placement,
+}
+
+/// `[resources] placement`: which free slot the loop fills first with the next issue (issue
+/// 648); only read while `cloud_slots` is set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Placement {
+    /// The first free slot, local first, takes the first issue in the queue's order (decision
+    /// 317(4)).
+    #[default]
+    LocalFirst,
+    /// A free cloud slot takes the largest issue that may run there, a free local slot the
+    /// first in the queue's order.
+    CloudFirst,
+}
+
+impl Placement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Placement::LocalFirst => "local-first",
+            Placement::CloudFirst => "cloud-first",
+        }
+    }
 }
 
 impl GlobalConfig {
@@ -859,6 +886,7 @@ mod agent_kit_tests {
             memory: "8g".into(),
             sandbox_slots: None,
             cloud_slots: None,
+            placement: Default::default(),
         };
         let hash = |kit| config_hash_with_kit("default", &profile, &resources, Harness::Pi, kit);
 
@@ -875,6 +903,7 @@ mod agent_kit_tests {
             memory: "8g".into(),
             sandbox_slots: None,
             cloud_slots: None,
+            placement: Default::default(),
         };
         for harness in [Harness::Pi, Harness::Antigravity] {
             let toml = hash_input_toml("default", &profile, &resources, harness, false).unwrap();
@@ -891,6 +920,7 @@ mod agent_kit_tests {
             memory: "8g".into(),
             sandbox_slots: None,
             cloud_slots: None,
+            placement: Default::default(),
         };
         for harness in [Harness::Claude, Harness::Codex] {
             let toml = hash_input_toml("default", &profile, &resources, harness, false).unwrap();

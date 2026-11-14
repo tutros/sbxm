@@ -70,6 +70,7 @@ fn github(issues: Vec<Issue>) -> FakeGitHub {
 
 fn env(terminal: bool, width: usize) -> Env {
     Env {
+        placement: Default::default(),
         now: Box::new(|| T0),
         sleep: Box::new(|_| {}),
         terminal,

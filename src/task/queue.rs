@@ -197,6 +197,24 @@ pub fn queue_order(open: &[Issue]) -> Vec<u32> {
     queue.into_iter().map(|i| i.number).collect()
 }
 
+/// The queue as a free cloud slot takes it with `[resources] placement = "cloud-first"` (issue
+/// 648): the issues of [`queue_order`], size L, then M, then S, then unsized, and within a size
+/// the oldest first.
+pub fn largest_first(open: &[Issue]) -> Vec<u32> {
+    let rank = |number: &u32| {
+        let labels = open.iter().find(|i| i.number == *number).map(|i| &i.labels);
+        match labels.and_then(|l| size(l)) {
+            Some("L") => 0,
+            Some("M") => 1,
+            Some("S") => 2,
+            _ => 3,
+        }
+    };
+    let mut queue = queue_order(open);
+    queue.sort_by_key(|n| (rank(n), *n));
+    queue
+}
+
 /// Every `#<n>` on an issue body's `**Depends on:**` line, in order.
 pub fn depends_on(body: &str) -> Vec<u32> {
     super::select::field_numbers(body, "Depends on")

@@ -155,6 +155,7 @@ fn quiet_disk() -> sbxm::status::footer::Disk {
 
 fn env(terminal: bool, width: usize) -> Env {
     Env {
+        placement: Default::default(),
         now: Box::new(|| T0),
         sleep: Box::new(|_| {}),
         terminal,
@@ -714,6 +715,7 @@ fn github_is_called_on_the_first_frame_not_59_seconds_later_and_again_after_61()
     let clock = Rc::new(Cell::new(T0));
     let steps = Rc::new(std::cell::RefCell::new(vec![2u64, 59]));
     let env = Env {
+        placement: Default::default(),
         now: Box::new({
             let clock = Rc::clone(&clock);
             move || clock.get()
@@ -848,6 +850,7 @@ fn the_section_writes_nothing_and_never_calls_sbx() {
 #[test]
 fn render_is_pure_over_its_view() {
     let view = View {
+        cloud_first: false,
         lock: Lock::Running(loop_process()),
         work: Some(Work::default()),
         snapshot: Some(Snapshot {

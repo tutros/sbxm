@@ -66,6 +66,7 @@ fn queued(base: &Path, name: &str, text: &str, secs: u64) {
 
 fn env(terminal: bool) -> Env {
     Env {
+        placement: Default::default(),
         now: Box::new(|| T0),
         sleep: Box::new(|_| {}),
         terminal,

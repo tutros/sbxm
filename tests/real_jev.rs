@@ -244,6 +244,7 @@ fn live_jev_call() {
             memory: "2g".into(),
             sandbox_slots: None,
             cloud_slots: None,
+            placement: Default::default(),
         },
         &backend,
     )

@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::backend::SandboxBackend;
-use crate::config::GlobalConfig;
+use crate::config::{GlobalConfig, Placement};
 use crate::github::GitHubBackend;
 use crate::slot;
 use crate::status::{cloud, footer, looping, runs, sandboxes, tasks};
@@ -43,6 +43,9 @@ pub struct Env {
     pub slots: Option<(u32, slot::Gate)>,
     /// `cloud_slots`, when set: a second line names who holds the cloud slots (issue 599).
     pub cloud_slots: Option<(u32, slot::Gate)>,
+    /// `[resources] placement`: the Loop section names it when it is `cloud-first` and
+    /// `cloud_slots` is set (issue 648).
+    pub placement: Placement,
 }
 
 impl Env {
@@ -66,6 +69,7 @@ impl Env {
                 .resources
                 .cloud_slots
                 .map(|count| (count, slot::Gate::default())),
+            placement: config.resources.placement,
         }
     }
 }
@@ -154,7 +158,9 @@ pub fn run_with(
         frame.section(&runs::render(&comparisons, started, width))?;
         if let Some(source) = loop_source {
             let cloud_slots = env.cloud_slots.as_ref().map(|(count, _)| *count);
-            let view = loop_view(base, probe, source, cloud_slots, &mut cache, started);
+            let mut view = loop_view(base, probe, source, cloud_slots, &mut cache, started);
+            // Only read with `cloud_slots` set, so only shown then (issue 648).
+            view.cloud_first = cloud_slots.is_some() && env.placement == Placement::CloudFirst;
             frame.section(&looping::render(&view, width))?;
         }
         if let Some((count, gate)) = &env.slots {
@@ -270,6 +276,7 @@ fn loop_view(
         snapshot: Some(snapshot),
         pause: crate::task::loop_pause::read(base),
         jobs: looping::read_jobs(base),
+        cloud_first: false,
     }
 }
 

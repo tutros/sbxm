@@ -192,6 +192,7 @@ mod task_loop_notify_not_run;
 mod task_loop_owner;
 mod task_loop_parallel;
 mod task_loop_pause_medium;
+mod task_loop_placement;
 mod task_loop_queue;
 mod task_loop_real_check;
 mod task_loop_related_usage;

@@ -6,7 +6,10 @@
 //!
 //! - **Routing** (317(4)): the next issue goes to the first free slot, local first, then cloud;
 //!   `run-local` and `run-cloud` pin it. An issue whose place is full keeps its place in the
-//!   queue, and the first issue in order that fits a free slot starts instead.
+//!   queue, and the first issue in order that fits a free slot starts instead. With
+//!   `[resources] placement = "cloud-first"` (issue 648) a free cloud slot takes the largest
+//!   issue that may run there ([`queue::largest_first`]), and a free local slot the first in the
+//!   queue's order that may run locally.
 //! - **The loop's own steps never wait for a slot:** a resolve, a log-fix or a queued job whose
 //!   slot a child holds is postponed to a later pass; once free, they start as job children
 //!   ([`super::job_children`], issue 633) before any new issue.
@@ -30,6 +33,7 @@ use super::{
     Retry, Started, first_line, jobs as queued, needs_user, note, sign_in_stop,
 };
 use crate::backend::Location;
+use crate::config::Placement;
 use crate::harness::Harness;
 use crate::task::outcome;
 use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
@@ -44,6 +48,8 @@ pub const TICK: Duration = Duration::from_secs(2);
 pub struct Slots {
     pub local: u32,
     pub cloud: u32,
+    /// Which free slot takes the next issue first (issue 648).
+    pub placement: Placement,
 }
 
 impl Slots {

@@ -20,6 +20,7 @@ impl ProcessProbe for Gone {
 
 fn env(slots: Option<(u32, sbxm::slot::Gate)>) -> Env {
     Env {
+        placement: Default::default(),
         now: Box::new(|| 1_790_000_000),
         sleep: Box::new(|_| {}),
         terminal: false,
