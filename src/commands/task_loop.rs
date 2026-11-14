@@ -1890,7 +1890,11 @@ impl Loop<'_> {
     /// ([`dead_owns`]), whose recorded process has ended and that have an `outcome.json`, whose
     /// issue has no row in a log `dead` wrote: one with a row there was acted on (parked, say)
     /// before `dead` died. None taken over: none. Read only, before anything is written.
-    fn ended_under(&self, dead: Option<&queue::LockFile>) -> Result<Vec<u32>> {
+    fn ended_under(
+        &mut self,
+        dead: Option<&queue::LockFile>,
+        warn: &mut dyn Write,
+    ) -> Result<Vec<u32>> {
         let Some(dead) = dead else {
             return Ok(Vec::new());
         };
@@ -1914,16 +1918,44 @@ impl Loop<'_> {
                 found.push(rec.number);
             }
         }
-        if found.is_empty() {
-            return Ok(found);
-        }
-        let started = crate::run::results::parse_timestamp(&dead.process.started_at).unwrap_or(0);
-        for log in loop_log::since(&self.base_dir, started, &self.log)? {
-            let text = fs::read_to_string(&log)
-                .with_context(|| format!("cannot read {}", log.display()))?;
-            found.retain(|&issue| !queue::has_row(&text, issue));
+        if !found.is_empty() {
+            self.unlogged(dead, &mut found, warn);
         }
         Ok(found)
+    }
+
+    /// Keeps in `issues` those with no row in a log `dead` wrote (issue 657). A log that can't be
+    /// listed or read is a warning, as at the start's late posting (issue 594), and counts as
+    /// having no rows: it never stops the start's recovery before the cut-off tasks are marked
+    /// owed and the adopted ones named in the lock (review M-1).
+    fn unlogged(&mut self, dead: &queue::LockFile, issues: &mut Vec<u32>, warn: &mut dyn Write) {
+        let started = crate::run::results::parse_timestamp(&dead.process.started_at).unwrap_or(0);
+        let logs = match loop_log::since(&self.base_dir, started, &self.log) {
+            Ok(logs) => logs,
+            Err(e) => {
+                let _ = self.warn_once(
+                    warn,
+                    format!(
+                        "{e:#}; the dead loop's logs were not checked for the tasks it acted on"
+                    ),
+                );
+                return;
+            }
+        };
+        for log in logs {
+            match fs::read_to_string(&log) {
+                Ok(text) => issues.retain(|&issue| !queue::has_row(&text, issue)),
+                Err(e) => {
+                    let _ = self.warn_once(
+                        warn,
+                        format!(
+                            "cannot read {}: {e}; the dead loop's rows in it were not checked",
+                            log.display()
+                        ),
+                    );
+                }
+            }
+        }
     }
 
     /// The children that outlived `dead`, the loop whose lock this loop took over (issue 643):
@@ -4246,7 +4278,7 @@ fn run_loop(
 
     // The dead loop's children that ended with an outcome it never acted on (issue 657), read
     // first; then the cut-off tasks: their owed resumes are written before anything else can fail.
-    let result = lp.ended_under(dead.as_ref()).and_then(|ended| {
+    let result = lp.ended_under(dead.as_ref(), warn).and_then(|ended| {
         let due = lp.cut_off(dead.as_ref(), &ended, out, warn)?;
         // The children that outlived the dead loop, adopted (issue 643), and those that ended
         // with an outcome (issue 657).

@@ -1381,6 +1381,43 @@ fn a_row_in_the_log_of_a_loop_from_before_the_dead_one_does_not_count() {
     assert_eq!(rows(&f, 3).len(), 1, "{}", f.log_text());
 }
 
+// --- review M-1 of issue 657: an unreadable log of the dead loop's ---
+
+#[test]
+fn an_unreadable_log_is_a_warning_and_the_dead_loops_tasks_are_still_recovered() {
+    let f = fixture(Some(2), true);
+    ended_ready(&f.base(), 3);
+    ended_under(&f.base(), 4, Act::Crash, None, Process::new(DEAD_LOOP, 0));
+    let mut rec = read(&f.base(), 4);
+    rec.status = Status::Running;
+    record::write(&record::task_dir(&f.base(), "issue-4"), &rec).unwrap();
+    let bad = sbxm::task::loop_log::path(&f.base(), START - 600);
+    fs::create_dir_all(bad.parent().unwrap()).unwrap();
+    fs::write(&bad, [0xff, 0xfe, b'|']).unwrap();
+    let gh = github(&[]);
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    assert!(
+        run.out
+            .contains(&format!("warning: cannot read {}", bad.display())),
+        "{}",
+        run.out
+    );
+    assert_eq!(run.starts(), ["start 4 resume cloud"], "{}", run.out);
+    run.at("finish 3");
+    run.at("finish 4");
+    assert_eq!(read(&f.base(), 3).stage, Stage::Finished);
+    assert_eq!(rows(&f, 3).len(), 1, "{}", f.log_text());
+
+    // The next start finds nothing left to recover.
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    assert!(run.events.is_empty(), "{:?}\n{}", run.events, run.out);
+}
+
 // --- `sbxm status` lists an adopted child as the loop's ---
 
 /// A probe for which the pids in `.0` are gone.
