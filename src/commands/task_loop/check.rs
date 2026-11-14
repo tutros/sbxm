@@ -10,7 +10,9 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use super::{OPEN_POINTS, Options, refused_reason, unmerged_dependencies, waiting_reason};
+use super::{
+    OPEN_POINTS, Options, refused_reason, related_reason, unmerged_dependencies, waiting_reason,
+};
 use crate::config::GlobalConfig;
 use crate::github::{GitHubBackend, Issue};
 use crate::status::looping::{self, Lock};
@@ -137,8 +139,9 @@ pub(crate) fn reasons(
 
 /// Every reason the loop would pass `issue` over, or none: the label and the size, the open
 /// points, then the loop's own checks in its order (its location's labels, an unmerged
-/// dependency, else what `task run` would refuse before any write), then a branch of the task's
-/// name already on origin, which `task finish` would refuse to push over.
+/// dependency, a Related partner with a task, else what `task run` would refuse before any
+/// write), then a branch of the task's name already on origin, which `task finish` would refuse
+/// to push over.
 fn reasons_in(
     base_dir: &Path,
     cloud_slots: Option<u32>,
@@ -163,9 +166,14 @@ fn reasons_in(
     }
     let unmerged = unmerged_dependencies(github, repo, open, &issue.body);
     if unmerged.is_empty() {
-        let problems = pipeline::preflight_issues_in(base_dir, repo, github, open, &[number])?;
-        if let Some(reason) = problems.get(&number) {
-            reasons.push(refused_reason(reason));
+        let related = pipeline::related_tasks_in(base_dir, open, number)?;
+        if related.is_empty() {
+            let problems = pipeline::preflight_issues_in(base_dir, repo, github, open, &[number])?;
+            if let Some(reason) = problems.get(&number) {
+                reasons.push(refused_reason(reason));
+            }
+        } else {
+            reasons.push(related_reason(&related));
         }
     } else {
         reasons.push(waiting_reason(&unmerged));

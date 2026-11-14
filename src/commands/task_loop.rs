@@ -56,7 +56,7 @@ use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
 use crate::task::{
     findings, finish, location, lock, loop_log, medium, next, pipeline, pr_fix, real_check, resume,
-    trial, window,
+    select, trial, window,
 };
 
 mod check;
@@ -1447,6 +1447,18 @@ impl Loop<'_> {
                 });
                 continue;
             }
+            // A Related partner with a task (decision 317(9)): it waits until that task's record
+            // is gone, as for a dependency, rather than being refused for the run.
+            let related = self.related_tasks(open, number)?;
+            if !related.is_empty() {
+                let reason = related_reason(&related);
+                self.say_once(out, format!("skipped #{number}{title}: {reason}"))?;
+                waiting.push(Skipped {
+                    issue: number,
+                    reason,
+                });
+                continue;
+            }
             tried.insert(number);
             let problems =
                 pipeline::preflight_issues(self.config_dir, &self.repo, self.github, &[number])?;
@@ -1473,6 +1485,18 @@ impl Loop<'_> {
 
     fn unmerged_dependencies(&self, open: &[Issue], body: &str) -> Vec<String> {
         unmerged_dependencies(self.github, &self.repo, open, body)
+    }
+
+    /// The issues with a task that issue `number` is related to: a task record, or a running
+    /// child whose record may not be written yet.
+    fn related_tasks(&self, open: &[Issue], number: u32) -> Result<Vec<u32>> {
+        let mut related = pipeline::related_tasks_in(&self.base_dir, open, number)?;
+        for n in select::related_among(open, number, &self.running_issues) {
+            if !related.contains(&n) {
+                related.push(n);
+            }
+        }
+        Ok(related)
     }
 
     /// One task, to its PR or its parking (decision 245(d)). `label`: its issue has the loop's
@@ -3590,6 +3614,12 @@ fn paused_line(pause: &Pause) -> String {
 /// Why an issue waiting on [`unmerged_dependencies`] is passed over.
 fn waiting_reason(unmerged: &[String]) -> String {
     format!("depends on {}, not merged", unmerged.join(", "))
+}
+
+/// Why an issue related to issues with a task waits (decision 317(9)).
+fn related_reason(related: &[u32]) -> String {
+    let list: Vec<String> = related.iter().map(|n| format!("#{n} (related)")).collect();
+    format!("waits for {}", list.join(", "))
 }
 
 /// Why an issue `task run` would refuse before any write is passed over.

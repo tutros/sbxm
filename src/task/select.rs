@@ -119,6 +119,23 @@ fn early_skip(issue: &Issue, taken: &[u32], open_numbers: &[u32]) -> Option<Reas
     (!blockers.is_empty()).then_some(Reason::Blocked(blockers))
 }
 
+/// The issues of `among` that issue `number` is related to, in `among`'s order. "Related" is
+/// often written on one of the two issues only, so it is read both ways, on the open issues'
+/// bodies.
+pub fn related_among(open: &[Issue], number: u32, among: &[u32]) -> Vec<u32> {
+    let related_of = |n: u32| {
+        open.iter()
+            .find(|i| i.number == n)
+            .map_or_else(Vec::new, |i| field_numbers(&i.body, "Related"))
+    };
+    let own = related_of(number);
+    among
+        .iter()
+        .copied()
+        .filter(|&t| t != number && (own.contains(&t) || related_of(t).contains(&number)))
+        .collect()
+}
+
 /// The `(pr, issue)` pairs whose PR state an automatic selection needs: `must-fix` issues naming
 /// a PR that no earlier rule skips. Nothing else is worth a lookup (or a warning about one).
 pub fn needs_pr_state(open: &[Issue], in_progress: &[u32]) -> Vec<(u32, u32)> {
@@ -142,12 +159,6 @@ pub fn select(
     prs: &HashMap<u32, PrState>,
 ) -> Selection {
     let open_numbers: Vec<u32> = open.iter().map(|i| i.number).collect();
-    // "Related" is often written on one of the two issues only, so look both ways.
-    let related_of: HashMap<u32, Vec<u32>> = open
-        .iter()
-        .map(|i| (i.number, field_numbers(&i.body, "Related")))
-        .collect();
-
     let mut selection = Selection::default();
     if let Some(wanted) = explicit {
         selection.not_open = wanted
@@ -170,12 +181,7 @@ pub fn select(
             break;
         }
         let number = candidate.number;
-        let own = related_of.get(&number).map_or(&[][..], Vec::as_slice);
-        let clashes: Vec<u32> = taken
-            .iter()
-            .copied()
-            .filter(|t| own.contains(t) || related_of.get(t).is_some_and(|r| r.contains(&number)))
-            .collect();
+        let clashes = related_among(open, number, &taken);
 
         if let Some(reason) = early_skip(candidate, &taken, &open_numbers) {
             selection.skips.push((number, reason));
