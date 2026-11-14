@@ -149,8 +149,8 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     line naming the reviewed commit), a draft's failing review included, when that review covered the PR's head.
     `task review --pr N` then refuses that head before anything is written (`already reviewed at <commit>`;
     `--force` reviews it anyway), but only when the review's `sbxm/review` status is on it: a head with none is
-    reviewed again with no flag, so a queued `review` job runs too, and a status that can't be read is refused
-    and says so (issue 586); a later commit on the PR (a hand fix, a rebase) is reviewed as usual. Only the
+    reviewed again with no flag, and a status that can't be read is refused and says so (issue 586); a queued
+    `review` job passes `--force`, so it reviews that head too (issue 649); a later commit on the PR (a hand fix, a rebase) is reviewed as usual. Only the
     issue task's own `task.json` on this machine decides, never a comment on GitHub; with no task folder recording
     the PR, the review runs as before. A task that continued an open PR and spec tasks (which open no PR) are
     unchanged.
@@ -161,7 +161,10 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     (one that could not run at all stops the task without spending any). Rounds
     after the first review only the commits made since the last one, and one more review of everything confirms a
     clean one before the task is `ready`. If the budget runs out with findings still open, the task is still
-    `ready`, with `stopped` set to `rounds-exhausted` in `task.json`, and `task finish` opens its PR as a draft whose
+    `ready`, with `stopped` set to `rounds-exhausted` in `task.json`. A must-fix finding that validly repeats an
+    earlier one (`Repeat of:`) is tolerated once per task with one more fix round while the budget has one (issue
+    647); the second such repeat stops the task with `stopped` set to `repeat-finding`, rounds left or not. Either
+    way the task is `ready`, and `task finish` opens its PR as a draft whose
     body lists the reason and the must-fix findings left (issue 120); a clean task gets a normal PR. A task that
     continues an open PR puts the same list in its comment on that PR instead (it can't make the PR a draft).
   - **The worker's hand-backs are on the PR (decision 283):** the PR description `task finish` opens, a draft's too,

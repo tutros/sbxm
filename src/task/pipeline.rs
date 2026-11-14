@@ -3918,15 +3918,20 @@ fn review_round_after(prepared: &Prepared, round: u32, moving_helps: bool) -> Re
     })
 }
 
+/// Whether the task has a fix round left in its budget (`Record::fix_rounds`).
+fn budget_left(record: &record::Record) -> bool {
+    record.round < record.fix_rounds
+}
+
 /// Refuses a recorded review result that [`review_rounds`] would follow with another review
-/// round (a clean narrow review, or findings with fix-round budget left and no repeat) when no
-/// review round number is left after it, so `task resume` refuses before it touches a sandbox,
-/// runs a fix round or writes anything (issue 161).
+/// round (a clean narrow review, or findings with fix-round budget left and no repeat or the
+/// task's first, issue 647) when no review round number is left after it, so `task resume`
+/// refuses before it touches a sandbox, runs a fix round or writes anything (issue 161).
 pub(super) fn check_replay(prepared: &Prepared, result: &record::ReviewResult) -> Result<()> {
     let another_review = if result.must_fix == 0 {
         !result.full
     } else {
-        !result.repeat && prepared.record.round < prepared.record.fix_rounds
+        !(result.repeat && prepared.record.repeat_tolerated) && budget_left(&prepared.record)
     };
     if another_review {
         // `result.round` came from the record, not freshly read from `review-<n>.md` files.
@@ -3979,12 +3984,14 @@ pub(super) fn review_rounds(
             continue;
         }
         // The no-progress rule (spec §5.3, issue 119): a validated repeat stops the task even
-        // with rounds left in the budget, before the rounds-exhausted check below.
-        if repeat {
+        // with rounds left in the budget, before the rounds-exhausted check below. The task's
+        // first one is tolerated once (issue 647): it gets one more fix round if the budget
+        // has one, and stops as rounds-exhausted if not.
+        if repeat && prepared.record.repeat_tolerated {
             prepared.record.stopped = Some(record::Stopped::RepeatFinding);
             break;
         }
-        if prepared.record.round >= prepared.record.fix_rounds {
+        if !budget_left(&prepared.record) {
             prepared.record.stopped = Some(record::Stopped::RoundsExhausted);
             break;
         }
@@ -3993,7 +4000,19 @@ pub(super) fn review_rounds(
         // change anything (issue 161). `round` is already in memory, not freshly read from
         // files, so moving one would not free it.
         let next = review_round_after(prepared, round, false)?;
-        run_fix_round(env, prepared, None)?;
+        let input = fix_input(env, prepared, None)?;
+        if repeat {
+            // Spent only once the round can start (its input read, no ambiguous create in the
+            // way), and before it writes the record, so a resume can't tolerate a second.
+            super::resume::refuse_ambiguous(&prepared.record, "run a fix round")?;
+            prepared.record.repeat_tolerated = true;
+            (env.progress)(&format!(
+                "{}: review round {round} repeats a must-fix finding, tolerated once: one more \
+                 fix round",
+                prepared.record.id
+            ));
+        }
+        start_fix_round(env, prepared, &input)?;
         prepared.record.round += 1;
         report.fix_ran = true;
         if pass_gates(env, prepared, &mut report, "after-fix")? {

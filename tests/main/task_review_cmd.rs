@@ -13,7 +13,7 @@ use sbxm::harness::Harness;
 use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::record;
 
-fn config(reviewer: &str) -> Fixture {
+pub(crate) fn config(reviewer: &str) -> Fixture {
     fixture_with(&format!(
         "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\n\
          [reviewer]\nharness = \"{reviewer}\"\n"
@@ -28,7 +28,7 @@ fn config_no_fix_rounds(reviewer: &str) -> Fixture {
     ))
 }
 
-const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
+pub(crate) const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
 const ONE: &str = "Must-fix findings: 1\n\n## Must fix\n\n### M-1 - a.txt:1 wrong.\n";
 
 fn backend(f: &Fixture, reviews: &[&str]) -> FakeBackend {
@@ -492,14 +492,14 @@ fn pr_github() -> FakeGitHub {
         .with_issue_text(issue_text(4))
 }
 
-fn pr_options(f: &Fixture) -> Options {
+pub(crate) fn pr_options(f: &Fixture) -> Options {
     let mut opts = options(f);
     opts.target = Target::Pr(7);
     opts.clone_source = Some(source(f));
     opts
 }
 
-fn pr_backend(f: &Fixture, reviews: &[&str]) -> FakeBackend {
+pub(crate) fn pr_backend(f: &Fixture, reviews: &[&str]) -> FakeBackend {
     FakeBackend::with_secrets(&["anthropic", "openai"])
         .with_exec_output_matching("codex", ok(CODEX_DONE))
         .with_exec_hook(play_reviews(
@@ -777,12 +777,12 @@ fn the_recorded_worker_decides_the_fix_adapter_and_the_default_reviewer() {
 
 // ---- Issue 198: a PR head the in-task review covered isn't reviewed again ----
 
-const REVIEWED: &str = "1111111111111111111111111111111111111111";
+pub(crate) const REVIEWED: &str = "1111111111111111111111111111111111111111";
 
 /// A finished task for issue 4 that recorded `pr` as its PR and `commit` as what its review
 /// covered and posted, as `task finish` leaves it; `continues` makes it a task that continued
 /// that PR.
-fn finished_issue_task(f: &Fixture, pr: &str, commit: &str, continues: bool) {
+pub(crate) fn finished_issue_task(f: &Fixture, pr: &str, commit: &str, continues: bool) {
     use record::{NewTask, Process, Record, Stage, Status};
     let mut task = Record::new(
         &NewTask {
@@ -820,7 +820,7 @@ fn finished_issue_task(f: &Fixture, pr: &str, commit: &str, continues: bool) {
 
 /// [`pr_github`] with PR 7's head at `head`, a body that looks like a posted review, and the
 /// review's `sbxm/review` status on the head.
-fn pr_github_at(head: &str) -> FakeGitHub {
+pub(crate) fn pr_github_at(head: &str) -> FakeGitHub {
     pr_github_unposted_at(head).with_commit_status(
         head,
         CommitStatus {
@@ -842,7 +842,7 @@ fn pr_github_unposted_at(head: &str) -> FakeGitHub {
         .with_issue_text(issue_text(4))
 }
 
-fn posted(github: &FakeGitHub) -> bool {
+pub(crate) fn posted(github: &FakeGitHub) -> bool {
     github
         .calls()
         .iter()
@@ -926,8 +926,7 @@ fn a_new_commit_on_the_pr_is_reviewed_without_force() {
 // ---- Issue 586: the in-task review counts only with its `sbxm/review` status on the head ----
 
 /// The #564 case: the in-task review covered the head but posted no `sbxm/review` status, so
-/// the head is reviewed again with no `--force`, as a queued `review` job (which passes none)
-/// runs it.
+/// the head is reviewed again with no `--force`, as a `task review --pr N` run by hand is.
 #[test]
 fn a_pr_head_the_in_task_review_covered_without_its_status_is_reviewed_without_force() {
     let f = config("codex");
@@ -976,7 +975,7 @@ fn a_pr_head_whose_review_status_cannot_be_read_is_refused_and_says_so() {
 }
 
 /// Issue 229: [`pr_github_at`] with PR 7 in `state` and from a fork or not.
-fn pr_github_with(head: &str, state: PrState, fork: bool) -> FakeGitHub {
+pub(crate) fn pr_github_with(head: &str, state: PrState, fork: bool) -> FakeGitHub {
     let mut pr = pr_info();
     pr.head_oid = head.to_owned();
     pr.state = state;

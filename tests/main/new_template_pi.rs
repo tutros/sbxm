@@ -1,5 +1,6 @@
-//! Issue #266, decision 323: a strict `pi` sandbox from a template denies the Pi kit's extra hosts
-//! and is checked after its creation, as decision 221 does for `codex`.
+//! Issue #266, decision 323: a strict `pi` sandbox from a template denies the Pi kit's extra host
+//! and is checked after its creation, as decision 221 does for `codex`; issue #644, decision 324:
+//! it keeps `platform.claude.com`.
 
 use crate::common;
 
@@ -125,17 +126,17 @@ fn denied(backend: &FakeBackend) -> Vec<String> {
     backend.creates().pop().unwrap().deny_network
 }
 
+// Issue #644, decision 324: `platform.claude.com` is a kept host (Pi's OAuth token refresh), so
+// only `registry.npmjs.org` is denied. The fixture's allow rule names `platform.claude.com:443`;
+// the check matches it without its port.
 #[test]
-fn a_strict_pi_sandbox_with_an_empty_allow_list_denies_both_extra_hosts() {
-    let (env, backend, result) = strict_pi(&[], fixture_rules());
+fn a_strict_pi_sandbox_with_an_empty_allow_list_denies_only_registry_npmjs_org() {
+    let (env, backend, result) = strict_pi(&[], rules_without_denies(&["platform.claude.com:443"]));
 
     let profile = config::Profile::load(&env.profiles_dir(), "default").unwrap();
     assert!(profile.template.unwrap().allow.is_empty());
     result.unwrap();
-    assert_eq!(
-        denied(&backend),
-        ["registry.npmjs.org", "platform.claude.com:443"]
-    );
+    assert_eq!(denied(&backend), ["registry.npmjs.org"]);
     assert!(backend.creates().pop().unwrap().template.is_some());
     assert!(
         backend
@@ -146,20 +147,9 @@ fn a_strict_pi_sandbox_with_an_empty_allow_list_denies_both_extra_hosts() {
 }
 
 #[test]
-fn a_strict_pi_sandbox_allowing_registry_npmjs_org_denies_only_platform_claude_com() {
+fn a_strict_pi_sandbox_allowing_registry_npmjs_org_denies_none_and_is_still_checked() {
     let (_env, backend, result) = strict_pi(
         &["registry.npmjs.org"],
-        rules_without_denies(&["registry.npmjs.org"]),
-    );
-
-    result.unwrap();
-    assert_eq!(denied(&backend), ["platform.claude.com:443"]);
-}
-
-#[test]
-fn a_strict_pi_sandbox_allowing_both_extra_hosts_denies_none_and_is_still_checked() {
-    let (_env, backend, result) = strict_pi(
-        &["registry.npmjs.org", "platform.claude.com"],
         rules_without_denies(&["registry.npmjs.org", "platform.claude.com:443"]),
     );
 
@@ -172,30 +162,17 @@ fn a_strict_pi_sandbox_allowing_both_extra_hosts_denies_none_and_is_still_checke
     );
 }
 
-// The kit writes `platform.claude.com:443`; `[template].allow` names hosts, and the rules check
-// compares the kit's host without its port, so an allow entry without the port keeps the host.
+// An allow entry naming the kept host, with or without the port, is harmless: the result is the
+// empty allow list's.
 #[test]
-fn allowing_platform_claude_com_without_the_port_keeps_it() {
-    let (_env, backend, result) = strict_pi(
-        &["platform.claude.com"],
-        rules_without_denies(&["platform.claude.com:443"]),
-    );
+fn allowing_platform_claude_com_with_or_without_the_port_denies_only_registry_npmjs_org() {
+    for entry in ["platform.claude.com", "platform.claude.com:443"] {
+        let (_env, backend, result) =
+            strict_pi(&[entry], rules_without_denies(&["platform.claude.com:443"]));
 
-    result.unwrap();
-    assert_eq!(denied(&backend), ["registry.npmjs.org"]);
-}
-
-// An allow entry with the port matches no host (the existing `allows` rule compares bare hosts),
-// so the host is still denied and the check passes.
-#[test]
-fn allowing_platform_claude_com_with_the_port_still_denies_it() {
-    let (_env, backend, result) = strict_pi(&["platform.claude.com:443"], fixture_rules());
-
-    result.unwrap();
-    assert_eq!(
-        denied(&backend),
-        ["registry.npmjs.org", "platform.claude.com:443"]
-    );
+        result.unwrap();
+        assert_eq!(denied(&backend), ["registry.npmjs.org"], "{entry}");
+    }
 }
 
 #[test]

@@ -281,6 +281,7 @@ fn an_issue_loops_pending_list_shows_the_reason() {
         issues: vec![5, 6],
         cap: None,
         progress: None,
+        adopted: Vec::new(),
     };
     let path = lock_path(&base);
     fs::create_dir_all(path.parent().unwrap()).unwrap();

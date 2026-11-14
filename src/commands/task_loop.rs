@@ -228,8 +228,8 @@ pub trait Steps {
     /// `task rm --merged --yes`: removes the tasks whose PRs GitHub merged, archiving their text
     /// records first (decisions 195, 293).
     fn rm_merged(&self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
-    /// `task review --pr N`, for a queued `review` job (issue 525). A `Steps` that never runs
-    /// one needs no other.
+    /// `task review --pr N --force`, for a queued `review` job (issues 525, 649). A
+    /// `Steps` that never runs one needs no other.
     fn review_pr(&self, pr: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         bail!("no review of PR #{pr} here")
     }
@@ -264,6 +264,12 @@ pub trait Steps {
     /// `task finish --spec FILE`: through the `[finish] sink` of the checkout's `sbxm-task.toml`.
     fn finish_spec(&self, spec: &Path, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         bail!("no finish of {} here", spec.display())
+    }
+    /// Takes in `process`, a child of a dead loop the loop adopted (issue 643), so the loop's
+    /// second Ctrl-C ends it with the children it started. [`TaskSteps`] hands it to its
+    /// spawner; a `Steps` that only plays phases needs no other.
+    fn adopted(&self, process: &Process) {
+        let _ = process;
     }
     /// The free-disk check of `sbx`'s sandbox drive: an error while it is under `min_free_disk`.
     fn room(&self) -> Result<()>;
@@ -498,6 +504,22 @@ impl LoopLock {
             return Ok(());
         };
         change(progress);
+        self.rewrite()
+    }
+
+    /// Names the issues whose children this loop adopted (issue 643) in its lock, for `sbxm
+    /// status`.
+    fn adopted(&mut self, children: Vec<queue::AdoptedChild>) -> Result<()> {
+        if children.is_empty() {
+            return Ok(());
+        }
+        self.file.adopted = children;
+        self.rewrite()
+    }
+
+    /// Writes the lock again, through a temporary file renamed over it, since `sbxm status` reads
+    /// it meanwhile; one no longer this process's (removed by hand) is not written again.
+    fn rewrite(&mut self) -> Result<()> {
         if !fs::read_to_string(&self.path).is_ok_and(|text| text == self.me) {
             return Ok(());
         }
@@ -525,14 +547,15 @@ impl Drop for LoopLock {
 /// lock whose process is alive refuses the second loop; one whose process is gone is taken over.
 /// A loop started with `--issue` writes its list and its `--cap` into the lock too, for `sbxm
 /// status` (issue 477); a labeled-queue loop writes its process alone, as before.
-/// Returns the lock and, when it took over a lock whose process is gone, that dead loop's
-/// process (decision 310: the tasks it was running are resumed).
+/// Returns the lock and, when it took over a lock whose process is gone, that dead loop's lock
+/// (decision 310: the tasks it was running are resumed; issue 643: its live children, and the
+/// ones it adopted, are adopted).
 fn take_lock(
     base_dir: &Path,
     opts: &Options,
     probe: &dyn ProcessProbe,
     warn: &mut dyn Write,
-) -> Result<(LoopLock, Option<Process>)> {
+) -> Result<(LoopLock, Option<queue::LockFile>)> {
     let path = queue::lock_path(base_dir);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
@@ -543,6 +566,7 @@ fn take_lock(
         issues: opts.issues.clone(),
         cap: opts.cap.filter(|_| listed),
         progress: listed.then(queue::Progress::default),
+        adopted: Vec::new(),
     };
     let me = serde_json::to_string(&contents)?;
     let mut dead = None;
@@ -570,18 +594,18 @@ fn take_lock(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
-        let held: Process = serde_json::from_str(&text).with_context(|| {
+        let held: queue::LockFile = serde_json::from_str(&text).with_context(|| {
             format!(
                 "cannot read the loop lock {}; if no `sbxm task loop` is running, delete it",
                 path.display()
             )
         })?;
-        if held.alive(probe) {
+        if held.process.alive(probe) {
             bail!(
                 "a `sbxm task loop` is already running (process {}, started {}); wait for it to \
                  stop, or stop it",
-                held.pid,
-                held.started_at
+                held.process.pid,
+                held.process.started_at
             );
         }
         // Removed only if it is still the dead loop's: a loop that took over meanwhile is live.
@@ -590,7 +614,7 @@ fn take_lock(
             writeln!(
                 warn,
                 "took over the lock of a loop that is no longer running (process {}, started {})",
-                held.pid, held.started_at
+                held.process.pid, held.process.started_at
             )?;
             dead = Some(held);
         }
@@ -637,6 +661,40 @@ enum End {
     /// Cut short by a stop request after one of its phases ran: logged, never counted as parked
     /// (a requested stop exits 0, decision 310; review M-1 of issue 570).
     Stopped(String),
+}
+
+/// A child of a dead loop that outlived it, adopted by this loop (issue 643).
+struct Adopted {
+    issue: u32,
+    title: String,
+    /// When its task started: its log row's start.
+    started: u64,
+    /// Where it runs, as its record says.
+    slot: Location,
+    /// Its process, as its record names it.
+    process: Process,
+    /// The failures in a row it had already: 1 when it is the one resume a loop took after a
+    /// cut-off ([`RESUMED_HOOK`], decision 310), so a failure of it parks it.
+    failures: u32,
+    /// The owner its record names: the loop that started it.
+    owner: Process,
+}
+
+/// Whether the dead loop whose lock this loop took over owns `rec`: the loop its child recorded,
+/// else its process (decision 322), or a child it had adopted from the loop before it, still that
+/// loop's (issue 643, review M-1).
+fn dead_owns(dead: &queue::LockFile, rec: &Record) -> bool {
+    rec.owner() == Some(&dead.process) || dead.adopted.iter().any(|a| a.is(rec))
+}
+
+/// What became of an adopted child that ended with no outcome.
+enum CutOff {
+    /// Its resume is owed: it is resumed once, as a task cut off at a restart.
+    Owed,
+    /// Its resume was taken already: parked, with this outcome for its row.
+    Parked(String),
+    /// A live command run by hand holds its lock: left to it, with this line.
+    Left(String),
 }
 
 /// What a claim found under the task's lock.
@@ -1552,12 +1610,15 @@ impl Loop<'_> {
     /// One task, to its PR or its parking (decision 245(d)). `label`: its issue has the loop's
     /// label, taken off once the task exists.
     /// `failures`: the failures in a row it already had, for one tried again after its lock was
-    /// held.
+    /// held. `first`: how its first phase ended, for an adopted child's task (issue 643), whose
+    /// phase a dead loop started.
+    #[allow(clippy::too_many_arguments)]
     fn task(
         &mut self,
         issue: u32,
         mut label: bool,
         mut failures: u32,
+        mut first: Option<PhaseEnd>,
         stops: &mut Vec<(String, u64)>,
         out: &mut dyn Write,
         warn: &mut dyn Write,
@@ -1579,7 +1640,12 @@ impl Loop<'_> {
                 Some(rec) => Some(rec.location),
                 None => self.locations.get(&issue).copied().flatten(),
             };
-            let Some(paused) = self.wait_for_room(location, out).map_err(Halt::Error)? else {
+            let adopted = first.take();
+            let paused = match adopted {
+                Some(_) => Some(0),
+                None => self.wait_for_room(location, out).map_err(Halt::Error)?,
+            };
+            let Some(paused) = paused else {
                 if !ran {
                     return Err(Halt::Stopped);
                 }
@@ -1592,9 +1658,11 @@ impl Loop<'_> {
                 stops.push((cause, self.now().saturating_sub(since)));
             }
             let resuming = self.record(issue).is_some();
-            let should_fix = self.should_fix_due(issue);
+            let should_fix = adopted.is_none() && self.should_fix_due(issue);
             should_fix_ran |= should_fix;
-            let (ended, removed) = if should_fix {
+            let (ended, removed) = if let Some(ended) = adopted {
+                (ended, None)
+            } else if should_fix {
                 (self.steps.should_fix_task(issue, out, warn), None)
             } else if resuming {
                 (self.steps.resume_task(issue, out, warn), None)
@@ -1711,14 +1779,13 @@ impl Loop<'_> {
     /// The tasks a loop was running when it died (decision 310), to be continued once, as the
     /// loop's one resume after an environment stop: this repo's issue tasks not finished and
     /// interrupted as `task status` decides it, that are either owned by `dead`, the loop whose
-    /// lock this loop took over ([`Record::owner`]: the loop its child recorded, else its process,
-    /// decision 322), or still owed their resume from an earlier start ([`Owed`]). A newly found
+    /// lock this loop took over ([`dead_owns`]), or still owed their resume from an earlier start ([`Owed`]). A newly found
     /// one is marked as owed, under its lock, before anything else runs, so a loop that stops or
     /// fails before the resume leaves it to the next loop. One whose resume was taken already, and
     /// was cut off again, is parked with its log row instead.
     fn cut_off(
         &mut self,
-        dead: Option<&Process>,
+        dead: Option<&queue::LockFile>,
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<VecDeque<Held>> {
@@ -1737,8 +1804,9 @@ impl Loop<'_> {
                 && rec.pr.is_none()
                 && rec.is_interrupted(self.probe);
             let owed = Owed::of(&rec);
-            // Owned by `dead`: the loop its child recorded, else the process (decision 322).
-            let by_dead = dead.is_some() && rec.owner() == dead;
+            // Owned by `dead`: the loop its child recorded, else the process (decision 322), or a
+            // child `dead` had adopted (issue 643).
+            let by_dead = dead.is_some_and(|dead| dead_owns(dead, &rec));
             // Owed for the process still recorded: a command run by hand since then took it.
             let owed_here = matches!(&owed, Owed::Due(p) if rec.process.as_ref() == Some(p));
             if ours && (by_dead || owed_here) {
@@ -1811,6 +1879,109 @@ impl Loop<'_> {
         Ok(due)
     }
 
+    /// The children that outlived `dead`, the loop whose lock this loop took over (issue 643):
+    /// this repo's issue tasks, not finished and with no PR, that `dead` owns ([`dead_owns`])
+    /// and whose recorded process is alive, by its identity (decision 322), not its bare pid. The
+    /// loop adopts each as its own child: it holds its slot and counts toward [`PR_CAP`] while it
+    /// runs, and the loop acts on its end. A task run by hand, or none taken over: nothing.
+    fn adopt(
+        &mut self,
+        dead: Option<&queue::LockFile>,
+        out: &mut dyn Write,
+    ) -> Result<Vec<Adopted>> {
+        let Some(dead) = dead else {
+            return Ok(Vec::new());
+        };
+        let mut found = Vec::new();
+        for dir in record::task_folders(&self.base_dir)? {
+            if check_own_folder(&self.base_dir, &dir).is_err() {
+                continue;
+            }
+            let Ok(rec) = record::read(&dir.join("task.json")) else {
+                continue;
+            };
+            let ours = rec.kind == Kind::Issue
+                && rec.repo == self.repo
+                && rec.id == format!("issue-{}", rec.number)
+                && rec.stage != Stage::Finished
+                && rec.pr.is_none()
+                && dead_owns(dead, &rec);
+            let Some(process) = rec.process.clone().filter(|p| ours && p.alive(self.probe)) else {
+                continue;
+            };
+            let Some(owner) = rec.owner().cloned() else {
+                continue;
+            };
+            found.push(Adopted {
+                issue: rec.number,
+                started: rec
+                    .stages
+                    .first()
+                    .and_then(|s| crate::run::results::parse_timestamp(&s.at))
+                    .unwrap_or_else(|| self.now()),
+                slot: rec.location,
+                failures: u32::from(matches!(Owed::of(&rec), Owed::Taken)),
+                owner,
+                title: rec.title,
+                process,
+            });
+        }
+        found.sort_by_key(|a| a.issue);
+        for a in &found {
+            writeln!(
+                out,
+                "{}: its child (process {}) outlived the loop that started it; adopted, in its {} \
+                 slot until it ends",
+                crate::title::named(&format!("#{}", a.issue), &a.title),
+                a.process.pid,
+                a.slot.as_str()
+            )?;
+        }
+        Ok(found)
+    }
+
+    /// An adopted child that ended with no outcome (issue 643, answer 3): interrupted, under the
+    /// rule [`Self::cut_off`] applies at a restart. One whose resume a loop took already is
+    /// parked; otherwise its resume is marked as owed, for `process`, before anything else runs.
+    fn adopted_cut_off(
+        &mut self,
+        issue: u32,
+        process: &Process,
+        out: &mut dyn Write,
+    ) -> Result<CutOff> {
+        let named = self.issue_named(issue);
+        let stage = self
+            .record(issue)
+            .map_or("no record".to_owned(), |r| r.stage.name().to_owned());
+        if self
+            .record(issue)
+            .is_some_and(|r| matches!(Owed::of(&r), Owed::Taken))
+        {
+            writeln!(
+                out,
+                "{named}: cut off at {stage} again after the loop resumed it once; parked, see \
+                 `sbxm task status --issue {issue}`"
+            )?;
+            return Ok(CutOff::Parked(format!(
+                "parked at {stage}: cut off again after its resume"
+            )));
+        }
+        if let Err(e) = self.mark_resume(issue, serde_json::to_value(process)?) {
+            let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
+                return Err(e);
+            };
+            return Ok(CutOff::Left(format!(
+                "{named}: {}; the loop leaves it",
+                in_use.describe()
+            )));
+        }
+        writeln!(
+            out,
+            "{named}: its adopted child ended at {stage} with no outcome; resuming it once"
+        )?;
+        Ok(CutOff::Owed)
+    }
+
     /// Sets the task's [`RESUMED_HOOK`] to `value` under the task's lock, as [`Self::claim`]
     /// marks one: the process its resume is owed for, or `true` once the loop takes it.
     fn mark_resume(&self, issue: u32, value: serde_json::Value) -> Result<()> {
@@ -1876,10 +2047,10 @@ impl Loop<'_> {
         match (rec.stage, retry) {
             // Its should-fix round comes before its finish (issue 510).
             (Stage::Ready, Retry::Finish { .. }) if self.should_fix_due(issue) => {
-                self.task(issue, false, 0, stops, out, warn)
+                self.task(issue, false, 0, None, stops, out, warn)
             }
             (Stage::Ready, Retry::Resume { failures }) if self.should_fix_due(issue) => {
-                self.task(issue, false, failures, stops, out, warn)
+                self.task(issue, false, failures, None, stops, out, warn)
             }
             (Stage::Ready, Retry::Finish { ready }) => self
                 .finish(issue, Some(ready), out, warn)
@@ -1887,8 +2058,10 @@ impl Loop<'_> {
             (Stage::Ready, Retry::Resume { .. }) => {
                 self.finish(issue, None, out, warn).map_err(Halt::Error)
             }
-            (_, Retry::Finish { .. }) => self.task(issue, false, 0, stops, out, warn),
-            (_, Retry::Resume { failures }) => self.task(issue, false, failures, stops, out, warn),
+            (_, Retry::Finish { .. }) => self.task(issue, false, 0, None, stops, out, warn),
+            (_, Retry::Resume { failures }) => {
+                self.task(issue, false, failures, None, stops, out, warn)
+            }
         }
     }
 
@@ -4008,11 +4181,29 @@ fn run_loop(
 
     // The cut-off tasks first: their owed resumes are written before anything else can fail.
     let result = lp.cut_off(dead.as_ref(), out, warn).and_then(|due| {
+        // The children that outlived the dead loop, adopted (issue 643).
+        let adopted = lp.adopt(dead.as_ref(), out)?;
+        for a in &adopted {
+            lp.steps.adopted(&a.process);
+        }
+        let named = adopted.iter().map(|a| queue::AdoptedChild {
+            issue: a.issue,
+            owner: a.owner.clone(),
+        });
+        if let Err(e) = lock.adopted(named.collect()) {
+            lp.warn_once(
+                warn,
+                format!(
+                    "the adopted tasks could not be written into the loop's lock ({e:#}); `sbxm \
+                     status` may not list them"
+                ),
+            )?;
+        }
         lp.interrupted_jobs(out, warn)?;
         if lp.slots.is_some() {
-            parallel::work(&mut lp, &mut lock, opts, due, out, warn)
+            parallel::work(&mut lp, &mut lock, opts, due, adopted, out, warn)
         } else {
-            work(&mut lp, &mut lock, opts, due, out, warn)
+            work(&mut lp, &mut lock, opts, due, adopted, out, warn)
         }
     });
     // What waits for the user as the loop stops (issue 530): a PR it left, the stop itself.
@@ -4097,15 +4288,19 @@ fn free_log(base_dir: &Path, env: &Env) -> Result<(u64, PathBuf)> {
 }
 
 /// The loop itself, from its first task to its stop; returns the stop's message.
-/// `due`: the tasks a dead loop was running, resumed first (decision 310).
+/// `due`: the tasks a dead loop was running, resumed first (decision 310). `adopted`: the
+/// children that outlived it (issue 643), each waited for and acted on before anything else, a
+/// stop request too, as the loop's own running task is.
 fn work(
     lp: &mut Loop,
     lock: &mut LoopLock,
     opts: &Options,
     mut due: VecDeque<Held>,
+    adopted: Vec<Adopted>,
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<String> {
+    let mut adopted = VecDeque::from(adopted);
     let (github, env) = (lp.github, lp.env);
     let mut tried = HashSet::new();
     let mut refused = Vec::new();
@@ -4125,134 +4320,185 @@ fn work(
         Ok(())
     };
     loop {
-        if (env.stop_requested)() {
-            writeln!(out, "stopped on request")?;
-            left(&held, &due, out)?;
-            return Ok("stopped on request".to_owned());
-        }
-        if opts.cap.is_some_and(|cap| tasks_run >= cap) {
-            let stop = format!("--cap {} reached", opts.cap.unwrap_or_default());
-            writeln!(out, "{stop}")?;
-            left(&held, &due, out)?;
-            return Ok(stop);
-        }
-        lp.clean_merged(out, warn)?;
-        // The queued jobs run after the resolves and the checks of the runs, before the pause
-        // for PRs awaiting the user, so a queued review or fix isn't held up by it (issue 525).
-        let go_on = lp.resolve_conflicts(out, warn)? && {
-            lp.check_runs(out, warn)?;
-            lp.recheck_waiting(out, warn)?;
-            lp.drain_jobs(out, warn)? && {
-                lp.notify_awaiting(out, warn)?;
-                lp.wait_for_prs(out, warn)?
-            }
-        };
-        if !go_on {
-            writeln!(out, "stopped on request")?;
-            left(&held, &due, out)?;
-            return Ok("stopped on request".to_owned());
-        }
-        let (issue, title, size, started, stops, ended, retried) = if let Some(again) =
-            due.pop_front()
+        let (issue, title, size, started, stops, ended, retried) = if let Some(a) =
+            adopted.pop_front()
         {
-            let Held {
-                issue,
-                title,
-                size,
-                started,
-                mut stops,
-                retry,
-                cut_off,
-            } = again;
-            // What it owed before it is taken, put back if a stop comes before its resume runs.
-            let owed = cut_off
-                .then(|| lp.record(issue)?.hooks.get(RESUMED_HOOK).cloned())
-                .flatten();
-            // Taken only now: a loop that stops before this leaves the resume owed, for the next.
-            if cut_off && let Err(e) = lp.mark_resume(issue, serde_json::Value::Bool(true)) {
-                let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
-                    return Err(e);
-                };
-                writeln!(
-                    out,
-                    "{}: its resume is skipped: {}; the loop leaves it to that command",
-                    crate::title::named(&format!("#{issue}"), &title),
-                    in_use.describe()
-                )?;
-                continue;
-            }
-            writeln!(
-                out,
-                "task {}: #{issue} {title} (size {}), tried again",
-                tasks_run + 1,
-                size.as_deref().unwrap_or("unknown")
-            )?;
-            note(lock, lp, warn, |p| p.start(issue))?;
-            let ended = lp.again(issue, retry, &mut stops, out, warn);
-            let retried = Some((retry, cut_off, owed));
-            (issue, title, size, started, stops, ended, retried)
-        } else {
-            let open = github.issues_open(&lp.repo)?;
-            let (next, waiting) = lp.next(&open, &opts.issues, &mut tried, &mut refused, out)?;
-            let Some(issue) = next else {
-                if opts.wait {
-                    // Said once per idle spell: the next task, or the next stop, ends it.
-                    if !idle {
-                        writeln!(
-                            out,
-                            "the queue is empty; checking again every {} for a job file or a \
-                             labelled issue",
-                            queue::span(PAUSE_POLL.as_secs())
-                        )?;
-                        idle = true;
+            tried.insert(a.issue);
+            note(lock, lp, warn, |p| p.start(a.issue))?;
+            let mut phase = lp.watch_adopted(&a);
+            let ended = loop {
+                if let Some(ended) = phase.poll(out) {
+                    break ended.masked();
+                }
+                (env.sleep)(parallel::TICK);
+            };
+            let mut stops = Vec::new();
+            let ended = if matches!(ended, PhaseEnd::Missing(_)) {
+                match lp.adopted_cut_off(a.issue, &a.process, out)? {
+                    CutOff::Owed => {
+                        note(lock, lp, warn, |p| {
+                            if p.current == Some(a.issue) {
+                                p.current = None;
+                            }
+                        })?;
+                        due.push_front(Held {
+                            issue: a.issue,
+                            title: a.title,
+                            size: None,
+                            started: a.started,
+                            stops: vec![("loop stopped".to_owned(), 0)],
+                            retry: Retry::Resume { failures: 1 },
+                            cut_off: true,
+                        });
+                        continue;
                     }
-                    (env.sleep)(PAUSE_POLL);
+                    CutOff::Parked(outcome) => Ok(End::Parked {
+                        ready: None,
+                        outcome,
+                    }),
+                    CutOff::Left(line) => Ok(End::Taken(line)),
+                }
+            } else {
+                lp.task(
+                    a.issue,
+                    false,
+                    a.failures,
+                    Some(ended),
+                    &mut stops,
+                    out,
+                    warn,
+                )
+            };
+            (a.issue, a.title, None, a.started, stops, ended, None)
+        } else {
+            if (env.stop_requested)() {
+                writeln!(out, "stopped on request")?;
+                left(&held, &due, out)?;
+                return Ok("stopped on request".to_owned());
+            }
+            if opts.cap.is_some_and(|cap| tasks_run >= cap) {
+                let stop = format!("--cap {} reached", opts.cap.unwrap_or_default());
+                writeln!(out, "{stop}")?;
+                left(&held, &due, out)?;
+                return Ok(stop);
+            }
+            lp.clean_merged(out, warn)?;
+            // The queued jobs run after the resolves and the checks of the runs, before the pause
+            // for PRs awaiting the user, so a queued review or fix isn't held up by it (issue 525).
+            let go_on = lp.resolve_conflicts(out, warn)? && {
+                lp.check_runs(out, warn)?;
+                lp.recheck_waiting(out, warn)?;
+                lp.drain_jobs(out, warn)? && {
+                    lp.notify_awaiting(out, warn)?;
+                    lp.wait_for_prs(out, warn)?
+                }
+            };
+            if !go_on {
+                writeln!(out, "stopped on request")?;
+                left(&held, &due, out)?;
+                return Ok("stopped on request".to_owned());
+            }
+            if let Some(again) = due.pop_front() {
+                let Held {
+                    issue,
+                    title,
+                    size,
+                    started,
+                    mut stops,
+                    retry,
+                    cut_off,
+                } = again;
+                // What it owed before it is taken, put back if a stop comes before its resume runs.
+                let owed = cut_off
+                    .then(|| lp.record(issue)?.hooks.get(RESUMED_HOOK).cloned())
+                    .flatten();
+                // Taken only now: a loop that stops before this leaves the resume owed, for the next.
+                if cut_off && let Err(e) = lp.mark_resume(issue, serde_json::Value::Bool(true)) {
+                    let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
+                        return Err(e);
+                    };
+                    writeln!(
+                        out,
+                        "{}: its resume is skipped: {}; the loop leaves it to that command",
+                        crate::title::named(&format!("#{issue}"), &title),
+                        in_use.describe()
+                    )?;
                     continue;
                 }
-                let skipped: Vec<Skipped> = refused.iter().chain(&waiting).cloned().collect();
-                let stop = if opts.issues.is_empty() {
-                    "the queue is empty; the loop stops"
-                } else {
-                    "every named issue was taken or skipped; the loop stops"
+                writeln!(
+                    out,
+                    "task {}: #{issue} {title} (size {}), tried again",
+                    tasks_run + 1,
+                    size.as_deref().unwrap_or("unknown")
+                )?;
+                note(lock, lp, warn, |p| p.start(issue))?;
+                let ended = lp.again(issue, retry, &mut stops, out, warn);
+                let retried = Some((retry, cut_off, owed));
+                (issue, title, size, started, stops, ended, retried)
+            } else {
+                let open = github.issues_open(&lp.repo)?;
+                let (next, waiting) =
+                    lp.next(&open, &opts.issues, &mut tried, &mut refused, out)?;
+                let Some(issue) = next else {
+                    if opts.wait {
+                        // Said once per idle spell: the next task, or the next stop, ends it.
+                        if !idle {
+                            writeln!(
+                                out,
+                                "the queue is empty; checking again every {} for a job file or a \
+                             labelled issue",
+                                queue::span(PAUSE_POLL.as_secs())
+                            )?;
+                            idle = true;
+                        }
+                        (env.sleep)(PAUSE_POLL);
+                        continue;
+                    }
+                    let skipped: Vec<Skipped> = refused.iter().chain(&waiting).cloned().collect();
+                    let stop = if opts.issues.is_empty() {
+                        "the queue is empty; the loop stops"
+                    } else {
+                        "every named issue was taken or skipped; the loop stops"
+                    };
+                    writeln!(out, "{stop}")?;
+                    if opts.issues.is_empty() {
+                        write!(
+                            out,
+                            "{}",
+                            queue::report(&Report {
+                                open: &open,
+                                skipped: &skipped,
+                            })
+                        )?;
+                    }
+                    left(&held, &due, out)?;
+                    return Ok(stop.to_owned());
                 };
-                writeln!(out, "{stop}")?;
-                if opts.issues.is_empty() {
-                    write!(
-                        out,
-                        "{}",
-                        queue::report(&Report {
-                            open: &open,
-                            skipped: &skipped,
-                        })
-                    )?;
-                }
-                left(&held, &due, out)?;
-                return Ok(stop.to_owned());
-            };
-            idle = false;
-            let found = open.iter().find(|i| i.number == issue);
-            let title = found.map_or_else(|| format!("issue {issue}"), |i| i.title.clone());
-            let size = found
-                .and_then(|i| queue::size(&i.labels))
-                .map(str::to_owned);
-            let labeled = found.is_some_and(|i| i.labels.iter().any(|l| l == READY_LABEL));
+                idle = false;
+                let found = open.iter().find(|i| i.number == issue);
+                let title = found.map_or_else(|| format!("issue {issue}"), |i| i.title.clone());
+                let size = found
+                    .and_then(|i| queue::size(&i.labels))
+                    .map(str::to_owned);
+                let labeled = found.is_some_and(|i| i.labels.iter().any(|l| l == READY_LABEL));
 
-            let started = lp.now();
-            writeln!(
-                out,
-                "task {}: #{issue} {title} (size {})",
-                tasks_run + 1,
-                size.as_deref().unwrap_or("unknown")
-            )?;
-            note(lock, lp, warn, |p| {
-                for skipped in refused.iter().chain(&waiting) {
-                    p.set(skipped.issue, Outcome::Skipped);
-                }
-                p.start(issue);
-            })?;
-            let mut stops = Vec::new();
-            let ended = lp.task(issue, labeled, 0, &mut stops, out, warn);
-            (issue, title, size, started, stops, ended, None)
+                let started = lp.now();
+                writeln!(
+                    out,
+                    "task {}: #{issue} {title} (size {})",
+                    tasks_run + 1,
+                    size.as_deref().unwrap_or("unknown")
+                )?;
+                note(lock, lp, warn, |p| {
+                    for skipped in refused.iter().chain(&waiting) {
+                        p.set(skipped.issue, Outcome::Skipped);
+                    }
+                    p.start(issue);
+                })?;
+                let mut stops = Vec::new();
+                let ended = lp.task(issue, labeled, 0, None, &mut stops, out, warn);
+                (issue, title, size, started, stops, ended, None)
+            }
         };
         let end = match ended {
             Ok(end) => end,
@@ -4734,8 +4980,11 @@ impl TaskSteps<'_> {
                 (id, "task fix", args, false)
             }
             JobStep::Review { pr } => {
+                // A queued review is a deliberate request: it reviews a head already reviewed too
+                // (issue 649).
                 let mut args = words(&["task", "review", "--pr"]);
                 args.push(pr.to_string());
+                args.push("--force".to_owned());
                 args.extend(repo);
                 (format!("pr-{pr}"), "task review", args, false)
             }
@@ -4923,6 +5172,10 @@ impl Started for ChildPhase<'_> {
 }
 
 impl Steps for TaskSteps<'_> {
+    fn adopted(&self, process: &Process) {
+        self.spawner.adopt(process);
+    }
+
     fn run(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
         self.run_at(issue, None, out, warn)
     }
@@ -5111,7 +5364,8 @@ impl Steps for TaskSteps<'_> {
                     time_limit: None,
                     profile: None,
                     resolved_spec_id: None,
-                    force: false,
+                    // A queued review reviews a head already reviewed too (issue 649).
+                    force: true,
                     disk: self.disk.clone(),
                     location: None,
                     identity: None,
