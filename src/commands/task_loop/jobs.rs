@@ -1089,7 +1089,7 @@ impl Loop<'_> {
         let id = format!("issue-{issue}");
         self.mark(taken, read, started, Some(id.clone()))?;
         let mut stops = Vec::new();
-        let end = self.task(issue, true, 0, &mut stops, out, warn);
+        let end = self.task(issue, true, 0, None, &mut stops, out, warn);
         Ok(self.run_ended(issue, end).task(id))
     }
 

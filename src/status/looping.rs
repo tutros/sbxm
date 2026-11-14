@@ -166,6 +166,7 @@ pub fn work(base: &Path, lock: &Process, probe: &dyn ProcessProbe) -> anyhow::Re
             issues: Vec::new(),
             cap: None,
             progress: None,
+            adopted: Vec::new(),
         },
         probe,
     )
@@ -193,7 +194,7 @@ pub fn work_for(base: &Path, file: &LockFile, probe: &dyn ProcessProbe) -> anyho
         if rec.stage == Stage::Finished {
             finished.push(rec);
         } else if rec.status == Status::Running
-            && rec.owner() == Some(lock)
+            && (rec.owner() == Some(lock) || file.adopted.iter().any(|a| a.is(rec)))
             && !interrupted(base, rec, probe)
         {
             running.push(rec);

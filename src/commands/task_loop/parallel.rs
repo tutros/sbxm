@@ -26,14 +26,14 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 
 use super::{
-    Cause, End, Halt, Held, Loop, LoopLock, Options, PAUSE_POLL, PR_CAP, Phase, RESUMED_HOOK,
-    Retry, Started, first_line, jobs as queued, needs_user, note, sign_in_stop,
+    Adopted, Cause, CutOff, End, Halt, Held, Loop, LoopLock, Options, PAUSE_POLL, PR_CAP, Phase,
+    RESUMED_HOOK, Retry, Started, first_line, jobs as queued, needs_user, note, sign_in_stop,
 };
 use crate::backend::Location;
 use crate::harness::Harness;
 use crate::task::outcome;
 use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
-use crate::task::record::{self, Stage};
+use crate::task::record::{self, Process, Stage};
 use crate::task::{jobs, location, lock};
 
 /// How often the running children are looked at.
@@ -142,6 +142,9 @@ struct Live<'a> {
     /// For a queued `run` job's task: why its child ended without an outcome; its job then ends
     /// `interrupted`.
     interrupted: Option<String>,
+    /// For an adopted child's task (issue 643), while that child runs: its process, whose end
+    /// with no outcome is a cut-off task's.
+    adopted: Option<Process>,
 }
 
 impl Live<'_> {
@@ -180,6 +183,20 @@ struct Pass {
 }
 
 impl<'a> Loop<'a> {
+    /// The adopted child `a`, watched until it ends.
+    pub(super) fn watch_adopted(&self, a: &Adopted) -> Box<dyn Started + 'a> {
+        let id = format!("issue-{}", a.issue);
+        Box::new(super::child::Adopted {
+            process: a.process.clone(),
+            probe: self.probe,
+            dir: self.task_dir(a.issue),
+            elsewhere: crate::task::outcome::loop_file(&self.base_dir, &id),
+            label: format!("[{id} {}]", a.slot.as_str()),
+            stop_asked: self.env.stop_requested,
+            stop_file: super::stop_path(&self.base_dir),
+        })
+    }
+
     /// Whether no slot of `location` is free for a step of the loop's own (issue 615): its
     /// children hold them all. `None` is where `[sandbox] location` runs it. Always `false` for
     /// a loop that runs one task at a time: no child runs while its own steps do.
@@ -317,10 +334,59 @@ impl<'a> Loop<'a> {
             t.interrupted = Some(why.clone());
             return Ok(Some(Err(Halt::Stopped)));
         }
+        // An adopted child that wrote no outcome (issue 643): cut off, under the rule a restart
+        // applies.
+        if let Some(process) = t.adopted.take()
+            && matches!(ended, super::PhaseEnd::Missing(_))
+        {
+            return match self.adopted_cut_off(t.issue, &process, out)? {
+                CutOff::Owed => self.resume_cut_off(t, out, warn),
+                CutOff::Parked(outcome) => Ok(Some(Ok(End::Parked {
+                    ready: None,
+                    outcome,
+                }))),
+                CutOff::Left(line) => Ok(Some(Ok(End::Taken(line)))),
+            };
+        }
         match self.phase_ended(t, ended, out, warn)? {
             Some(end) => Ok(Some(end)),
             None => self.next_phase(t, out, warn),
         }
+    }
+
+    /// An adopted child's task whose resume is owed: resumed once in its slot, as a task cut off
+    /// at a restart is ([`start_again`]): its resume is taken as it starts, and owed again if a
+    /// stop comes first. With a stop asked, left owed for the next loop.
+    fn resume_cut_off(
+        &mut self,
+        t: &mut Live<'a>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<std::result::Result<End, Halt>>> {
+        let issue = t.issue;
+        if self.stopping() {
+            return Ok(Some(Err(Halt::Stopped)));
+        }
+        let owed = self
+            .record(issue)
+            .and_then(|r| r.hooks.get(RESUMED_HOOK).cloned());
+        if let Err(e) = self.mark_resume(issue, serde_json::Value::Bool(true)) {
+            let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
+                return Err(e);
+            };
+            let line = format!(
+                "{}: its resume is skipped: {}; the loop leaves it to that command",
+                self.issue_named(issue),
+                in_use.describe()
+            );
+            return Ok(Some(Ok(End::Taken(line))));
+        }
+        t.retried = Some((Retry::Resume { failures: 1 }, true, owed));
+        t.failures = 1;
+        t.ran = false;
+        t.resuming = true;
+        t.stops.push(("loop stopped".to_owned(), 0));
+        self.next_phase(t, out, warn)
     }
 
     /// What `t`'s phase's end means, as [`Loop::task`] reads it after each phase: `None` to go on
@@ -493,17 +559,21 @@ impl<'a> Loop<'a> {
             idle_before: None,
             job: None,
             interrupted: None,
+            adopted: None,
         }))
     }
 }
 
 /// The loop with several children (issue 615): from its first task to its stop; returns the
 /// stop's message. `due`: the tasks a dead loop was running, resumed first (decision 310).
+/// `adopted`: the children that outlived it (issue 643), running children of this loop from its
+/// first pass.
 pub(super) fn work<'a>(
     lp: &mut Loop<'a>,
     lock: &mut LoopLock,
     opts: &Options,
     due: VecDeque<Held>,
+    adopted: Vec<Adopted>,
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<String> {
@@ -520,6 +590,35 @@ pub(super) fn work<'a>(
         idle: false,
     };
     let mut live: Vec<Live<'a>> = Vec::new();
+    for a in adopted {
+        pass.tried.insert(a.issue);
+        note(lock, lp, warn, |p| p.start(a.issue))?;
+        live.push(Live {
+            issue: a.issue,
+            phase: Some(lp.watch_adopted(&a)),
+            title: a.title,
+            size: None,
+            started: a.started,
+            stops: Vec::new(),
+            slot: a.slot,
+            label: false,
+            failures: a.failures,
+            should_fix_ran: false,
+            ran: true,
+            resuming: true,
+            pending: None,
+            usage: None,
+            usage_waited: Duration::ZERO,
+            limited: None,
+            room_since: None,
+            retried: None,
+            idle_before: None,
+            job: None,
+            interrupted: None,
+            adopted: Some(a.process),
+        });
+    }
+    sync(lp, &live);
     let result = run(lp, lock, opts, &mut pass, &mut live, out, warn);
     // An error of the loop's own with children running: they end the phase they run as they
     // would at a stop, and the loop stops with them.
@@ -834,6 +933,7 @@ fn steps_and_starts<'a>(
                 .flatten(),
             job: None,
             interrupted: None,
+            adopted: None,
         };
         started_any = true;
         match lp.next_phase(&mut t, out, warn)? {
@@ -881,6 +981,7 @@ fn start_run_jobs<'a>(
             idle_before: None,
             job: Some(run.file),
             interrupted: None,
+            adopted: None,
         };
         match lp.next_phase(&mut t, out, warn)? {
             None => live.push(t),
@@ -967,6 +1068,7 @@ fn start_again<'a>(
                 idle_before: None,
                 job: None,
                 interrupted: None,
+                adopted: None,
             };
             task_ended(lp, lock, pass, t, end, live.is_empty(), out, warn)?;
             Ok(false)

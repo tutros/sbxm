@@ -12,4 +12,6 @@ a strict `codex` sandbox, with `api.anthropic.com` as the provider host: a scope
 the provider host, in `[template].allow` nor denied removes the sandbox and refuses (fails closed). An allow entry
 names a host: `platform.claude.com` keeps the host, while `platform.claude.com:443` matches no host, so the host is
 still denied. This replaces [231]: a strict profile is no longer refused with `pi`. A strict `pi` profile in the
-cloud stays refused ([264]: sbxm keeps no cloud provider list for `pi`).
+cloud stays refused ([264]: sbxm keeps no cloud provider list for `pi`). **Corrected by [324] (2026-11-14, issue #644):** (b)
+held only while Pi's OAuth token was fresh; a strict `pi` sandbox keeps `platform.claude.com` and denies only
+`registry.npmjs.org`.
