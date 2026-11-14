@@ -678,6 +678,9 @@ struct Adopted {
     failures: u32,
     /// The owner its record names: the loop that started it.
     owner: Process,
+    /// Whether its process had ended, with its `outcome.json`, before this loop started (issue
+    /// 657): the loop acts on that outcome at once.
+    ended: bool,
 }
 
 /// Whether the dead loop whose lock this loop took over owns `rec`: the loop its child recorded,
@@ -1786,6 +1789,7 @@ impl Loop<'_> {
     fn cut_off(
         &mut self,
         dead: Option<&queue::LockFile>,
+        ended: &[u32],
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<VecDeque<Held>> {
@@ -1809,7 +1813,9 @@ impl Loop<'_> {
             let by_dead = dead.is_some_and(|dead| dead_owns(dead, &rec));
             // Owed for the process still recorded: a command run by hand since then took it.
             let owed_here = matches!(&owed, Owed::Due(p) if rec.process.as_ref() == Some(p));
-            if ours && (by_dead || owed_here) {
+            // One that ended with its outcome is adopted instead (issue 657).
+            let ended = by_dead && ended.contains(&rec.number);
+            if ours && (by_dead || owed_here) && !ended {
                 found.push((rec, owed));
             }
         }
@@ -1879,14 +1885,90 @@ impl Loop<'_> {
         Ok(due)
     }
 
+    /// The issues of `dead`'s children that ended with an `outcome.json` `dead` never acted on
+    /// (issue 657): this repo's issue tasks, not finished and with no PR, that `dead` owns
+    /// ([`dead_owns`]), whose recorded process has ended and that have an `outcome.json`, whose
+    /// issue has no row in a log `dead` wrote: one with a row there was acted on (parked, say)
+    /// before `dead` died. None taken over: none. Read only, before anything is written.
+    fn ended_under(
+        &mut self,
+        dead: Option<&queue::LockFile>,
+        warn: &mut dyn Write,
+    ) -> Result<Vec<u32>> {
+        let Some(dead) = dead else {
+            return Ok(Vec::new());
+        };
+        let mut found = Vec::new();
+        for dir in record::task_folders(&self.base_dir)? {
+            if check_own_folder(&self.base_dir, &dir).is_err() {
+                continue;
+            }
+            let Ok(rec) = record::read(&dir.join("task.json")) else {
+                continue;
+            };
+            let ours = rec.kind == Kind::Issue
+                && rec.repo == self.repo
+                && rec.id == format!("issue-{}", rec.number)
+                && rec.stage != Stage::Finished
+                && rec.pr.is_none()
+                && dead_owns(dead, &rec)
+                && rec.process.as_ref().is_some_and(|p| !p.alive(self.probe))
+                && !matches!(outcome::read(&dir), outcome::Read::Missing);
+            if ours {
+                found.push(rec.number);
+            }
+        }
+        if !found.is_empty() {
+            self.unlogged(dead, &mut found, warn);
+        }
+        Ok(found)
+    }
+
+    /// Keeps in `issues` those with no row in a log `dead` wrote (issue 657). A log that can't be
+    /// listed or read is a warning, as at the start's late posting (issue 594), and counts as
+    /// having no rows: it never stops the start's recovery before the cut-off tasks are marked
+    /// owed and the adopted ones named in the lock (review M-1).
+    fn unlogged(&mut self, dead: &queue::LockFile, issues: &mut Vec<u32>, warn: &mut dyn Write) {
+        let started = crate::run::results::parse_timestamp(&dead.process.started_at).unwrap_or(0);
+        let logs = match loop_log::since(&self.base_dir, started, &self.log) {
+            Ok(logs) => logs,
+            Err(e) => {
+                let _ = self.warn_once(
+                    warn,
+                    format!(
+                        "{e:#}; the dead loop's logs were not checked for the tasks it acted on"
+                    ),
+                );
+                return;
+            }
+        };
+        for log in logs {
+            match fs::read_to_string(&log) {
+                Ok(text) => issues.retain(|&issue| !queue::has_row(&text, issue)),
+                Err(e) => {
+                    let _ = self.warn_once(
+                        warn,
+                        format!(
+                            "cannot read {}: {e}; the dead loop's rows in it were not checked",
+                            log.display()
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
     /// The children that outlived `dead`, the loop whose lock this loop took over (issue 643):
     /// this repo's issue tasks, not finished and with no PR, that `dead` owns ([`dead_owns`])
     /// and whose recorded process is alive, by its identity (decision 322), not its bare pid. The
     /// loop adopts each as its own child: it holds its slot and counts toward [`PR_CAP`] while it
-    /// runs, and the loop acts on its end. A task run by hand, or none taken over: nothing.
+    /// runs, and the loop acts on its end. The issues in `ended` ([`Self::ended_under`]) too,
+    /// whose children ended already: the loop acts on their outcome at once, as on any adopted
+    /// child's end (issue 657). A task run by hand, or none taken over: nothing.
     fn adopt(
         &mut self,
         dead: Option<&queue::LockFile>,
+        ended: &[u32],
         out: &mut dyn Write,
     ) -> Result<Vec<Adopted>> {
         let Some(dead) = dead else {
@@ -1906,7 +1988,12 @@ impl Loop<'_> {
                 && rec.stage != Stage::Finished
                 && rec.pr.is_none()
                 && dead_owns(dead, &rec);
-            let Some(process) = rec.process.clone().filter(|p| ours && p.alive(self.probe)) else {
+            let gone = ended.contains(&rec.number);
+            let Some(process) = rec
+                .process
+                .clone()
+                .filter(|p| ours && (gone || p.alive(self.probe)))
+            else {
                 continue;
             };
             let Some(owner) = rec.owner().cloned() else {
@@ -1924,15 +2011,25 @@ impl Loop<'_> {
                 owner,
                 title: rec.title,
                 process,
+                ended: gone,
             });
         }
         found.sort_by_key(|a| a.issue);
         for a in &found {
+            let named = crate::title::named(&format!("#{}", a.issue), &a.title);
+            if a.ended {
+                writeln!(
+                    out,
+                    "{named}: its child (process {}) ended and the loop that started it never \
+                     acted on its outcome; adopted, to act on it now",
+                    a.process.pid
+                )?;
+                continue;
+            }
             writeln!(
                 out,
-                "{}: its child (process {}) outlived the loop that started it; adopted, in its {} \
-                 slot until it ends",
-                crate::title::named(&format!("#{}", a.issue), &a.title),
+                "{named}: its child (process {}) outlived the loop that started it; adopted, in \
+                 its {} slot until it ends",
                 a.process.pid,
                 a.slot.as_str()
             )?;
@@ -4179,11 +4276,14 @@ fn run_loop(
         running_issues: Vec::new(),
     };
 
-    // The cut-off tasks first: their owed resumes are written before anything else can fail.
-    let result = lp.cut_off(dead.as_ref(), out, warn).and_then(|due| {
-        // The children that outlived the dead loop, adopted (issue 643).
-        let adopted = lp.adopt(dead.as_ref(), out)?;
-        for a in &adopted {
+    // The dead loop's children that ended with an outcome it never acted on (issue 657), read
+    // first; then the cut-off tasks: their owed resumes are written before anything else can fail.
+    let result = lp.ended_under(dead.as_ref(), warn).and_then(|ended| {
+        let due = lp.cut_off(dead.as_ref(), &ended, out, warn)?;
+        // The children that outlived the dead loop, adopted (issue 643), and those that ended
+        // with an outcome (issue 657).
+        let adopted = lp.adopt(dead.as_ref(), &ended, out)?;
+        for a in adopted.iter().filter(|a| !a.ended) {
             lp.steps.adopted(&a.process);
         }
         let named = adopted.iter().map(|a| queue::AdoptedChild {
