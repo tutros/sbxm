@@ -1,6 +1,7 @@
 //! `sbxm task gates --issue N [--tier sandbox|host|all] [--dry-run]` (spec §4, §7): runs a task's
 //! gates on its current state, or with `--dry-run` says exactly what would run and where.
 
+use std::cell::RefCell;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -78,18 +79,25 @@ pub fn run(
     // A local task whose worker sandbox went when its last phase ended makes it again for the
     // gates (issue 341), so the drive of `sbx`'s sandbox state is checked first (decision 194),
     // and the machine's sandbox slot is held until the gates end (decision 304).
-    let _slot = if location == Location::Local
+    let remade = location == Location::Local
         && prepared
             .record
             .worker
             .as_ref()
-            .is_some_and(|w| !prepared.record.has_open_sandbox(&w.sandbox))
-    {
+            .is_some_and(|w| !prepared.record.has_open_sandbox(&w.sandbox));
+    if remade {
         disk::require(&global, config_dir, &opts.disk)?;
+    }
+    // The host tier runs in the sandbox slot too (decision 317(5)): a local task's for all its
+    // gates, taken here so that a refusal comes before anything is written. A cloud task's takes
+    // it in the pipeline, after any cloud slot (one order for the two pools).
+    let host_tier = opts.tiers.host && !config.gates.host.is_empty();
+    let _slot = if remade || (host_tier && location == Location::Local) {
         slot::take(&global, &opts.disk.slot, Some(&id), out)?
     } else {
         slot::Slot::none()
     };
+    let out = RefCell::new(out);
     let identity = match (location, &opts.identity) {
         (Location::Local, _) => None,
         (Location::Cloud, Some(identity)) => Some(identity.clone()),
@@ -115,12 +123,17 @@ pub fn run(
         disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
-        progress: &pipeline::quiet,
+        // Each line as it comes: a wait for the sandbox slot before a cloud task's host tier.
+        progress: &|line: &str| {
+            let _ = writeln!(out.borrow_mut(), "{line}");
+        },
     };
     // A cloud worker sandbox found gone is made again only once a cloud slot is held (issue 599).
-    let mut take_cloud_slot = || slot::take_cloud(&global, &opts.disk.slot, Some(&id), &mut *out);
+    let mut take_cloud_slot =
+        || slot::take_cloud(&global, &opts.disk.slot, Some(&id), &mut **out.borrow_mut());
     let gated =
         pipeline::gate_on_demand_taking(&env, &mut prepared, opts.tiers, &mut take_cloud_slot);
+    let out = out.into_inner();
     for line in prepared.events.drain(..) {
         writeln!(out, "{line}")?;
     }

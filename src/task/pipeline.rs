@@ -382,6 +382,22 @@ pub fn take_cloud_slot(env: &TaskEnv, record: &Record) -> Result<crate::slot::Sl
     crate::slot::take_cloud(&global, &env.disk.slot, Some(&record.id), &mut lines)
 }
 
+/// The machine's sandbox slot for a cloud task's host-tier gates (decision 317(5)), held until
+/// the returned handle drops, also inside the command's [`crate::slot::Hold`]: no host build
+/// runs next to a local sandbox. None for a local task: its command holds the slot already
+/// (decision 304). A wait's lines go to `env.progress`.
+fn take_host_slot(env: &TaskEnv, record: &Record) -> Result<crate::slot::Slot> {
+    if record.location != Location::Cloud {
+        return Ok(crate::slot::Slot::none());
+    }
+    let global = GlobalConfig::load(env.config_dir)?;
+    let mut lines = Lines {
+        say: env.progress,
+        line: Vec::new(),
+    };
+    crate::slot::take_for_step(&global, &env.disk.slot, Some(&record.id), &mut lines)
+}
+
 /// The cloud sandboxes a starting command goes on to make, for [`take_cloud_slot_checked`].
 #[derive(Debug, Clone, Copy)]
 pub struct Makes {
@@ -2142,6 +2158,7 @@ pub fn run_gates(
         outcomes.extend(ran);
     }
     if tiers.host && sandbox_ok && !gates.host.is_empty() {
+        let _slot = take_host_slot(env, &prepared.record)?;
         outcomes.extend(host_gate_outcomes(env, prepared, phase));
     }
 
@@ -3225,13 +3242,23 @@ pub fn gate_on_demand_taking(
         release_local_worker_into(env, prepared);
         return gated;
     }
+    // A host tier run alone takes the sandbox slot before anything is written, so that a
+    // `--no-wait` refusal changes nothing; and only after the cloud slot, never before it: a
+    // running cloud task holds its cloud slot while it waits for the sandbox slot (issue 634).
+    let host_alone = tiers.host && !tiers.sandbox && !env.config.gates.host.is_empty();
+    let take_host_slot_alone = |prepared: &Prepared| match host_alone {
+        true => take_host_slot(env, &prepared.record),
+        false => Ok(crate::slot::Slot::none()),
+    };
     let rebuild = cloud_worker_gone(env, &prepared.record)?;
     if !rebuild {
+        let _host_slot = take_host_slot_alone(prepared)?;
         recollect_commits(env, prepared)?;
         return run_gates(env, prepared, "on-demand", tiers);
     }
     check_cloud_rebuild(env, &prepared.record, None)?;
     let _slot = take_cloud_slot()?;
+    let _host_slot = take_host_slot_alone(prepared)?;
     let gated = ensure_cloud_worker(env, prepared, SandboxRole::Worker, "the gates")
         .and_then(|_| run_gates(env, prepared, "on-demand", tiers));
     stop_cloud_worker(env, prepared);
@@ -4216,6 +4243,7 @@ pub fn review_pr(
             gates.timeout,
         );
         if outcomes.iter().all(|o| o.result.passed) && !gates.host.is_empty() {
+            let _slot = take_host_slot(env, &prepared.record)?;
             outcomes.extend(host_gate_outcomes(env, prepared, "pr"));
         }
         Ok(Some(finish_gating(prepared, "pr", outcomes, None)?))

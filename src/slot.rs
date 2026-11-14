@@ -384,7 +384,19 @@ pub fn take(
     task: Option<&str>,
     warn: &mut dyn Write,
 ) -> Result<Slot> {
-    take_in(Pool::Local, config, gate, task, warn)
+    take_in(Pool::Local, true, config, gate, task, warn)
+}
+
+/// [`take`] for one step of a command, given back when the returned handle drops even while a
+/// [`Hold`] is open: a cloud task's host-tier gates (decision 317(5)), which must not keep the
+/// sandbox slot through the review that follows them.
+pub fn take_for_step(
+    config: &GlobalConfig,
+    gate: &Gate,
+    task: Option<&str>,
+    warn: &mut dyn Write,
+) -> Result<Slot> {
+    take_in(Pool::Local, false, config, gate, task, warn)
 }
 
 /// [`take`] for a command that creates cloud sandboxes: a slot of `cloud_slots`, nothing when it
@@ -395,11 +407,13 @@ pub fn take_cloud(
     task: Option<&str>,
     warn: &mut dyn Write,
 ) -> Result<Slot> {
-    take_in(Pool::Cloud, config, gate, task, warn)
+    take_in(Pool::Cloud, true, config, gate, task, warn)
 }
 
+/// `kept_by_hold`: whether an open [`Hold`] keeps the slot past the returned handle.
 fn take_in(
     pool: Pool,
+    kept_by_hold: bool,
     config: &GlobalConfig,
     gate: &Gate,
     task: Option<&str>,
@@ -451,7 +465,7 @@ fn take_in(
     HELD.with(|held| held.borrow_mut()[held_index(pool)] = Arc::downgrade(&owned));
     KEPT.with(|kept| {
         let mut kept = kept.borrow_mut();
-        if kept.0 > 0 {
+        if kept_by_hold && kept.0 > 0 {
             kept.1.push(Arc::clone(&owned));
         }
     });
