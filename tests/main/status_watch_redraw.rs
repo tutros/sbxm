@@ -38,6 +38,7 @@ fn disk() -> sbxm::status::footer::Disk {
 
 fn env(terminal: bool, iterations: Option<usize>) -> Env {
     Env {
+        placement: Default::default(),
         now: Box::new(|| T0),
         sleep: Box::new(|_| {}),
         terminal,

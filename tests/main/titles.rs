@@ -571,6 +571,7 @@ fn the_loop_section_titles_its_task_and_the_prs_awaiting_but_not_one_whose_recor
     work.titles
         .insert("issue-40".to_owned(), "Earlier".to_owned());
     let view = View {
+        cloud_first: false,
         lock: Lock::Running(Process::new(1, T0)),
         work: Some(work),
         snapshot: Some(Snapshot {

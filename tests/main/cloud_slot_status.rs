@@ -22,6 +22,7 @@ type Slots = Option<(u32, sbxm::slot::Gate)>;
 
 fn env(slots: Slots, cloud_slots: Slots) -> Env {
     Env {
+        placement: Default::default(),
         now: Box::new(|| 1_790_000_000),
         sleep: Box::new(|_| {}),
         terminal: false,

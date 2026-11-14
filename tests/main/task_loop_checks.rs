@@ -774,6 +774,7 @@ fn the_status_loop_section_shows_the_pause() {
     let f = fixture();
     f.write_pause();
     let view = View {
+        cloud_first: false,
         lock: Lock::Absent,
         work: None,
         snapshot: None,
@@ -795,6 +796,7 @@ fn the_status_loop_section_shows_the_pause() {
 #[test]
 fn the_status_loop_section_shows_an_unreadable_pause() {
     let view = View {
+        cloud_first: false,
         lock: Lock::Absent,
         work: None,
         snapshot: None,
@@ -810,6 +812,7 @@ fn the_status_loop_section_shows_an_unreadable_pause() {
 #[test]
 fn the_status_loop_section_has_no_pause_line_without_a_pause() {
     let view = View {
+        cloud_first: false,
         lock: Lock::Absent,
         work: None,
         snapshot: None,

@@ -184,6 +184,7 @@ fn build_pairs(
             .unwrap_or_else(|| global.resources.memory.clone()),
         sandbox_slots: None,
         cloud_slots: None,
+        placement: Default::default(),
     };
 
     // Every profile loads before anything is written, so an unknown one

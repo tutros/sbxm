@@ -10,6 +10,7 @@
 use std::fs;
 use std::path::Path;
 
+use crate::config::Placement;
 use crate::github::GitHubBackend;
 use crate::run::results::{format_timestamp, parse_timestamp};
 use crate::status::tasks::truncate;
@@ -614,6 +615,8 @@ pub struct View {
     pub pause: loop_pause::State,
     /// The job files in the queue folder (issue 528), whether or not a loop runs.
     pub jobs: Jobs,
+    /// Whether the loop routes with `[resources] placement = "cloud-first"` (issue 648).
+    pub cloud_first: bool,
 }
 
 /// What the loop's job queue holds (issue 528, decision 309), read from its files alone.
@@ -762,6 +765,9 @@ pub fn render(view: &View, width: Option<usize>) -> String {
         )),
         Lock::Unreadable(why) => lines.push(format!("Loop: lock unreadable ({why})")),
         Lock::Running(p) => lines.push(format!("Loop: running ({})", process(p))),
+    }
+    if view.cloud_first {
+        lines.push(format!("  placement: {}", Placement::CloudFirst.as_str()));
     }
     match &view.pause {
         loop_pause::State::None => {}

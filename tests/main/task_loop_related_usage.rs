@@ -594,6 +594,7 @@ fn check_and_status_say_a_related_issue_waits() {
         repo: Ok(REPO.into()),
     };
     let env = status::Env {
+        placement: Default::default(),
         now: Box::new(|| START),
         sleep: Box::new(|_| {}),
         terminal: false,

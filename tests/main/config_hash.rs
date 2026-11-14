@@ -141,6 +141,7 @@ fn claude_hash_covers_the_disabled_claude_ai_connectors() {
         memory: "8g".into(),
         sandbox_slots: None,
         cloud_slots: None,
+        placement: Default::default(),
     };
     let profile = sbxm::config::Profile::default();
     let input = |harness| {

@@ -209,6 +209,7 @@ fn an_unreadable_drive_says_so_on_an_eighty_column_terminal_with_a_long_path() {
 
 fn env(disk: Disk) -> Env {
     Env {
+        placement: Default::default(),
         now: Box::new(|| T0),
         sleep: Box::new(|_| {}),
         terminal: false,

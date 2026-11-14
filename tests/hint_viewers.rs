@@ -141,6 +141,7 @@ impl ProcessProbe for Probe {
 
 fn status_env(terminal: bool, iterations: Option<usize>) -> status::Env {
     status::Env {
+        placement: Default::default(),
         now: Box::new(|| T0),
         sleep: Box::new(|_| {}),
         terminal,

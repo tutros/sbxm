@@ -38,7 +38,7 @@ use super::{
     task_run, template_build,
 };
 use crate::backend::{Location, SandboxBackend};
-use crate::config::GlobalConfig;
+use crate::config::{GlobalConfig, Placement};
 use crate::disk;
 use crate::github::{GitHubBackend, Issue, Mergeable, PrState, RunStatus, WorkflowRun};
 use crate::harness::Harness;
@@ -1451,11 +1451,58 @@ impl Loop<'_> {
         fit: Option<parallel::Free>,
         out: &mut dyn Write,
     ) -> Result<(Option<u32>, Vec<Skipped>)> {
-        let candidates = if named.is_empty() {
-            queue::queue_order(open)
-        } else {
-            named.to_vec()
+        let order = |largest: bool| match (named.is_empty(), largest) {
+            (false, _) => named.to_vec(),
+            (true, false) => queue::queue_order(open),
+            (true, true) => queue::largest_first(open),
         };
+        let cloud_first = self
+            .slots
+            .is_some_and(|s| s.placement == Placement::CloudFirst);
+        let Some(free) = fit.filter(|_| cloud_first) else {
+            return self.next_in(order(false), open, tried, refused, fit, out);
+        };
+        // Cloud first (issue 648): a free cloud slot takes the largest issue that may run
+        // there; only then a free local slot the first in the queue's order.
+        let mut waiting = Vec::new();
+        if free.cloud {
+            let cloud = parallel::Free {
+                local: false,
+                cloud: true,
+            };
+            let next;
+            (next, waiting) = self.next_in(order(true), open, tried, refused, Some(cloud), out)?;
+            if next.is_some() {
+                return Ok((next, waiting));
+            }
+        }
+        if !free.local {
+            return Ok((None, waiting));
+        }
+        let local = parallel::Free {
+            local: true,
+            cloud: false,
+        };
+        let (next, more) = self.next_in(order(false), open, tried, refused, Some(local), out)?;
+        // An issue that waits is said once, whichever pass met it.
+        for skipped in more {
+            if !waiting.iter().any(|w| w.issue == skipped.issue) {
+                waiting.push(skipped);
+            }
+        }
+        Ok((next, waiting))
+    }
+
+    /// [`Self::next_fitting`] over `candidates`, in their order.
+    fn next_in(
+        &mut self,
+        candidates: Vec<u32>,
+        open: &[Issue],
+        tried: &mut HashSet<u32>,
+        refused: &mut Vec<Skipped>,
+        fit: Option<parallel::Free>,
+        out: &mut dyn Write,
+    ) -> Result<(Option<u32>, Vec<Skipped>)> {
         let mut waiting = Vec::new();
         for number in candidates {
             if tried.contains(&number) {
@@ -4027,6 +4074,7 @@ fn run_loop(
     let slots = global.resources.cloud_slots.map(|cloud| parallel::Slots {
         local: global.resources.sandbox_slots.unwrap_or(1),
         cloud,
+        placement: global.resources.placement,
     });
     let notifier = notifier.filter(|_| global.notify.toasts);
     let cloud_slots = global.resources.cloud_slots;

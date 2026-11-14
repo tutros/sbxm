@@ -315,8 +315,10 @@ an issue with neither runs as the key says, and one with both is skipped (issue 
 flag runs where the PR's task ran, so the loop's resolves and log-fixes follow their task. With `cloud_slots` set the
 loop runs several tasks at once (issue 615): up to `sandbox_slots` (one when unset) local and `cloud_slots` cloud
 children, each new issue in the first free slot, local first, unless a label pins it; an issue whose place is full
-keeps its place while the next that fits starts. `sbxm status` lists each running child with its slot, and the loop's
-log row names it (`Slot`). Unset `cloud_slots` to go back to one task at a time.
+keeps its place while the next that fits starts. `[resources] placement = "cloud-first"` (issue 648) sends the
+largest queued issue to a free cloud slot instead, and the smallest to the free local slot. `sbxm status` lists each
+running child with its slot, and the loop's log row names it (`Slot`). Unset `cloud_slots` to go back to one task
+at a time.
 Tasks on this repo run in the cloud (proven end to end on 2026-11-11, issue #350) with `cloud_shape = "large"` or
 bigger; the cloud stays opt-in per command, `sbxm-task.toml` keeps the local default. Build output must go under
 `$HOME` (the gates and sbxm's warm-up do since #575), because `/tmp` is a RAM-backed tmpfs of half the shape's memory.
@@ -333,7 +335,7 @@ every detail.
 | `task review --issue/--spec` | The recorded location. A reviewer sandbox per round; a fix round in the worker sandbox, made again from a bundle of the branch if it is gone. |
 | `task review --pr N` | Location as for `start`; the PR's head goes in as a bundle from `repo.git`. |
 | `task fix --pr N` | The flag, else the location the PR's task recorded, else its closing issue's `run-cloud`/`run-local` label, else the key. |
-| `task loop` | An issue's `run-cloud` label (with `cloud_slots` set) or `run-local` label; else, with `cloud_slots` set, the first free slot, local first; else the key. |
+| `task loop` | An issue's `run-cloud` label (with `cloud_slots` set) or `run-local` label; else, with `cloud_slots` set, the first free slot, local first (with `placement = "cloud-first"`, the largest issue to a free cloud slot); else the key. |
 | `task resume` | Always in the cloud: the preflight again, then a gone worker sandbox made again from the recorded profile and a bundle of the branch. |
 | `task gates` | In the recorded location; a gone worker sandbox is made again first, and removed when the gates end. |
 | `task finish` | Host-side only; then removes any cloud sandbox of the task still open (one whose removal at the stop failed), retried. |

@@ -449,6 +449,7 @@ fn quiet_disk() -> sbxm::status::footer::Disk {
 
 fn real_env(terminal: bool, width: usize, iterations: Option<usize>) -> Env {
     Env {
+        placement: Default::default(),
         now: Box::new(|| T0),
         sleep: Box::new(|_| {}),
         terminal,
@@ -563,6 +564,7 @@ fn watch_on_a_non_terminal_prints_once_and_returns() {
     save(base.path(), &working(1));
     let backend = FakeBackend::default();
     let env = Env {
+        placement: Default::default(),
         now: Box::new(|| T0),
         sleep: Box::new(|_| {
             panic!("must not sleep on a non-terminal");
@@ -601,6 +603,7 @@ fn watch_on_a_terminal_clears_the_screen_once_and_sleeps_between_frames() {
     let sleep_calls = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&sleep_calls);
     let env = Env {
+        placement: Default::default(),
         now: Box::new(|| T0),
         sleep: Box::new(move |d| {
             counted.fetch_add(1, Ordering::SeqCst);
