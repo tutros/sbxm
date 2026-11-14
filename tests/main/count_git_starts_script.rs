@@ -16,14 +16,30 @@ fn run(sbxm: u32, fixture: u32, max: Option<&str>) -> Output {
 
 /// Like [`run`]; `fails` makes the fake test run exit 1 after logging its starts.
 fn run_with(sbxm: u32, fixture: u32, max: Option<&str>, fails: bool) -> Output {
+    run_test("anything", 1, sbxm, fixture, max, fails).0
+}
+
+/// Runs the script for test file `name` with a fake `cargo` that lists `listed` tests for it,
+/// then logs the starts as [`run_with`] does. Also gives every `cargo` command line, one per line.
+fn run_test(
+    name: &str,
+    listed: u32,
+    sbxm: u32,
+    fixture: u32,
+    max: Option<&str>,
+    fails: bool,
+) -> (Output, String) {
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
     let cargo = bin.join("cargo");
+    let args = tmp.path().join("cargo-args.log");
     fs::write(
         &cargo,
         "#!/bin/sh\n\
+         echo \"$*\" >> \"$FAKE_ARGS\"\n\
          case \"$*\" in *--no-run*) exit 0;; esac\n\
+         case \"$*\" in *--list*) i=0; while [ $i -lt \"$FAKE_LISTED\" ]; do echo \"t$i: test\"; i=$((i+1)); done; exit 0;; esac\n\
          i=0; while [ $i -lt \"$FAKE_SBXM\" ]; do echo \"sbxm rev-parse\" >> \"$COUNTLOG_GITSTARTS\"; i=$((i+1)); done\n\
          i=0; while [ $i -lt \"$FAKE_FIXTURE\" ]; do echo \"fixture commit\" >> \"$COUNTLOG_GITSTARTS\"; i=$((i+1)); done\n\
          [ \"$FAKE_FAIL\" = 1 ] && exit 1\n\
@@ -40,15 +56,18 @@ fn run_with(sbxm: u32, fixture: u32, max: Option<&str>, fails: bool) -> Output {
     let mut command = Command::new("sh");
     command
         .arg(script)
-        .arg("anything")
+        .arg(name)
         .env("PATH", path)
+        .env("FAKE_ARGS", &args)
+        .env("FAKE_LISTED", listed.to_string())
         .env("FAKE_SBXM", sbxm.to_string())
         .env("FAKE_FIXTURE", fixture.to_string())
         .env("FAKE_FAIL", if fails { "1" } else { "0" });
     if let Some(max) = max {
         command.arg(max);
     }
-    command.output().unwrap()
+    let out = command.output().unwrap();
+    (out, fs::read_to_string(&args).unwrap_or_default())
 }
 
 fn stdout(out: &Output) -> String {
@@ -116,4 +135,63 @@ fn a_failing_test_run_never_passes_the_limit() {
         "{}",
         stdout(&out)
     );
+}
+
+// Issue #473 review (M-1): the tests are one binary, so a file is chosen by a name filter, which
+// matches nothing for a name no file has; such a run must fail, never pass a limit.
+
+#[test]
+fn a_name_no_test_file_has_fails_before_the_run_and_never_passes_the_limit() {
+    let (out, args) = run_test("no_such_test", 0, 0, 0, Some("0"), false);
+
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(
+        !stdout(&out).contains("within the limit"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no_such_test"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !args
+            .lines()
+            .any(|line| !line.contains("--no-run") && !line.contains("--list")),
+        "{args}"
+    );
+}
+
+#[test]
+fn a_file_of_the_main_binary_runs_its_module() {
+    let (out, args) = run_test("task_merged", 3, 7, 3, Some("395"), false);
+
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("within the limit"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        args.contains("--test main -- --list --format terse task_merged::"),
+        "{args}"
+    );
+    assert!(
+        args.lines()
+            .any(|line| line == "test --test main task_merged::"),
+        "{args}"
+    );
+}
+
+#[test]
+fn a_file_that_is_a_binary_of_its_own_runs_that_binary() {
+    let (out, args) = run_test("hint", 2, 1, 1, Some("395"), false);
+
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert!(
+        args.lines().any(|line| line == "test --test hint"),
+        "{args}"
+    );
+    assert!(!args.contains("--test main"), "{args}");
 }
