@@ -66,10 +66,11 @@ jobs:
         tool: cargo-nextest
     # No separate `cargo build`: the tests build the binary they run themselves.
     # nextest runs every test binary at once, one process per test; `cargo test` ran the
-    # binaries one after another.
+    # binaries one after another. 12 at once, not the default of one per core (4 on the runners): most
+    # tests wait on `git` processes starting, not on the CPU (issue 395).
     - name: Run tests
       if: steps.changes.outputs.build == 'true'
-      run: cargo nextest run
+      run: cargo nextest run --test-threads 12
     # nextest doesn't run doc tests.
     - name: Run doc tests
       if: steps.changes.outputs.build == 'true'
