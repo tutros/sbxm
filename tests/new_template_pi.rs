@@ -6,6 +6,7 @@ mod common;
 use common::Env;
 use sbxm::backend::{FakeBackend, NetworkRule};
 use sbxm::commands::{new, template_build};
+use sbxm::config;
 use sbxm::harness::Harness;
 
 const PROFILE: &str = "[network]\n\
@@ -21,10 +22,10 @@ fn strict(profile: &str) -> String {
     profile.replace("[template]\n", "[template]\nstrict = true\n")
 }
 
-/// `PROFILE`, strict, with `hosts` added to `[template].allow`.
+/// `PROFILE`, strict, with `[template].allow` set to exactly `hosts`.
 fn strict_allowing(hosts: &[&str]) -> String {
-    let extra: String = hosts.iter().map(|h| format!(", \"{h}\"")).collect();
-    strict(&PROFILE.replace("[\"crates.io\"]", &format!("[\"crates.io\"{extra}]")))
+    let list: Vec<String> = hosts.iter().map(|h| format!("\"{h}\"")).collect();
+    strict(&PROFILE.replace("[\"crates.io\"]", &format!("[{}]", list.join(", "))))
 }
 
 /// The network rules of `sbx policy ls --json` for a strict `pi` sandbox (`sbx` 0.46.0, captured
@@ -128,6 +129,8 @@ fn denied(backend: &FakeBackend) -> Vec<String> {
 fn a_strict_pi_sandbox_with_an_empty_allow_list_denies_both_extra_hosts() {
     let (env, backend, result) = strict_pi(&[], fixture_rules());
 
+    let profile = config::Profile::load(&env.profiles_dir(), "default").unwrap();
+    assert!(profile.template.unwrap().allow.is_empty());
     result.unwrap();
     assert_eq!(
         denied(&backend),
