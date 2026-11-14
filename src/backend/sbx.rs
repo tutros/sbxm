@@ -1756,6 +1756,38 @@ mod policy_tests {
     }
 }
 
+// Issue #266, decision 323: a strict `pi` sandbox's rules, as `sbx` 0.46.0 reports them.
+#[cfg(test)]
+mod pi_policy_tests {
+    use super::*;
+
+    /// Captured from `sbx policy ls <sandbox> --json` (v0.46.0, 2026-11-13) for a `pi` sandbox
+    /// created with `--deny-network registry.npmjs.org --deny-network platform.claude.com:443`.
+    const POLICY_LS_PI: &str = include_str!("fixtures/sbx-policy-ls-pi.json");
+
+    #[test]
+    fn the_pi_kit_rule_keeps_platform_claude_com_with_its_port() {
+        let rules = parse_policy_ls(POLICY_LS_PI).unwrap();
+
+        assert_eq!(rules.len(), 3, "{rules:?}");
+        assert_eq!(rules[0].name, "kit:sbxm-spike266b-pi");
+        assert_eq!(rules[0].scope, "sandbox:sbxm-spike266b-pi");
+        assert!(rules[0].allow);
+        assert_eq!(
+            rules[0].resources,
+            [
+                "api.anthropic.com",
+                "registry.npmjs.org",
+                "platform.claude.com:443"
+            ]
+        );
+        assert!(!rules[1].allow);
+        assert_eq!(rules[1].resources, ["registry.npmjs.org"]);
+        assert!(!rules[2].allow);
+        assert_eq!(rules[2].resources, ["platform.claude.com:443"]);
+    }
+}
+
 // Milestone 4 slice 1 (P3 (a), decision 262(c)): the cloud instance's command lines, on the output
 // P2's capture run saved (`sdlc/spikes/m4-p2-capture.md`, sbx v0.46.0).
 #[cfg(test)]

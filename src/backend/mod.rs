@@ -85,7 +85,7 @@ pub trait SandboxBackend: Send + Sync {
     /// from it exists (S11, question 8): callers check that it is unused first (decision 205).
     fn template_rm(&self, tag: &str) -> Result<()>;
     /// The network rules that apply to a sandbox (`sbx policy ls <sandbox> --json`), for the check
-    /// of a strict `codex` sandbox after its creation (decision 221).
+    /// of a strict `codex` or `pi` sandbox after its creation (decisions 221, 323).
     fn network_rules(&self, sandbox: &str) -> Result<Vec<NetworkRule>>;
     /// The hosts a cloud sandbox's policy allows (`sbx --cloud policy ls <sandbox> --json`, its
     /// `allowNetworks`), for the check of a strict cloud sandbox (decision 255). A list that

@@ -33,7 +33,7 @@ pub struct HarnessKits {
     pub template: Option<String>,
     /// [`template::denied_hosts`] for the pair's sandboxes.
     pub deny_network: Option<Vec<String>>,
-    /// The loaded profile, for [`template::check_codex_rules`] after each create.
+    /// The loaded profile, for [`template::check_kit_rules`] after each create.
     pub loaded: Profile,
 }
 

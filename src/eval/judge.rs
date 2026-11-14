@@ -280,10 +280,11 @@ pub fn judge_repeat(
                 ttl: None,
             })
             .map_err(|e| format!("cannot create the judge sandbox {sandbox}: {e:#}"))?;
-        // A strict `codex` judge is held to its allow list before it runs (decision 221).
-        if let Err(e) = template::check_codex_rules(
+        // A strict `codex` or `pi` judge is held to its allow list before it runs (decisions 221, 323).
+        if let Err(e) = template::check_kit_rules(
             &harness_kits.profile,
             &harness_kits.loaded,
+            judge.harness,
             &sandbox,
             backend,
             harness_kits.deny_network.as_deref(),
