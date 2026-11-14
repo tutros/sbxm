@@ -9,8 +9,8 @@ folder is the index: nothing lists the decisions again. This file keeps the roun
 research spikes and the spike results.
 
 A new decision is a new file in `sdlc/decisions/`, with the next free number: one above the highest file, or the
-number an issue already reserved for it. `cargo test --test decisions` checks the file names and numbers, and that
-every reference to a decision ("decision N", or `[N]` in `sdlc/`) resolves to a file.
+number an issue already reserved for it. `cargo test --test main decisions::` checks the file names and numbers, and
+that every reference to a decision ("decision N", or `[N]` in `sdlc/`) resolves to a file.
 
 ## Round 1 (2026-09-24)
 

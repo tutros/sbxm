@@ -8,8 +8,8 @@ smallest steps you can, and commit after every green step. After each step run t
 
 A documentation-only change runs a smaller check: a change is documentation-only when every changed file is a `.md`
 file and none is under `prompts/` (those are compiled into the binary, so they are code). After each step of such a
-change run `cargo fmt --check` and the docs tests, `cargo test --test 'docs_*'` (the `tests/docs_*.rs` files read
-the documentation), with the same environment settings the list above gives cargo. Any other change (code,
+change run `cargo fmt --check` and the docs tests, `cargo test --test main docs_` (the `tests/main/docs_*.rs` files
+read the documentation), with the same environment settings the list above gives cargo. Any other change (code,
 `prompts/`, config, scripts, anything not documentation) runs the full list above after each step. The gates after
 you still run the full list either way.
 
