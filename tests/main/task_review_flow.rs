@@ -425,22 +425,23 @@ fn the_fix_round_happens_at_most_once_and_findings_left_are_reported_not_an_erro
 
 #[test]
 fn a_validated_repeat_stops_the_task_before_the_round_budget_is_used() {
-    let f = config_with_fix_rounds(3);
-    let backend = backend(&f, &[FINDING1, REPEAT_SAME_FILE]);
+    // The task's first repeat (round 2) is tolerated once (issue 647); its second stops it.
+    let f = config_with_fix_rounds(4);
+    let backend = backend(&f, &[FINDING1, REPEAT_SAME_FILE, REPEAT_SAME_FILE]);
     let mut prepared = worked_task(&f, &backend);
 
     let report = review(&f, &backend, &mut prepared).unwrap();
 
     assert_eq!(
         report.rounds.iter().map(|r| r.must_fix).collect::<Vec<_>>(),
-        [1, 1]
+        [1, 1, 1]
     );
     assert_eq!(report.must_fix_left, 1);
     let record = saved(&f);
     assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
     assert_eq!(
-        record.round, 1,
-        "only the fix round before the repeat was found ran, though 3 were budgeted"
+        record.round, 2,
+        "only the fix rounds before the second repeat was found ran, though 4 were budgeted"
     );
     assert_eq!(record.stopped, Some(record::Stopped::RepeatFinding));
 }
@@ -525,6 +526,8 @@ fn an_intervening_clean_narrow_review_does_not_hide_an_older_must_fix_finding() 
             reviewer(sandbox, spec);
         });
     let mut prepared = worked_task(&f, &backend);
+    // The task's one tolerated repeat (issue 647) is used already, so round 3's repeat stops it.
+    prepared.record.repeat_tolerated = true;
 
     let report = review(&f, &backend, &mut prepared).unwrap();
 
@@ -1015,6 +1018,8 @@ fn a_narrow_review_that_repeats_one_finding_keeps_the_full_reviews_other_finding
     let f = config_with_fix_rounds(3);
     let backend = backend(&f, &[FINDINGS_TWO, REPEAT_SAME_FILE]);
     let mut prepared = worked_task(&f, &backend);
+    // The task's one tolerated repeat (issue 647) is used already, so round 2's repeat stops it.
+    prepared.record.repeat_tolerated = true;
 
     review(&f, &backend, &mut prepared).unwrap();
 

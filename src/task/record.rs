@@ -547,6 +547,11 @@ pub struct Record {
     /// decision 306): a task gets at most one. Absent in older records and until then.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub should_fix_round: bool,
+    /// Set when the review rounds tolerated the task's first validated repeat with one more fix
+    /// round (issue 647): a task gets at most one, so a later repeat stops it. Absent in older
+    /// records and until then.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub repeat_tolerated: bool,
     /// Set when the task continues an open PR's branch; absent in older records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continues: Option<PrBranch>,
@@ -771,6 +776,7 @@ impl Record {
             issue_comments: Vec::new(),
             fix_runs: Vec::new(),
             should_fix_round: false,
+            repeat_tolerated: false,
             continues: None,
             related: Vec::new(),
             notes: Vec::new(),

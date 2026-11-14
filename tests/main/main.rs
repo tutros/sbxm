@@ -234,6 +234,7 @@ mod task_review_not_run;
 mod task_review_parse;
 mod task_review_paths_kept;
 mod task_review_pr;
+mod task_review_repeat_tolerated;
 mod task_review_scope_line;
 mod task_review_spec_cmd;
 mod task_review_status;
