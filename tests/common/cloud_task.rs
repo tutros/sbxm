@@ -1,6 +1,6 @@
 //! A fake Docker Cloud Sandboxes for a whole cloud task (milestone 4), shared by the tests of
 //! the commands that act on one after it ran: a copy of slice 5's helpers in
-//! `tests/task_cloud_review.rs`.
+//! `tests/main/task_cloud_review.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};

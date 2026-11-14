@@ -1,0 +1,764 @@
+//! Issue 402, decision 290: a strict profile's warm template whose lock files differ from
+//! `main`'s is rebuilt from a clean checkout of `main`'s tip before the task's sandbox is created;
+//! a task whose own branch changes them stops with a hand-back. One test per boundary case.
+
+use crate::common;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use common::{Env, git, task_fixture};
+use sbxm::backend::{FakeBackend, NetworkRule, SandboxInfo};
+use sbxm::commands::template_build;
+use sbxm::github::fake::FakeGitHub;
+use sbxm::github::{PrInfo, PrState};
+use sbxm::harness::Harness;
+use sbxm::task::pipeline;
+use sbxm::task::record;
+use sbxm::task::stale_lock::BRANCH_CHANGED;
+use sbxm::template;
+
+const PROFILE: &str = "[network]\n\
+     allow = [\"archive.ubuntu.com\"]\n\
+     \n\
+     [[setup.install]]\n\
+     command = \"apt-get install -y ripgrep\"\n\
+     \n\
+     [template]\n\
+     strict = true\n\
+     allow = [\"crates.io\"]\n";
+
+const LOCK: &str = "version = 4\n";
+/// The first template build's clock, well before any rebuild's (each build gets a fresh tag,
+/// decision 211).
+const BUILT_AT: u64 = 1_700_000_000;
+
+/// Commits `Cargo.toml` and a `Cargo.lock` holding `lock` onto the stand-in origin at `refname`,
+/// on top of `main`, and returns a checkout of that commit.
+fn push_lock(f: &task_fixture::Fixture, name: &str, lock: &str, refname: &str) -> PathBuf {
+    let scratch = f.env.tmp.path().join(name);
+    git(
+        f.env.tmp.path(),
+        &[
+            "clone",
+            "-q",
+            f.origin.to_str().unwrap(),
+            scratch.to_str().unwrap(),
+        ],
+    );
+    fs::write(scratch.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    fs::write(scratch.join("Cargo.lock"), lock).unwrap();
+    fs::write(scratch.join("pushed.txt"), format!("{name}\n")).unwrap();
+    git(&scratch, &["add", "-A"]);
+    git(&scratch, &["commit", "-q", "-m", name]);
+    git(
+        &scratch,
+        &[
+            "push",
+            "-q",
+            "-f",
+            f.origin.to_str().unwrap(),
+            &format!("HEAD:{refname}"),
+        ],
+    );
+    scratch
+}
+
+fn backend() -> FakeBackend {
+    FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_version("0.46.0")
+        .with_exec_output_matching("claude", task_fixture::ok(task_fixture::CLAUDE_DONE))
+        .with_exec_output_matching("codex", task_fixture::ok(task_fixture::CODEX_DONE))
+        .with_exec_output_matching(
+            "cargo metadata",
+            task_fixture::ok(r#"{"packages":[{"name":"x"}],"version":1}"#),
+        )
+}
+
+/// Builds the warm template of `default` for `harness` from `repo` at `now`, returning its tag.
+fn build_warm(env: &Env, backend: &FakeBackend, repo: &Path, harness: Harness, now: u64) -> String {
+    let mut out = Vec::new();
+    template_build::run(
+        &env.config_dir(),
+        &template_build::Options {
+            profile: "default".into(),
+            harness,
+            warm: Some(repo.to_path_buf()),
+            now: Some(now),
+            ..Default::default()
+        },
+        backend,
+        &record::SystemProbe,
+        &mut out,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+/// How many template build sandboxes were created.
+fn builds(backend: &FakeBackend) -> usize {
+    backend
+        .creates()
+        .iter()
+        .filter(|c| c.name.starts_with("sbxm-template-"))
+        .count()
+}
+
+fn worker_template(backend: &FakeBackend) -> Option<String> {
+    backend
+        .creates()
+        .into_iter()
+        .rfind(|c| c.name == "sbxm-task-issue-41-claude")
+        .and_then(|c| c.template)
+}
+
+fn record_of(env: &Env, harness: Harness) -> template::Record {
+    template::Record::load(&env.base_dir(), &template::key("default", harness))
+        .unwrap()
+        .unwrap()
+}
+
+/// A strict profile whose claude template was warmed from `main` holding [`LOCK`].
+fn warmed() -> (task_fixture::Fixture, FakeBackend, String) {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let main = push_lock(&f, "main-lock", LOCK, "refs/heads/main");
+    let backend = backend();
+    let tag = build_warm(&f.env, &backend, &main, Harness::Claude, BUILT_AT);
+    (f, backend, tag)
+}
+
+fn prepare_41(
+    f: &task_fixture::Fixture,
+    backend: &FakeBackend,
+) -> anyhow::Result<pipeline::Prepared> {
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(f));
+    pipeline::prepare(
+        &task_fixture::ctx(f, &source, backend, &github),
+        &task_fixture::issue_text(41),
+    )
+}
+
+#[test]
+fn an_unchanged_lock_file_rebuilds_nothing() {
+    let (f, backend, tag) = warmed();
+
+    let prepared = prepare_41(&f, &backend).unwrap();
+
+    assert_eq!(builds(&backend), 1);
+    assert_eq!(worker_template(&backend).as_deref(), Some(tag.as_str()));
+    assert!(
+        !prepared.events.iter().any(|e| e.contains("rebuilt")),
+        "{:?}",
+        prepared.events
+    );
+}
+
+#[test]
+fn a_lock_file_changed_by_one_line_on_main_rebuilds_the_template_from_mains_tip() {
+    let (f, backend, old) = warmed();
+    let main = push_lock(
+        &f,
+        "main-moved",
+        "version = 4\n# one more line\n",
+        "refs/heads/main",
+    );
+    let tip = git(&main, &["rev-parse", "HEAD"]);
+
+    let prepared = prepare_41(&f, &backend).unwrap();
+
+    assert_eq!(builds(&backend), 2);
+    let rebuilt = record_of(&f.env, Harness::Claude);
+    assert_ne!(rebuilt.tag, old);
+    assert_eq!(
+        rebuilt.lock_hash.unwrap(),
+        template::lock_hash(&main, &["Cargo.lock".to_owned()]).unwrap()
+    );
+    assert_eq!(worker_template(&backend), Some(rebuilt.tag.clone()));
+    let line = prepared
+        .events
+        .iter()
+        .find(|e| e.contains("rebuilt it from main's tip"))
+        .unwrap_or_else(|| panic!("{:?}", prepared.events));
+    assert!(line.contains(&tip) && line.contains(&rebuilt.tag), "{line}");
+    // The checkout of main it was warmed from is gone.
+    assert!(!prepared.meta.join("template-base-claude").exists());
+}
+
+#[test]
+fn a_lock_file_changed_only_in_line_endings_rebuilds_nothing() {
+    let (f, backend, tag) = warmed();
+    push_lock(&f, "main-crlf", "version = 4\r\n", "refs/heads/main");
+
+    prepare_41(&f, &backend).unwrap();
+
+    assert_eq!(builds(&backend), 1);
+    assert_eq!(worker_template(&backend).as_deref(), Some(tag.as_str()));
+}
+
+#[test]
+fn two_tasks_needing_the_same_rebuild_make_one_build_and_the_second_waits_on_the_lock() {
+    let (f, backend, _) = warmed();
+    let main = push_lock(
+        &f,
+        "main-moved",
+        "version = 4\n# one more line\n",
+        "refs/heads/main",
+    );
+    // Another task's rebuild holds the build lock, and its process is alive.
+    let lock = template::dir(&f.env.base_dir()).join("default-claude.build.json");
+    fs::write(
+        &lock,
+        serde_json::to_string(&record::Process::current(&task_fixture::Probe)).unwrap(),
+    )
+    .unwrap();
+    let waits = AtomicUsize::new(0);
+    let other_build = |_: Duration| {
+        // The other task's build finishes while this one waits.
+        if waits.fetch_add(1, Ordering::SeqCst) == 0 {
+            fs::remove_file(&lock).unwrap();
+            build_warm(&f.env, &backend, &main, Harness::Claude, BUILT_AT + 3600);
+        }
+    };
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let mut ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    ctx.sleep = &other_build;
+
+    let prepared = pipeline::prepare(&ctx, &task_fixture::issue_text(41)).unwrap();
+
+    assert_eq!(waits.load(Ordering::SeqCst), 1);
+    // The first build and the other task's: this task built nothing itself.
+    assert_eq!(builds(&backend), 2);
+    let rebuilt = record_of(&f.env, Harness::Claude);
+    assert_eq!(worker_template(&backend), Some(rebuilt.tag.clone()));
+    assert!(
+        prepared
+            .events
+            .iter()
+            .any(|e| e.contains("another task rebuilt it from main meanwhile")),
+        "{:?}",
+        prepared.events
+    );
+}
+
+/// A later stage of a task that started before `main` moved reads `main` from its own `repo.git`,
+/// as it was then: the template, already rebuilt from today's `main`, is never rebuilt back to it.
+#[test]
+fn a_task_whose_base_is_older_than_mains_tip_never_rebuilds_the_template_back() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let main = push_lock(&f, "main-lock", LOCK, "refs/heads/main");
+    let worker = task_fixture::play_tasks(
+        &f.env.base_dir(),
+        "main",
+        task_fixture::Play {
+            commits: vec!["a.txt".into()],
+            result_md: Some(b"done\n".to_vec()),
+            bundle_bytes: None,
+        },
+    );
+    let backend = backend().with_exec_hook(worker);
+    build_warm(&f.env, &backend, &main, Harness::Claude, BUILT_AT);
+    build_warm(&f.env, &backend, &main, Harness::Codex, BUILT_AT);
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    let mut prepared = pipeline::prepare(&ctx, &task_fixture::issue_text(41)).unwrap();
+    pipeline::run_worker(&ctx, &mut prepared).unwrap();
+    // Meanwhile `main` moved, and another task rebuilt the codex template from it.
+    let moved = push_lock(
+        &f,
+        "main-moved",
+        "version = 4\n# on main\n",
+        "refs/heads/main",
+    );
+    let current = build_warm(&f.env, &backend, &moved, Harness::Codex, BUILT_AT + 3600);
+
+    let review = pipeline::review_issue(&ctx.env(), &mut prepared);
+
+    assert_eq!(builds(&backend), 3, "no rebuild from the task's older main");
+    assert_eq!(record_of(&f.env, Harness::Codex).tag, current);
+    // The task's own commits didn't touch the lock file, so this is no hand-back: its branch is
+    // behind the template, which refuses it as before.
+    let err = format!("{:#}", review.unwrap_err());
+    assert!(!err.contains(BRANCH_CHANGED), "{err}");
+    assert!(
+        !backend
+            .creates()
+            .iter()
+            .any(|c| c.name.contains("-review-"))
+    );
+}
+
+/// The strict codex reviewer's sandbox: its kit rule must be there for its setup (issue 429).
+const REVIEWER: &str = "sbxm-task-issue-41-review-codex";
+
+/// Plays issue 41's worker: on its headless run it runs `edit` in its clone and commits all. Its
+/// reviewer has its kit's network rule and writes a clean review.
+fn edits_files(f: &task_fixture::Fixture, edit: fn(&Path)) -> FakeBackend {
+    let workspace = f.env.base_dir().join("tasks").join("issue-41");
+    let reviewer = task_fixture::play_reviews(
+        &f.env.base_dir(),
+        "issue-41",
+        vec![task_fixture::CLEAN_REVIEW.to_owned()],
+    );
+    let kit = NetworkRule {
+        name: format!("kit:{REVIEWER}"),
+        scope: format!("sandbox:{REVIEWER}"),
+        allow: true,
+        resources: vec!["api.openai.com:443".into(), "chatgpt.com:443".into()],
+    };
+    backend()
+        .with_network_rules(vec![kit])
+        .with_exec_hook(move |sandbox, spec| {
+            if sandbox.contains("-review-") {
+                reviewer(sandbox, spec);
+                return;
+            }
+            if task_fixture::is_headless(spec) {
+                edit(&workspace);
+                git(&workspace, &["add", "-A"]);
+                git(&workspace, &["commit", "-q", "-m", "change the lock"]);
+                let dir = workspace.join(".sbxm-task");
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(dir.join("result.md"), "done\n").unwrap();
+            } else if task_fixture::is_bundle(spec) {
+                git(
+                    &workspace,
+                    &[
+                        "bundle",
+                        "create",
+                        ".sbxm-task/branch.bundle",
+                        "issue-41",
+                        "^origin/main",
+                    ],
+                );
+            }
+        })
+}
+
+/// ...with `Cargo.lock` holding `lock`.
+fn changes_lock(f: &task_fixture::Fixture, lock: &'static str) -> FakeBackend {
+    // A fn pointer can't capture `lock`; the two contents used are told apart by a marker file.
+    assert_eq!(lock, NEW_CRATE);
+    edits_files(f, |workspace| {
+        fs::write(workspace.join("Cargo.lock"), NEW_CRATE).unwrap();
+    })
+}
+
+#[test]
+fn a_task_whose_own_branch_changes_the_lock_file_stops_with_the_hand_back_and_rebuilds_nothing() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let main = push_lock(&f, "main-lock", LOCK, "refs/heads/main");
+    let backend = changes_lock(&f, "version = 4\n# ctrlc 3.4.5\n");
+    build_warm(&f.env, &backend, &main, Harness::Claude, BUILT_AT);
+    build_warm(&f.env, &backend, &main, Harness::Codex, BUILT_AT);
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    let mut prepared = pipeline::prepare(&ctx, &task_fixture::issue_text(41)).unwrap();
+    pipeline::run_worker(&ctx, &mut prepared).unwrap();
+
+    let err = format!(
+        "{:#}",
+        pipeline::review_issue(&ctx.env(), &mut prepared).unwrap_err()
+    );
+
+    for part in [
+        BRANCH_CHANGED,
+        "Needs a decision",
+        "can't fetch crates (decision 291)",
+        "naming the crate, its version and why it's needed",
+        "then run `sbxm task resume --issue 41`",
+    ] {
+        assert!(err.contains(part), "{part}\n{err}");
+    }
+    assert_eq!(builds(&backend), 2);
+    // Stopped before the gates and the reviewer.
+    assert!(!ran_gates(&backend));
+    assert!(
+        !backend
+            .creates()
+            .iter()
+            .any(|c| c.name.contains("-review-"))
+    );
+}
+
+fn pr_7() -> PrInfo {
+    PrInfo {
+        number: 7,
+        head_ref: "feature-x".into(),
+        head_oid: "0000000000000000000000000000000000000000".into(),
+        is_cross_repository: false,
+        head_repo: String::new(),
+        state: PrState::Open,
+        title: "Add the x feature".into(),
+        body: "Adds x.".into(),
+        closing_issues: vec![],
+        base_moved: false,
+    }
+}
+
+#[test]
+fn main_changing_the_lock_and_the_branch_changing_it_again_rebuilds_from_main_then_stops() {
+    let f = task_fixture::fixture_with(
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\n\
+         [reviewer]\nharness = \"codex\"\n",
+    );
+    f.env.write_profile("default", PROFILE);
+    let main = push_lock(&f, "main-lock", LOCK, "refs/heads/main");
+    let backend = backend();
+    build_warm(&f.env, &backend, &main, Harness::Codex, BUILT_AT);
+    let moved = push_lock(
+        &f,
+        "main-moved",
+        "version = 4\n# on main\n",
+        "refs/heads/main",
+    );
+    push_lock(&f, "pr-head", "version = 4\n# ctrlc\n", "refs/pull/7/head");
+    let github = FakeGitHub::default().with_pr(pr_7());
+    let source = task_fixture::source(&f);
+    let ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    let mut prepared = pipeline::prepare_pr(&ctx, &pr_7()).unwrap();
+
+    let err = format!(
+        "{:#}",
+        pipeline::review_pr(&ctx.env(), &github, &mut prepared, false).unwrap_err()
+    );
+
+    assert_eq!(builds(&backend), 2);
+    assert_eq!(
+        record_of(&f.env, Harness::Codex).lock_hash.unwrap(),
+        template::lock_hash(&moved, &["Cargo.lock".to_owned()]).unwrap()
+    );
+    assert!(err.contains(BRANCH_CHANGED), "{err}");
+    assert!(
+        !backend
+            .creates()
+            .iter()
+            .any(|c| c.name.contains("-review-"))
+    );
+}
+
+#[test]
+fn a_rebuild_that_fails_stops_the_task_naming_the_template_build_command() {
+    let (f, backend, _) = warmed();
+    // `main` now has a changed lock file and no Cargo.toml, so no warm build can run from it.
+    let scratch = push_lock(
+        &f,
+        "main-broken",
+        "version = 4\n# changed\n",
+        "refs/heads/main",
+    );
+    git(&scratch, &["rm", "-q", "Cargo.toml"]);
+    git(&scratch, &["commit", "-q", "-m", "no manifest"]);
+    git(
+        &scratch,
+        &[
+            "push",
+            "-q",
+            "-f",
+            f.origin.to_str().unwrap(),
+            "HEAD:refs/heads/main",
+        ],
+    );
+
+    let err = format!("{:#}", prepare_41(&f, &backend).unwrap_err());
+
+    for part in [
+        "rebuilding it from main's tip",
+        "failed",
+        "sbxm template build default --warm <a clean checkout of main>",
+    ] {
+        assert!(err.contains(part), "{part}\n{err}");
+    }
+    assert_eq!(worker_template(&backend), None);
+    assert!(
+        !backend
+            .creates()
+            .iter()
+            .any(|c| c.name.starts_with("sbxm-task-"))
+    );
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
+}
+
+/// Whether a gate ran in one of the task's sandboxes (a template build's warm-up runs cargo too).
+fn ran_gates(backend: &FakeBackend) -> bool {
+    backend.execs().iter().any(|(sandbox, spec)| {
+        sandbox.starts_with("sbxm-task-") && spec.argv.iter().any(|a| a.contains("cargo test"))
+    })
+}
+
+/// Decision 290: the template follows `main` alone. A task started on an unmerged `--base` never
+/// warms the shared template from it, whatever that branch's lock file holds.
+#[test]
+fn a_task_on_an_unmerged_base_never_warms_the_shared_template_from_it() {
+    let (f, backend, old) = warmed();
+    push_lock(
+        &f,
+        "feature",
+        "version = 4\n# unmerged\n",
+        "refs/heads/feature-x",
+    );
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let mut ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    ctx.base_branch = "feature-x";
+
+    let prepared = pipeline::prepare(&ctx, &task_fixture::issue_text(41));
+
+    assert_eq!(
+        builds(&backend),
+        1,
+        "{:?}",
+        prepared.as_ref().map(|p| &p.events)
+    );
+    assert_eq!(record_of(&f.env, Harness::Claude).tag, old);
+}
+
+/// ...while a changed lock file on `main` still rebuilds from `main`, whatever the task's base.
+#[test]
+fn a_lock_file_changed_on_main_rebuilds_from_main_for_a_task_on_another_base() {
+    let (f, backend, old) = warmed();
+    let main = push_lock(
+        &f,
+        "main-moved",
+        "version = 4\n# on main\n",
+        "refs/heads/main",
+    );
+    push_lock(
+        &f,
+        "feature",
+        "version = 4\n# unmerged\n",
+        "refs/heads/feature-x",
+    );
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let mut ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    ctx.base_branch = "feature-x";
+
+    let _ = pipeline::prepare(&ctx, &task_fixture::issue_text(41));
+
+    assert_eq!(builds(&backend), 2);
+    let rebuilt = record_of(&f.env, Harness::Claude);
+    assert_ne!(rebuilt.tag, old);
+    assert_eq!(
+        rebuilt.lock_hash.unwrap(),
+        template::lock_hash(&main, &["Cargo.lock".to_owned()]).unwrap()
+    );
+}
+
+fn warmed_both(f: &task_fixture::Fixture, backend: &FakeBackend) {
+    let main = push_lock(f, "main-lock", LOCK, "refs/heads/main");
+    build_warm(&f.env, backend, &main, Harness::Claude, BUILT_AT);
+    build_warm(&f.env, backend, &main, Harness::Codex, BUILT_AT);
+}
+
+const NEW_CRATE: &str = "version = 4\n# ctrlc 3.4.5\n";
+
+/// Decision 291 through the entry point of `task start`/`task run`, not only the review's: the
+/// gates right after the worker never run on a branch that changed the lock file.
+#[test]
+fn an_initial_start_whose_worker_changes_the_lock_file_stops_before_its_gates() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let backend = changes_lock(&f, NEW_CRATE);
+    warmed_both(&f, &backend);
+    let (github, source) = (
+        FakeGitHub::default().with_issue_text(task_fixture::issue_text(41)),
+        task_fixture::source(&f),
+    );
+    let ctx = task_fixture::ctx(&f, &source, &backend, &github);
+
+    let reports = pipeline::start(&ctx, &[41]);
+
+    let gates = reports[0]
+        .gates
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", reports[0].result.as_ref().map(|_| ())));
+    let err = format!("{:#}", gates.as_ref().unwrap_err());
+    for part in [BRANCH_CHANGED, "Needs a decision"] {
+        assert!(err.contains(part), "{part}\n{err}");
+    }
+    assert!(!ran_gates(&backend));
+}
+
+/// ...and `task gates` on such a branch.
+#[test]
+fn on_demand_gates_of_a_branch_that_changed_the_lock_file_stop_before_running() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let backend = changes_lock(&f, NEW_CRATE);
+    warmed_both(&f, &backend);
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    let mut prepared = pipeline::prepare(&ctx, &task_fixture::issue_text(41)).unwrap();
+    pipeline::run_worker(&ctx, &mut prepared).unwrap();
+
+    let err =
+        pipeline::gate_on_demand(&ctx.env(), &mut prepared, pipeline::Tiers::ALL).unwrap_err();
+
+    let err = format!("{err:#}");
+    assert!(
+        err.contains(BRANCH_CHANGED) && err.contains("Needs a decision"),
+        "{err}"
+    );
+    assert!(!ran_gates(&backend));
+}
+
+/// Starts issue 41 against `backend` with both templates warm and returns what the start's gates
+/// said.
+fn start_41(f: &task_fixture::Fixture, backend: &FakeBackend) -> anyhow::Result<()> {
+    let (github, source) = (
+        FakeGitHub::default().with_issue_text(task_fixture::issue_text(41)),
+        task_fixture::source(f),
+    );
+    let ctx = task_fixture::ctx(f, &source, backend, &github);
+    let reports = pipeline::start(&ctx, &[41]);
+    let gates = reports[0]
+        .gates
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", reports[0].result.as_ref().map(|_| ())));
+    gates
+        .as_ref()
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{e:#}"))
+}
+
+/// Decision 291, review M-3: a deleted lock file is a change, not a reason to skip the check.
+#[test]
+fn a_worker_that_deletes_the_lock_file_is_handed_back_before_any_gate() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let backend = edits_files(&f, |workspace| {
+        git(workspace, &["rm", "-q", "Cargo.lock"]);
+    });
+    warmed_both(&f, &backend);
+
+    let err = format!("{:#}", start_41(&f, &backend).unwrap_err());
+
+    for part in [BRANCH_CHANGED, "Needs a decision", "Cargo.lock"] {
+        assert!(err.contains(part), "{part}\n{err}");
+    }
+    assert!(!ran_gates(&backend));
+}
+
+/// ...and decision 236: a lock file over the limit counts as differing, and is not read.
+#[test]
+fn a_worker_whose_lock_file_is_over_the_size_limit_is_handed_back_before_any_gate() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let backend = edits_files(&f, |workspace| {
+        let big = vec![b'#'; template::MAX_LOCK_FILE_BYTES as usize + 1];
+        fs::write(workspace.join("Cargo.lock"), big).unwrap();
+    });
+    warmed_both(&f, &backend);
+
+    let err = format!("{:#}", start_41(&f, &backend).unwrap_err());
+
+    for part in [
+        BRANCH_CHANGED,
+        "Needs a decision",
+        "Cargo.lock",
+        "byte limit",
+    ] {
+        assert!(err.contains(part), "{part}\n{err}");
+    }
+    assert!(!ran_gates(&backend));
+}
+
+/// The process that stopped the task is gone.
+struct Gone;
+
+impl record::ProcessProbe for Gone {
+    fn start_time(&self, _pid: u32) -> Option<u64> {
+        None
+    }
+}
+
+/// Decision 291, review M-2: a task stopped for its lock change resumes once the same bytes are
+/// on main; before that it stops again, before any gate or reviewer. Issue 429: the resume after
+/// the approval succeeds, with its gates and a clean review, while the worker's sandbox is still
+/// there...
+#[test]
+fn a_task_stopped_for_its_lock_change_resumes_once_main_has_the_same_change() {
+    resumes_once_main_has_the_same_change(true);
+}
+
+/// ...and once it is gone, as it is after a public `task start`.
+#[test]
+fn a_task_stopped_for_its_lock_change_resumes_without_its_worker_sandbox() {
+    resumes_once_main_has_the_same_change(false);
+}
+
+fn resumes_once_main_has_the_same_change(worker_kept: bool) {
+    const WORKER: &str = "sbxm-task-issue-41-claude";
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    // The fake lists only the sandboxes it is given: without this one the worker's is gone.
+    let mut backend = changes_lock(&f, NEW_CRATE);
+    if worker_kept {
+        backend = backend.and_sandboxes(vec![SandboxInfo {
+            name: WORKER.into(),
+            agent: "claude".into(),
+            status: "running".into(),
+        }]);
+    }
+    warmed_both(&f, &backend);
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    let mut prepared = pipeline::prepare(&ctx, &task_fixture::issue_text(41)).unwrap();
+    pipeline::run_worker(&ctx, &mut prepared).unwrap();
+    pipeline::review_issue(&ctx.env(), &mut prepared).unwrap_err();
+    let meta = prepared.meta.clone();
+    let base_before = git(&meta.join("repo.git"), &["rev-parse", "refs/heads/main"]);
+    drop(prepared);
+    let resume = || {
+        let mut prepared =
+            pipeline::Prepared::open_locked(&f.env.base_dir(), "issue-41", &Gone).unwrap();
+        let mut env = ctx.env();
+        env.probe = &Gone;
+        sbxm::task::resume::resume(&env, &mut prepared, None)
+    };
+
+    let err = format!("{:#}", resume().map(|_| ()).unwrap_err());
+    assert!(err.contains(BRANCH_CHANGED), "{err}");
+    assert!(!ran_gates(&backend));
+    assert!(!backend.creates().iter().any(|c| c.name == REVIEWER));
+
+    let creates_before = backend.creates().len();
+    push_lock(&f, "main-new-crate", NEW_CRATE, "refs/heads/main");
+    let resumed = resume().unwrap_or_else(|e| panic!("{e:#}"));
+
+    let review = resumed.review.expect("the resume reviewed the task");
+    assert!(review.gates_failed.is_none() && review.gates_could_not_run.is_none());
+    assert_eq!(review.must_fix_left, 0);
+    assert_eq!(review.rounds.len(), 1);
+    assert!(ran_gates(&backend));
+    let created: Vec<String> = backend.creates()[creates_before..]
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    assert!(created.contains(&REVIEWER.to_owned()), "{created:?}");
+    // A worker sandbox that is gone is made again for the gates; one that is there is kept.
+    assert_eq!(
+        created.contains(&WORKER.to_owned()),
+        !worker_kept,
+        "{created:?}"
+    );
+    let saved = record::read(&meta.join("task.json")).unwrap();
+    assert_eq!(
+        (saved.stage, saved.status),
+        (record::Stage::Ready, record::Status::Ok)
+    );
+    // The historical base is where it was; only the template's own ref follows main.
+    assert_eq!(
+        git(&meta.join("repo.git"), &["rev-parse", "refs/heads/main"]),
+        base_before
+    );
+}

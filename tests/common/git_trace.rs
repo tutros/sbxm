@@ -20,8 +20,9 @@ pub fn in_traced_run() -> bool {
     std::env::var_os(CHILD).is_some()
 }
 
-/// In a traced run, runs `body`; otherwise runs test `name` (the calling test's own name) as a
-/// traced run and panics with its failure.
+/// In a traced run, runs `body`; otherwise runs test `name` (the calling test's own name, with its
+/// module: `task_template_behind_main::...` in the one test binary, issue 473) as a traced run
+/// and panics with its failure.
 pub fn traced(name: &str, body: impl FnOnce()) {
     if in_traced_run() {
         body();

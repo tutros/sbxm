@@ -1,0 +1,643 @@
+//! M2b slice 1: `sbxm-task.toml` loading (spec §2, decisions 148, 151, 155, 160).
+
+use crate::common;
+
+use std::fs;
+use std::path::Path;
+use std::time::Duration;
+
+use sbxm::harness::Harness;
+use sbxm::task::config::{FILE_NAME, Sink, TaskConfig};
+use tempfile::TempDir;
+
+const MINIMAL: &str = "[sandbox]\nprofile = \"sbxm-dev\"\n";
+
+/// A repo root holding `toml` as its `sbxm-task.toml`, and a `Cargo.toml` when `rust`.
+fn repo(toml: &str, rust: bool) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join(FILE_NAME), toml).unwrap();
+    if rust {
+        fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+    }
+    dir
+}
+
+fn load_err(toml: &str, rust: bool) -> String {
+    let dir = repo(toml, rust);
+    format!("{:#}", TaskConfig::load(dir.path()).unwrap_err())
+}
+
+#[test]
+fn a_minimal_file_gets_the_code_defaults() {
+    let dir = repo(MINIMAL, true);
+    let config = TaskConfig::load(dir.path()).unwrap();
+
+    assert_eq!(config.worker.harness, Harness::Claude);
+    assert_eq!(config.worker.model, None);
+    assert_eq!(config.worker.time_limit, Duration::from_secs(2 * 3600));
+    assert_eq!(config.fix_rounds, 3);
+    assert_eq!(config.reviewer.harness, Harness::Codex);
+    assert_eq!(config.reviewer.model, None);
+    assert_eq!(config.reviewer.time_limit, Duration::from_secs(45 * 60));
+    assert_eq!(config.sandbox.profile, "sbxm-dev");
+    assert_eq!(config.sandbox.cpus, None);
+    assert_eq!(config.sandbox.memory, None);
+    assert_eq!(
+        config.gates.sandbox,
+        [
+            "cargo fmt --check",
+            "cargo clippy --all-targets -- -D warnings",
+            "cargo test"
+        ]
+    );
+    assert!(
+        config.gates.host.is_empty(),
+        "the host tier is off by default"
+    );
+    assert_eq!(config.gates.timeout, Duration::from_secs(20 * 60));
+    assert_eq!(config.prompts.worker, None);
+    assert_eq!(config.risk.len(), sbxm::task::risk::built_in_rules().len());
+    assert!(config.warnings.is_empty());
+}
+
+#[test]
+fn every_key_is_read() {
+    let dir = repo(
+        r#"
+[worker]
+harness = "codex"
+model = "gpt-5.6-sol"
+time_limit = "90m"
+fix_rounds = 5
+
+[reviewer]
+harness = "antigravity"
+model = "gemini-3.1-pro-high"
+time_limit = "30s"
+
+[sandbox]
+profile = "p"
+cpus = 4
+memory = "8g"
+
+[gates]
+sandbox = ["make test"]
+host = ["make host"]
+timeout = "5m"
+
+[prompts]
+worker = "prompts/worker.md"
+
+[risk]
+medium = ["custom-pattern"]
+high = ["src/git.rs"]
+"#,
+        false,
+    );
+    fs::create_dir(dir.path().join("prompts")).unwrap();
+    fs::write(dir.path().join("prompts").join("worker.md"), "x").unwrap();
+
+    let config = TaskConfig::load(dir.path()).unwrap();
+
+    assert_eq!(config.worker.harness, Harness::Codex);
+    assert_eq!(config.worker.model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(config.worker.time_limit, Duration::from_secs(5400));
+    assert_eq!(config.fix_rounds, 5);
+    assert_eq!(config.reviewer.harness, Harness::Antigravity);
+    assert_eq!(
+        config.reviewer.model.as_deref(),
+        Some("gemini-3.1-pro-high")
+    );
+    assert_eq!(config.reviewer.time_limit, Duration::from_secs(30));
+    assert_eq!(
+        (config.sandbox.cpus, config.sandbox.memory.as_deref()),
+        (Some(4), Some("8g"))
+    );
+    assert_eq!(config.gates.sandbox, ["make test"]);
+    assert_eq!(config.gates.host, ["make host"]);
+    assert_eq!(config.gates.timeout, Duration::from_secs(300));
+    assert_eq!(
+        config.prompts.worker,
+        Some(dir.path().join("prompts").join("worker.md"))
+    );
+    assert_eq!(config.prompts.reviewer, None);
+    use sbxm::task::risk::{Level, floor};
+    assert_eq!(
+        floor(&["custom-pattern".to_owned()], &config.risk).0,
+        Level::Medium
+    );
+    assert_eq!(
+        floor(&["src/git.rs".to_owned()], &config.risk).0,
+        Level::High
+    );
+}
+
+fn same_harness_warnings(config: &TaskConfig) -> usize {
+    config
+        .warnings
+        .iter()
+        .filter(|w| w.contains("same harness"))
+        .count()
+}
+
+#[test]
+fn changing_the_worker_harness_re_defaults_a_reviewer_nobody_chose() {
+    let dir = repo(MINIMAL, true);
+    let mut config = TaskConfig::load(dir.path()).unwrap();
+    assert_eq!(
+        (config.worker.harness, config.reviewer.harness),
+        (Harness::Claude, Harness::Codex)
+    );
+
+    config.set_worker_harness(Harness::Codex);
+
+    // Codex can't review itself by default: the next harness in the order that differs.
+    assert_eq!(
+        (config.worker.harness, config.reviewer.harness),
+        (Harness::Codex, Harness::Claude)
+    );
+    assert_eq!(same_harness_warnings(&config), 0);
+}
+
+#[test]
+fn a_reviewer_set_in_the_file_stays_when_the_worker_changes_and_warns_if_they_match() {
+    let dir = repo(&format!("{MINIMAL}[reviewer]\nharness = \"codex\"\n"), true);
+    let mut config = TaskConfig::load(dir.path()).unwrap();
+    assert_eq!(same_harness_warnings(&config), 0);
+
+    config.set_worker_harness(Harness::Codex);
+
+    assert_eq!(config.reviewer.harness, Harness::Codex);
+    assert_eq!(same_harness_warnings(&config), 1);
+    // Setting the worker again to the same value doesn't repeat the warning.
+    config.set_worker_harness(Harness::Codex);
+    assert_eq!(same_harness_warnings(&config), 1);
+}
+
+#[test]
+fn choosing_a_reviewer_harness_warns_once_when_it_equals_the_worker_and_clears_when_it_differs() {
+    let dir = repo(MINIMAL, true);
+    let mut config = TaskConfig::load(dir.path()).unwrap();
+
+    config.set_reviewer_harness(Harness::Claude);
+    assert_eq!(same_harness_warnings(&config), 1);
+    config.set_reviewer_harness(Harness::Claude);
+    assert_eq!(same_harness_warnings(&config), 1);
+
+    config.set_reviewer_harness(Harness::Antigravity);
+    assert_eq!(same_harness_warnings(&config), 0);
+    // A chosen reviewer is kept when the worker changes later.
+    config.set_worker_harness(Harness::Codex);
+    assert_eq!(config.reviewer.harness, Harness::Antigravity);
+}
+
+#[test]
+fn a_gate_command_with_a_line_break_is_refused_naming_the_key() {
+    // `sh -c` would run both lines but `cmd /C` stops at the first: never a silent drop.
+    for (key, toml) in [
+        (
+            "gates.sandbox",
+            "[gates]\nsandbox = [\"cargo fmt --check\", \"cargo test\\ncargo build\"]\n",
+        ),
+        (
+            "gates.host",
+            "[gates]\nsandbox = []\nhost = [\"cargo build\\r\\ncargo doc\"]\n",
+        ),
+    ] {
+        let message = load_err(&format!("{MINIMAL}{toml}"), false);
+        assert!(
+            message.contains(key) && message.contains("line break"),
+            "{message}"
+        );
+        assert!(message.contains(FILE_NAME), "{message}");
+    }
+}
+
+#[test]
+fn an_empty_gate_command_is_refused_too() {
+    let message = load_err(
+        &format!("{MINIMAL}[gates]\nsandbox = [\"cargo test\", \"  \"]\n"),
+        false,
+    );
+    assert!(
+        message.contains("gates.sandbox") && message.contains("empty"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_missing_file_points_at_task_init() {
+    let dir = TempDir::new().unwrap();
+    let message = format!("{:#}", TaskConfig::load(dir.path()).unwrap_err());
+    assert!(message.contains(FILE_NAME), "{message}");
+    assert!(message.contains("sbxm task init"), "{message}");
+}
+
+#[test]
+fn unknown_keys_and_tables_are_errors_naming_the_file_and_key() {
+    let key = load_err(&format!("{MINIMAL}[worker]\nspeed = 1\n"), true);
+    assert!(key.contains(FILE_NAME) && key.contains("speed"), "{key}");
+    let table = load_err(&format!("{MINIMAL}[extras]\n"), true);
+    assert!(
+        table.contains(FILE_NAME) && table.contains("extras"),
+        "{table}"
+    );
+}
+
+#[test]
+fn fix_rounds_belongs_to_the_worker_only() {
+    let message = load_err(&format!("{MINIMAL}[reviewer]\nfix_rounds = 1\n"), true);
+    assert!(
+        message.contains(FILE_NAME) && message.contains("fix_rounds"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_zero_fix_rounds_budget_is_allowed() {
+    let dir = repo(&format!("{MINIMAL}[worker]\nfix_rounds = 0\n"), true);
+    assert_eq!(TaskConfig::load(dir.path()).unwrap().fix_rounds, 0);
+}
+
+#[test]
+fn the_profile_is_required() {
+    for toml in ["", "[sandbox]\n", "[sandbox]\nprofile = \"  \"\n"] {
+        let message = load_err(toml, true);
+        assert!(
+            message.contains("sandbox") && message.contains("profile"),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn gates_without_a_cargo_toml_must_be_listed() {
+    let message = load_err(MINIMAL, false);
+    assert!(
+        message.contains("no gates configured for this repo; list the commands in [gates] sandbox"),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_explicit_empty_gate_list_is_allowed_even_outside_a_rust_repo() {
+    let dir = repo(&format!("{MINIMAL}[gates]\nsandbox = []\n"), false);
+    assert!(
+        TaskConfig::load(dir.path())
+            .unwrap()
+            .gates
+            .sandbox
+            .is_empty()
+    );
+    let rust = repo(&format!("{MINIMAL}[gates]\nsandbox = []\n"), true);
+    assert!(
+        TaskConfig::load(rust.path())
+            .unwrap()
+            .gates
+            .sandbox
+            .is_empty(),
+        "empty is not replaced by the Rust default"
+    );
+}
+
+#[test]
+fn a_gates_table_without_a_sandbox_list_still_defaults_in_a_rust_repo() {
+    let dir = repo(&format!("{MINIMAL}[gates]\ntimeout = \"1m\"\n"), true);
+    assert_eq!(TaskConfig::load(dir.path()).unwrap().gates.sandbox.len(), 3);
+}
+
+#[test]
+fn the_reviewer_defaults_to_a_different_harness() {
+    for (worker, reviewer) in [
+        ("claude", Harness::Codex),
+        ("codex", Harness::Claude),
+        ("antigravity", Harness::Codex),
+    ] {
+        let dir = repo(
+            &format!("[worker]\nharness = \"{worker}\"\n{MINIMAL}"),
+            true,
+        );
+        let config = TaskConfig::load(dir.path()).unwrap();
+        assert_eq!(config.reviewer.harness, reviewer, "worker {worker}");
+        assert!(config.warnings.is_empty());
+    }
+}
+
+#[test]
+fn the_same_harness_set_explicitly_warns_once_and_loads() {
+    let dir = repo(
+        &format!("[worker]\nharness = \"claude\"\n[reviewer]\nharness = \"claude\"\n{MINIMAL}"),
+        true,
+    );
+    let config = TaskConfig::load(dir.path()).unwrap();
+    assert_eq!(config.reviewer.harness, Harness::Claude);
+    assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
+    assert!(
+        config.warnings[0].contains("same harness"),
+        "{:?}",
+        config.warnings
+    );
+}
+
+#[test]
+fn harness_and_duration_values_are_checked() {
+    for (toml, needle) in [
+        (
+            "[worker]\nharness = \"gemini\"\n",
+            "\"gemini\" is not a harness",
+        ),
+        ("[worker]\nharness = \"pi\"\n", "pi"),
+        ("[reviewer]\nharness = \"vim\"\n", "not a harness"),
+        ("[worker]\ntime_limit = \"2 hours\"\n", "isn't a duration"),
+        ("[reviewer]\ntime_limit = \"0m\"\n", "isn't a duration"),
+        ("[gates]\ntimeout = \"soon\"\n", "isn't a duration"),
+    ] {
+        let message = load_err(&format!("{MINIMAL}{toml}"), true);
+        assert!(message.contains(needle), "{toml}: {message}");
+        assert!(message.contains(FILE_NAME), "{message}");
+    }
+}
+
+#[test]
+fn an_empty_model_and_zero_cpus_are_errors() {
+    let model = load_err(&format!("{MINIMAL}[worker]\nmodel = \"\"\n"), true);
+    assert!(model.contains("worker.model"), "{model}");
+    let cpus = load_err("[sandbox]\nprofile = \"p\"\ncpus = 0\n", true);
+    assert!(cpus.contains("sandbox.cpus"), "{cpus}");
+}
+
+fn prompt_error(path: &str, setup: impl Fn(&Path)) -> String {
+    let dir = repo(&format!("{MINIMAL}[prompts]\nworker = '{path}'\n"), true);
+    setup(dir.path());
+    format!("{:#}", TaskConfig::load(dir.path()).unwrap_err())
+}
+
+#[test]
+fn a_prompt_path_must_stay_inside_the_repo() {
+    let up = prompt_error("../outside.md", |_| {});
+    assert!(
+        up.contains("prompts.worker") && up.contains("inside"),
+        "{up}"
+    );
+    let absolute = if cfg!(windows) {
+        "C:/x/p.md"
+    } else {
+        "/x/p.md"
+    };
+    let abs = prompt_error(absolute, |_| {});
+    assert!(
+        abs.contains("prompts.worker") && abs.contains("inside"),
+        "{abs}"
+    );
+}
+
+#[test]
+fn a_prompt_path_must_be_an_existing_file() {
+    let missing = prompt_error("prompts/none.md", |_| {});
+    assert!(
+        missing.contains("prompts.worker") && missing.contains("none.md"),
+        "{missing}"
+    );
+}
+
+#[test]
+fn a_prompt_path_may_not_pass_through_a_link() {
+    let message = prompt_error("linked/p.md", |root| {
+        let real = root.join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("p.md"), "x").unwrap();
+        common::dir_link(&root.join("linked"), &real);
+    });
+    assert!(message.contains("symlink or junction"), "{message}");
+}
+
+/// Issue 143 (decision 174(e)): `[finish] sink` says where a spec task's result lands.
+#[test]
+fn the_finish_sink_defaults_to_local_and_accepts_push() {
+    let dir = repo(MINIMAL, true);
+    assert_eq!(TaskConfig::load(dir.path()).unwrap().sink, Sink::Local);
+
+    for (value, sink) in [("local", Sink::Local), ("push", Sink::Push)] {
+        let dir = repo(&format!("{MINIMAL}\n[finish]\nsink = \"{value}\"\n"), true);
+        assert_eq!(TaskConfig::load(dir.path()).unwrap().sink, sink, "{value}");
+    }
+}
+
+#[test]
+fn an_unknown_sink_or_finish_key_is_an_error_naming_the_file() {
+    for toml in [
+        format!("{MINIMAL}\n[finish]\nsink = \"github\"\n"),
+        format!("{MINIMAL}\n[finish]\ndestination = \"local\"\n"),
+    ] {
+        let message = load_err(&toml, true);
+        assert!(message.contains(FILE_NAME), "{message}");
+        assert!(
+            message.contains("github") || message.contains("destination"),
+            "{message}"
+        );
+    }
+}
+
+/// Issue 123 (decision 176(d)): `[risk]` adds to, or replaces, the built-in path-rule floor.
+#[test]
+fn risk_defaults_to_the_built_in_rules_only() {
+    use sbxm::task::risk::{self, Level, floor};
+
+    let dir = repo(MINIMAL, true);
+    let config = TaskConfig::load(dir.path()).unwrap();
+    assert_eq!(config.risk.len(), risk::built_in_rules().len());
+    let (level, _) = floor(&["Cargo.lock".to_owned()], &config.risk);
+    assert_eq!(level, Level::Medium);
+}
+
+#[test]
+fn risk_entries_add_to_the_built_in_rules_by_default() {
+    use sbxm::task::risk::{Level, floor};
+
+    let dir = repo(
+        &format!("{MINIMAL}\n[risk]\nhigh = [\"src/git.rs\"]\n"),
+        true,
+    );
+    let config = TaskConfig::load(dir.path()).unwrap();
+    let (high, _) = floor(&["src/git.rs".to_owned()], &config.risk);
+    assert_eq!(high, Level::High);
+    // The built-in rules are still there too.
+    let (medium, _) = floor(&["Cargo.lock".to_owned()], &config.risk);
+    assert_eq!(medium, Level::Medium);
+}
+
+/// Review finding M-2 (issue 123): a path matching both a configured medium and a configured
+/// high pattern must floor to high, and show a reason that says so, not a reason left over from
+/// the medium match.
+#[test]
+fn overlapping_medium_and_high_risk_patterns_keep_the_high_reason() {
+    use sbxm::task::risk::{Level, floor};
+
+    let dir = repo(
+        &format!("{MINIMAL}\n[risk]\nmedium = [\"src/\"]\nhigh = [\"src/git.rs\"]\n"),
+        true,
+    );
+    let config = TaskConfig::load(dir.path()).unwrap();
+    let (level, reasons) = floor(&["src/git.rs".to_owned()], &config.risk);
+    assert_eq!(level, Level::High);
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert!(reasons[0].contains("at least high"), "{reasons:?}");
+}
+
+#[test]
+fn risk_replace_drops_the_built_in_rules() {
+    use sbxm::task::risk::{Level, floor};
+
+    let dir = repo(
+        &format!("{MINIMAL}\n[risk]\nreplace = true\nmedium = [\"only-this\"]\n"),
+        true,
+    );
+    let config = TaskConfig::load(dir.path()).unwrap();
+    let (not_floored, _) = floor(&["Cargo.lock".to_owned()], &config.risk);
+    assert_eq!(not_floored, Level::Unknown, "the built-in rule is gone");
+    let (floored, _) = floor(&["only-this.txt".to_owned()], &config.risk);
+    assert_eq!(floored, Level::Medium);
+}
+
+#[test]
+fn risk_patterns_are_matched_case_insensitively() {
+    use sbxm::task::risk::{Level, floor};
+
+    let dir = repo(
+        &format!("{MINIMAL}\n[risk]\nreplace = true\nhigh = [\"SRC/GIT.RS\"]\n"),
+        true,
+    );
+    let config = TaskConfig::load(dir.path()).unwrap();
+    let (level, _) = floor(&["src/git.rs".to_owned()], &config.risk);
+    assert_eq!(level, Level::High);
+}
+
+#[test]
+fn an_empty_risk_pattern_is_refused_naming_the_key() {
+    let message = load_err(&format!("{MINIMAL}\n[risk]\nhigh = [\"  \"]\n"), true);
+    assert!(
+        message.contains("risk.high") && message.contains("empty"),
+        "{message}"
+    );
+    assert!(message.contains(FILE_NAME), "{message}");
+}
+
+#[test]
+fn an_unknown_risk_key_is_an_error_naming_the_file() {
+    let message = load_err(&format!("{MINIMAL}\n[risk]\nlow = [\"x\"]\n"), true);
+    assert!(
+        message.contains(FILE_NAME) && message.contains("low"),
+        "{message}"
+    );
+}
+
+/// Milestone 4 slice 1 (P1, decision 262(a)): `[sandbox] location` is `local` or `cloud`, local
+/// when absent; any other value (case included) is an error naming the file.
+#[test]
+fn the_sandbox_location_defaults_to_local_and_accepts_cloud() {
+    use sbxm::backend::Location;
+
+    let dir = repo(MINIMAL, true);
+    assert_eq!(
+        TaskConfig::load(dir.path()).unwrap().sandbox.location,
+        Location::Local
+    );
+    for (value, location) in [("local", Location::Local), ("cloud", Location::Cloud)] {
+        let dir = repo(&format!("{MINIMAL}location = \"{value}\"\n"), true);
+        assert_eq!(
+            TaskConfig::load(dir.path()).unwrap().sandbox.location,
+            location,
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn a_location_other_than_local_or_cloud_is_an_error_naming_the_file() {
+    for value in ["Cloud", "remote", ""] {
+        let message = load_err(&format!("{MINIMAL}location = \"{value}\"\n"), true);
+        assert!(message.contains(FILE_NAME), "{message}");
+        assert!(
+            message.contains(&format!("`{value}`, expected `local` or `cloud`")),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn the_loop_waits_default_to_30m_and_5h() {
+    let dir = repo(MINIMAL, true);
+    let config = TaskConfig::load(dir.path()).unwrap();
+    assert_eq!(config.task_loop.usage_wait, Duration::from_secs(30 * 60));
+    assert_eq!(
+        config.task_loop.usage_wait_total,
+        Duration::from_secs(5 * 3600)
+    );
+}
+
+#[test]
+fn the_loop_waits_are_read_from_the_loop_table() {
+    let dir = repo(
+        &format!("{MINIMAL}\n[loop]\nusage_wait = \"10m\"\nusage_wait_total = \"10m\"\n"),
+        true,
+    );
+    let config = TaskConfig::load(dir.path()).unwrap();
+    assert_eq!(config.task_loop.usage_wait, Duration::from_secs(600));
+    assert_eq!(config.task_loop.usage_wait_total, Duration::from_secs(600));
+}
+
+#[test]
+fn an_unknown_loop_key_is_an_error_naming_the_file() {
+    let err = load_err(&format!("{MINIMAL}\n[loop]\nwait = \"10m\"\n"), true);
+    assert!(err.contains(FILE_NAME), "{err}");
+    assert!(err.contains("wait"), "{err}");
+}
+
+#[test]
+fn a_usage_wait_longer_than_its_total_is_refused() {
+    let err = load_err(
+        &format!("{MINIMAL}\n[loop]\nusage_wait = \"2h\"\nusage_wait_total = \"1h\"\n"),
+        true,
+    );
+    assert!(err.contains("loop.usage_wait"), "{err}");
+    assert!(err.contains("loop.usage_wait_total"), "{err}");
+}
+
+#[test]
+fn a_loop_wait_that_isnt_a_duration_names_its_key() {
+    let err = load_err(&format!("{MINIMAL}\n[loop]\nusage_wait = \"soon\"\n"), true);
+    assert!(err.contains("loop.usage_wait"), "{err}");
+}
+
+#[test]
+fn this_repos_own_file_loads_with_the_loop_defaults() {
+    let config = TaskConfig::load(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    assert_eq!(config.task_loop.usage_wait, Duration::from_secs(30 * 60));
+    assert_eq!(
+        config.task_loop.usage_wait_total,
+        Duration::from_secs(5 * 3600)
+    );
+}
+
+/// Issue 418 (decision 285): `[fix] resume` turns on resuming the Claude worker's own session in
+/// a fix round; off when absent.
+#[test]
+fn fix_resume_is_off_by_default_and_on_with_the_switch() {
+    let off = TaskConfig::load(repo(MINIMAL, true).path()).unwrap();
+    assert!(!off.fix_resume);
+
+    let on =
+        TaskConfig::load(repo(&format!("{MINIMAL}\n[fix]\nresume = true\n"), true).path()).unwrap();
+    assert!(on.fix_resume);
+
+    let explicit_off =
+        TaskConfig::load(repo(&format!("{MINIMAL}\n[fix]\nresume = false\n"), true).path())
+            .unwrap();
+    assert!(!explicit_off.fix_resume);
+}
+
+#[test]
+fn an_unknown_key_under_fix_is_refused() {
+    let err = load_err(&format!("{MINIMAL}\n[fix]\nresum = true\n"), true);
+    assert!(err.contains("resum"), "{err}");
+}

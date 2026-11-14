@@ -2,8 +2,8 @@
 //! sections 2 and 5.2). `check_can_gate`, `check_can_review`, `check_can_review_pr`,
 //! `check_can_finish` and `finish::plan_removal` all decide through `verdict`/`row_for`, and
 //! `Record::advance` enforces the same moves directly (spike `sdlc/spikes/state-table.md`,
-//! migration step 2). `tests/task_machine.rs` walks every (state, event) pair and checks that the
-//! table and those commands still agree.
+//! migration step 2). `tests/main/task_machine.rs` walks every (state, event) pair and checks that
+//! the table and those commands still agree.
 
 use super::record::{Kind, Stage, Status};
 
@@ -106,7 +106,8 @@ const NOT_RUNNING: &[Status] = &[
 
 /// Spec section 5.2 (today's rows) and section 2 (the operations per state). Checked top to
 /// bottom; the first row that matches wins ([`row_for`]), though a well-formed table never has
-/// two rows match the same (state, event) pair to begin with (`tests/task_machine.rs` checks it).
+/// two rows match the same (state, event) pair to begin with (`tests/main/task_machine.rs` checks
+/// it).
 pub const TABLE: &[Row] = &[
     // The pipeline's moves (`Record::advance`).
     Row {

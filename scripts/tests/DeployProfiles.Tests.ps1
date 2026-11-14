@@ -3,7 +3,7 @@ BeforeAll {
     $script:repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
     # A stand-in for `sbxm config profiles-dir` that prints $path. What sbxm accepts as config is covered by
-    # tests/config_profiles_dir.rs; these tests cover what the script does with the answer.
+    # tests/main/config_profiles_dir.rs; these tests cover what the script does with the answer.
     function New-Stub([string]$path) { [scriptblock]::Create("'" + $path.Replace("'", "''") + "'") }
 }
 

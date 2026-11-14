@@ -9,11 +9,11 @@
 //!
 //! Decision 267's captures: [`cloud_walk_against_real_sbx`] writes any removal answer that says
 //! "temporarily unavailable" to `src/backend/fixtures/sbx-cloud-rm-unavailable.txt`, which replaces
-//! slice 3's S14-worded text (the `unavailable()` helpers in `tests/task_lifetime.rs`,
-//! `tests/task_cloud.rs` and the `UNAVAILABLE` constants of `tests/task_cloud_rm.rs` and
-//! `tests/task_cloud_finish.rs`); [`capture_not_logged_in`], run by hand after `sbx logout` with
-//! `SBXM_REAL_CLOUD_LOGGED_OUT=1`, writes `src/backend/fixtures/sbx-cloud-not-logged-in.txt`, which
-//! replaces slice 2's made-up `src/backend/fixtures/sbx-cloud-ls-not-logged-in-made-up.txt`.
+//! slice 3's S14-worded text (the `unavailable()` helpers in `tests/main/task_lifetime.rs`,
+//! `tests/main/task_cloud.rs` and the `UNAVAILABLE` constants of `tests/main/task_cloud_rm.rs` and
+//! `tests/main/task_cloud_finish.rs`); [`capture_not_logged_in`], run by hand after `sbx logout`
+//! with `SBXM_REAL_CLOUD_LOGGED_OUT=1`, writes `src/backend/fixtures/sbx-cloud-not-logged-in.txt`,
+//! which replaces slice 2's made-up `src/backend/fixtures/sbx-cloud-ls-not-logged-in-made-up.txt`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

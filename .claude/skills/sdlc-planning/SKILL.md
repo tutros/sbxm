@@ -37,7 +37,7 @@ Also:
 ## Step 3: Log decisions right away
 
 After each round, before asking the next, record it:
-- A new decision is a new file in `sdlc/decisions/`: `NNNN-<slug>.md`, the number padded to 4 digits (the next free one: one above the highest file, or the one an issue reserved), a short lowercase slug of its title (`[a-z0-9-]`, at most 50 characters), and the entry as its text, first line `N. **Title (YYYY-MM-DD, ...):** text`. Include the user's actual choice, not the lean, when they differ, plus any nuance they added. `cargo test --test decisions` checks the names, numbers and references.
+- A new decision is a new file in `sdlc/decisions/`: `NNNN-<slug>.md`, the number padded to 4 digits (the next free one: one above the highest file, or the one an issue reserved), a short lowercase slug of its title (`[a-z0-9-]`, at most 50 characters), and the entry as its text, first line `N. **Title (YYYY-MM-DD, ...):** text`. Include the user's actual choice, not the lean, when they differ, plus any nuance they added. `cargo test --test main decisions::` checks the names, numbers and references.
 - In `sdlc/decisions.md`, a `## Round N (YYYY-MM-DD)` heading with one line naming its decisions ("Decisions N-M: `sdlc/decisions/`").
 - Facts learned from docs or research that affect the design, as a separate subsection, with source links.
 - Never rewrite a past decision silently. When one changes, add a new numbered decision that says which earlier numbers it supersedes.

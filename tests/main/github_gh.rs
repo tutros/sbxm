@@ -1,0 +1,568 @@
+//! M2b slice 2: `GhBackend` against output captured from the real `gh`
+//! (version 2.83.2, 2026-10-01, `tutros/sbxm`), and the argv it builds (spec §9).
+
+use std::sync::Mutex;
+
+use anyhow::{Result, bail};
+use sbxm::github::gh::{GhBackend, GhRunner};
+use sbxm::github::{CommitStatus, GitHubBackend, IssueRequest, PrRequest, PrState, StatusState};
+
+const ISSUE_LIST: &str = include_str!("../../src/github/fixtures/issue-list.json");
+const ISSUE_VIEW: &str = include_str!("../../src/github/fixtures/issue-view-31.txt");
+const PR_CLOSING: &str = include_str!("../../src/github/fixtures/pr-view-closing.json");
+const PR_MERGED: &str = include_str!("../../src/github/fixtures/pr-view-merged.json");
+const DEFAULT_BRANCH: &str = include_str!("../../src/github/fixtures/repo-default-branch.json");
+/// Written by hand in the shape `gh pr list --json` prints (no GitHub access where issue 60 was
+/// built): a same-repo PR on another base, a fork's PR of the same branch name, then the match.
+const PR_LIST_HEAD: &str = include_str!("../../src/github/fixtures/pr-list-head.json");
+const LABELS: &str = include_str!("../../src/github/fixtures/label-list.json");
+
+/// Plays `gh`: records every call and answers with the queued outputs in order.
+struct Scripted {
+    calls: Mutex<Vec<(Vec<String>, Option<String>)>>,
+    outputs: Mutex<Vec<Result<String, String>>>,
+}
+
+impl Scripted {
+    fn answering(output: &str) -> Self {
+        Self::with(vec![Ok(output.to_owned())])
+    }
+
+    fn with(outputs: Vec<Result<String, String>>) -> Self {
+        Self {
+            calls: Mutex::default(),
+            outputs: Mutex::new(outputs.into_iter().rev().collect()),
+        }
+    }
+}
+
+impl GhRunner for &'static Scripted {
+    fn run(&self, args: &[String], stdin: Option<&str>) -> Result<String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((args.to_vec(), stdin.map(str::to_owned)));
+        match self.outputs.lock().unwrap().pop() {
+            Some(Ok(out)) => Ok(out),
+            Some(Err(message)) => bail!("{message}"),
+            None => bail!("no scripted output left"),
+        }
+    }
+}
+
+/// A backend over a leaked script (tests are short-lived), plus the script to inspect.
+fn backend(script: Scripted) -> (GhBackend, &'static Scripted) {
+    let script: &'static Scripted = Box::leak(Box::new(script));
+    (GhBackend::with_runner(Box::new(script)), script)
+}
+
+fn args(script: &Scripted, call: usize) -> Vec<String> {
+    script.calls.lock().unwrap()[call].0.clone()
+}
+
+#[test]
+fn open_issues_are_parsed_with_label_names() {
+    let (gh, script) = backend(Scripted::answering(ISSUE_LIST));
+
+    let issues = gh.issues_open("tutros/sbxm").unwrap();
+
+    assert_eq!(
+        args(script, 0),
+        [
+            "issue",
+            "list",
+            "--repo",
+            "tutros/sbxm",
+            "--state",
+            "open",
+            "--limit",
+            "200",
+            "--json",
+            "number,title,labels,body,state"
+        ]
+    );
+    assert_eq!(
+        issues.iter().map(|i| i.number).collect::<Vec<_>>(),
+        [38, 36, 31]
+    );
+    assert_eq!(issues[0].labels, ["should-fix"]);
+    assert!(issues[2].body.contains("**Acceptance criteria:**"));
+    assert_eq!(
+        issues[2].title,
+        "M2 plan: tests for run-id validation and run-root collision rollback (P2)"
+    );
+}
+
+#[test]
+fn an_issue_view_keeps_the_text_and_reads_title_and_state_from_its_header() {
+    let (gh, script) = backend(Scripted::answering(ISSUE_VIEW));
+
+    let issue = gh.issue("tutros/sbxm", 31).unwrap();
+
+    assert_eq!(
+        args(script, 0),
+        ["issue", "view", "31", "--repo", "tutros/sbxm"]
+    );
+    assert_eq!(issue.number, 31);
+    assert_eq!(
+        issue.title,
+        "M2 plan: tests for run-id validation and run-root collision rollback (P2)"
+    );
+    assert_eq!(issue.state, "OPEN");
+    assert_eq!(issue.text, ISSUE_VIEW);
+}
+
+#[test]
+fn an_issue_view_without_a_header_is_an_error() {
+    let (gh, _) = backend(Scripted::answering("not what gh prints"));
+    let message = format!("{:#}", gh.issue("o/r", 1).unwrap_err());
+    assert!(message.contains("gh issue view 1"), "{message}");
+}
+
+#[test]
+fn a_pr_with_closing_issues_is_parsed() {
+    let (gh, script) = backend(Scripted::answering(PR_CLOSING));
+
+    let pr = gh.pr("tutros/sbxm", 34).unwrap();
+
+    assert_eq!(
+        args(script, 0),
+        [
+            "pr",
+            "view",
+            "34",
+            "--repo",
+            "tutros/sbxm",
+            "--json",
+            "headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,state,title,body,closingIssuesReferences,mergeable,mergeStateStatus"
+        ]
+    );
+    assert_eq!(pr.number, 34);
+    assert_eq!(pr.head_ref, "fix-33-mandatory-harness");
+    // Issue 198: the head commit, which `task review --pr` compares with a local task's review.
+    assert_eq!(pr.head_oid, "5c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d");
+    assert!(!pr.is_cross_repository);
+    assert_eq!(pr.state, PrState::Merged);
+    assert_eq!(pr.title, "Require --harness on open, stop and rm");
+    assert!(pr.body.starts_with("Fixes #33"));
+    assert_eq!(pr.closing_issues, [33]);
+}
+
+#[test]
+fn another_merged_pr_parses_too() {
+    let (gh, _) = backend(Scripted::answering(PR_MERGED));
+    let pr = gh.pr("tutros/sbxm", 54).unwrap();
+    assert_eq!(pr.state, PrState::Merged);
+    assert!(
+        pr.title.contains("2a") || pr.title.contains("comparisons"),
+        "{}",
+        pr.title
+    );
+}
+
+#[test]
+fn an_unknown_pr_state_is_an_error() {
+    let (gh, _) = backend(Scripted::answering(
+        r#"{"headRefName":"b","headRefOid":"abc","isCrossRepository":false,"state":"WEIRD","title":"t","body":"","closingIssuesReferences":[]}"#,
+    ));
+    let message = format!("{:#}", gh.pr("o/r", 2).unwrap_err());
+    assert!(message.contains("WEIRD"), "{message}");
+}
+
+#[test]
+fn the_default_branch_labels_and_login_are_parsed() {
+    let (gh, script) = backend(Scripted::with(vec![
+        Ok(DEFAULT_BRANCH.to_owned()),
+        Ok(LABELS.to_owned()),
+        Ok("tutros\n".to_owned()),
+    ]));
+
+    assert_eq!(gh.default_branch("tutros/sbxm").unwrap(), "main");
+    let labels = gh.labels("tutros/sbxm").unwrap();
+    assert!(labels.contains(&"must-fix".to_owned()) && labels.contains(&"question".to_owned()));
+    assert_eq!(gh.whoami().unwrap(), "tutros");
+
+    assert_eq!(
+        args(script, 0),
+        ["repo", "view", "tutros/sbxm", "--json", "defaultBranchRef"]
+    );
+    assert_eq!(
+        args(script, 1),
+        [
+            "label",
+            "list",
+            "--repo",
+            "tutros/sbxm",
+            "--json",
+            "name",
+            "--limit",
+            "200"
+        ]
+    );
+    assert_eq!(args(script, 2), ["api", "user", "--jq", ".login"]);
+}
+
+#[test]
+fn a_comment_goes_through_stdin_not_the_command_line() {
+    let (gh, script) = backend(Scripted::answering(""));
+
+    gh.pr_comment("o/r", 7, "line one\nline \"two\"").unwrap();
+
+    assert_eq!(
+        args(script, 0),
+        ["pr", "comment", "7", "--repo", "o/r", "--body-file", "-"]
+    );
+    let stdin = script.calls.lock().unwrap()[0].1.clone();
+    assert_eq!(stdin.as_deref(), Some("line one\nline \"two\""));
+}
+
+#[test]
+fn a_pr_is_created_from_the_head_branch_and_returns_the_url() {
+    let (gh, script) = backend(Scripted::answering("https://github.com/o/r/pull/9\n"));
+
+    let url = gh
+        .pr_create(
+            "o/r",
+            &PrRequest {
+                head: "issue-4".into(),
+                base: "main".into(),
+                title: "Fix it".into(),
+                body: "Fixes #4".into(),
+                draft: false,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(url, "https://github.com/o/r/pull/9");
+    assert_eq!(
+        args(script, 0),
+        [
+            "pr",
+            "create",
+            "--repo",
+            "o/r",
+            "--head",
+            "issue-4",
+            "--base",
+            "main",
+            "--title",
+            "Fix it",
+            "--body-file",
+            "-"
+        ]
+    );
+    let stdin = script.calls.lock().unwrap()[0].1.clone();
+    assert_eq!(stdin.as_deref(), Some("Fixes #4"));
+}
+
+#[test]
+fn a_draft_pr_is_created_with_the_draft_flag() {
+    let (gh, script) = backend(Scripted::answering("https://github.com/o/r/pull/9\n"));
+
+    gh.pr_create(
+        "o/r",
+        &PrRequest {
+            head: "issue-4".into(),
+            base: "main".into(),
+            title: "Fix it".into(),
+            body: "Fixes #4".into(),
+            draft: true,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        args(script, 0),
+        [
+            "pr",
+            "create",
+            "--repo",
+            "o/r",
+            "--head",
+            "issue-4",
+            "--base",
+            "main",
+            "--title",
+            "Fix it",
+            "--draft",
+            "--body-file",
+            "-"
+        ]
+    );
+}
+
+#[test]
+fn an_issue_is_created_with_its_labels_and_returns_its_number() {
+    let (gh, script) = backend(Scripted::answering("https://github.com/o/r/issues/58\n"));
+
+    let number = gh
+        .issue_create(
+            "o/r",
+            &IssueRequest {
+                title: "F1: x".into(),
+                body: "body".into(),
+                labels: vec!["must-fix".into(), "bug".into()],
+            },
+        )
+        .unwrap();
+
+    assert_eq!(number, 58);
+    assert_eq!(
+        args(script, 0),
+        [
+            "issue",
+            "create",
+            "--repo",
+            "o/r",
+            "--title",
+            "F1: x",
+            "--label",
+            "must-fix",
+            "--label",
+            "bug",
+            "--body-file",
+            "-"
+        ]
+    );
+}
+
+#[test]
+fn an_issue_url_that_gh_prints_oddly_is_an_error() {
+    let (gh, _) = backend(Scripted::answering("created!\n"));
+    let request = IssueRequest {
+        title: "t".into(),
+        body: "b".into(),
+        labels: vec![],
+    };
+    let message = format!("{:#}", gh.issue_create("o/r", &request).unwrap_err());
+    assert!(message.contains("issue number"), "{message}");
+}
+
+#[test]
+fn a_failing_gh_is_reported_with_the_command_and_a_fix() {
+    let (gh, _) = backend(Scripted::with(vec![Err("boom".into())]));
+    let message = format!("{:#}", gh.issues_open("o/r").unwrap_err());
+    assert!(message.contains("boom"), "{message}");
+}
+
+#[test]
+fn bad_json_names_the_command() {
+    let (gh, _) = backend(Scripted::answering("[{"));
+    let message = format!("{:#}", gh.issues_open("o/r").unwrap_err());
+    assert!(message.contains("gh issue list"), "{message}");
+}
+
+#[test]
+fn a_pr_merge_state_reads_the_state_and_whether_auto_merge_is_armed() {
+    // The shape of `gh pr view --json state,autoMergeRequest` (gh 2.83 field names; written by
+    // hand, not captured: no PR with auto-merge armed was at hand).
+    let (gh, script) = backend(Scripted::with(vec![
+        Ok(r#"{"autoMergeRequest":null,"state":"OPEN"}"#.to_owned()),
+        Ok(r#"{"autoMergeRequest":{"enabledAt":"2026-11-02T10:00:00Z","mergeMethod":"MERGE","enabledBy":{"login":"tutros"}},"state":"OPEN"}"#.to_owned()),
+        Ok(r#"{"autoMergeRequest":null,"state":"MERGED"}"#.to_owned()),
+    ]));
+
+    let plain = gh.pr_merge_state("o/r", 7).unwrap();
+    assert_eq!(plain.state, PrState::Open);
+    assert!(!plain.auto_merge);
+    let armed = gh.pr_merge_state("o/r", 8).unwrap();
+    assert_eq!(armed.state, PrState::Open);
+    assert!(armed.auto_merge);
+    assert_eq!(gh.pr_merge_state("o/r", 9).unwrap().state, PrState::Merged);
+    assert_eq!(
+        args(script, 0),
+        [
+            "pr",
+            "view",
+            "7",
+            "--repo",
+            "o/r",
+            "--json",
+            "state,autoMergeRequest,isDraft,mergeable,mergeStateStatus"
+        ]
+    );
+}
+
+const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+#[test]
+fn a_commit_status_is_posted_through_the_statuses_api() {
+    let (gh, script) = backend(Scripted::answering(""));
+
+    gh.commit_status(
+        "o/r",
+        SHA,
+        &CommitStatus {
+            state: StatusState::Failure,
+            context: "sbxm/review".into(),
+            description: "1 must-fix, 0 questions, risk low".into(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        args(script, 0),
+        [
+            "api",
+            &format!("repos/o/r/statuses/{SHA}"),
+            "--method",
+            "POST",
+            "--silent",
+            "-f",
+            "state=failure",
+            "-f",
+            "context=sbxm/review",
+            "-f",
+            "description=1 must-fix, 0 questions, risk low",
+        ]
+    );
+}
+
+#[test]
+fn a_status_on_anything_but_a_full_commit_id_is_refused_without_calling_gh() {
+    let (gh, script) = backend(Scripted::answering(""));
+    let status = CommitStatus {
+        state: StatusState::Success,
+        context: "sbxm/review".into(),
+        description: String::new(),
+    };
+
+    for sha in ["abc1234", "../../pulls", &SHA.replace('0', "g")] {
+        let message = format!("{:#}", gh.commit_status("o/r", sha, &status).unwrap_err());
+        assert!(message.contains("not a full commit id"), "{message}");
+    }
+
+    assert!(script.calls.lock().unwrap().is_empty());
+}
+
+const PR_FORK: &str = include_str!("../../src/github/fixtures/pr-view-fork.json");
+const PR_COMMENTS: &str = include_str!("../../src/github/fixtures/pr-view-comments.json");
+
+#[test]
+fn a_fork_pr_names_the_repository_its_head_comes_from() {
+    let (gh, _) = backend(Scripted::answering(PR_FORK));
+    let pr = gh.pr("tutros/sbxm", 9).unwrap();
+    assert!(pr.is_cross_repository);
+    assert_eq!(pr.head_repo, "someone/sbxm-fork");
+}
+
+#[test]
+fn a_pr_without_head_repository_fields_has_an_empty_head_repo() {
+    let (gh, _) = backend(Scripted::answering(PR_CLOSING));
+    assert_eq!(gh.pr("tutros/sbxm", 34).unwrap().head_repo, "");
+}
+
+#[test]
+fn pr_comments_are_read_oldest_first_with_their_authors() {
+    let (gh, script) = backend(Scripted::answering(PR_COMMENTS));
+
+    let comments = gh.pr_comments("tutros/sbxm", 312).unwrap();
+
+    assert_eq!(
+        args(script, 0),
+        [
+            "pr",
+            "view",
+            "312",
+            "--repo",
+            "tutros/sbxm",
+            "--json",
+            "comments"
+        ]
+    );
+    assert_eq!(comments.len(), 2);
+    assert_eq!(comments[0].author, "someone");
+    assert_eq!(comments[0].body, "Looks good to me.");
+    assert_eq!(comments[1].author, "tutros");
+    assert!(comments[1].body.starts_with("sbxm review of PR #312\n"));
+}
+
+/// Issue 60: the open PR of a head is looked up by head and state only, so one on another base
+/// can be named; the match on the base wins, and a fork's branch of the same name never does.
+#[test]
+fn the_open_pr_of_a_head_is_listed_and_the_one_on_the_base_is_picked() {
+    let (gh, script) = backend(Scripted::answering(PR_LIST_HEAD));
+
+    let pr = gh.open_pr_for("o/r", "issue-4", "main").unwrap().unwrap();
+
+    assert_eq!(
+        args(script, 0),
+        [
+            "pr",
+            "list",
+            "--repo",
+            "o/r",
+            "--head",
+            "issue-4",
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,url,headRefName,baseRefName,isCrossRepository,state"
+        ]
+    );
+    assert_eq!(pr.number, 9);
+    assert_eq!(pr.url, "https://github.com/o/r/pull/9");
+    assert_eq!(
+        (pr.head_ref.as_str(), pr.base_ref.as_str()),
+        ("issue-4", "main")
+    );
+    assert!(!pr.is_cross_repository);
+}
+
+#[test]
+fn an_open_pr_of_the_head_on_another_base_is_returned_for_the_caller_to_name() {
+    let (gh, _) = backend(Scripted::answering(PR_LIST_HEAD));
+
+    let pr = gh
+        .open_pr_for("o/r", "issue-4", "develop")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!((pr.number, pr.base_ref.as_str()), (12, "release"));
+}
+
+#[test]
+fn a_fork_pr_a_closed_pr_or_another_head_is_no_open_pr_of_the_head() {
+    let listed = r#"[
+        {"baseRefName":"main","headRefName":"issue-4","isCrossRepository":true,"number":11,"state":"OPEN","url":"https://github.com/o/r/pull/11"},
+        {"baseRefName":"main","headRefName":"issue-4","isCrossRepository":false,"number":8,"state":"MERGED","url":"https://github.com/o/r/pull/8"},
+        {"baseRefName":"main","headRefName":"issue-40","isCrossRepository":false,"number":7,"state":"OPEN","url":"https://github.com/o/r/pull/7"}
+    ]"#;
+    let (gh, _) = backend(Scripted::answering(listed));
+
+    assert_eq!(gh.open_pr_for("o/r", "issue-4", "main").unwrap(), None);
+}
+
+#[test]
+fn no_pr_listed_is_no_open_pr() {
+    let (gh, _) = backend(Scripted::answering("[]\n"));
+
+    assert_eq!(gh.open_pr_for("o/r", "issue-4", "main").unwrap(), None);
+}
+
+fn pr_json(mergeable: &str, merge_state: &str) -> String {
+    format!(
+        r#"{{"headRefName":"b","headRefOid":"abc","isCrossRepository":false,"state":"OPEN","title":"t","body":"","closingIssuesReferences":[],"mergeable":"{mergeable}","mergeStateStatus":"{merge_state}"}}"#
+    )
+}
+
+#[test]
+fn a_pr_needs_its_base_merged_when_github_says_conflicting_or_behind() {
+    for (mergeable, state, moved) in [
+        ("CONFLICTING", "DIRTY", true),
+        ("MERGEABLE", "BEHIND", true),
+        ("MERGEABLE", "CLEAN", false),
+        ("UNKNOWN", "UNKNOWN", false),
+        ("MERGEABLE", "BLOCKED", false),
+    ] {
+        let json = pr_json(mergeable, state);
+        let (gh, _) = backend(Scripted::answering(&json));
+        assert_eq!(
+            gh.pr("o/r", 7).unwrap().base_moved,
+            moved,
+            "{mergeable} {state}"
+        );
+    }
+}

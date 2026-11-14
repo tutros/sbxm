@@ -565,7 +565,7 @@ has the setup ("The scheduled factory check").
 - **Templates take disk too.** Each is 1 to 3 GB on the same drive as the sandboxes. A build removes the template it
   replaces unless a sandbox or task still records it; `sbxm template ls` shows who does.
 - **Tests after a hand fix.** A hand fix on a task's branch was not gated in a sandbox, so run the checks on the
-  host: `cargo fmt --check`, clippy, and the tests the change touches (`cargo test --test <file>`, plus the unit
+  host: `cargo fmt --check`, clippy, and the tests the change touches (`cargo test --test main <file>::`, plus the unit
   tests of a changed module). The full `cargo test` takes about 12 minutes on Windows; run it when the change is
   Windows-specific (paths, file locks, process handling), when it makes a command fail where it used to succeed (then
   grep every test that calls the command first), or when no sandbox gate will run on the result. The PR review's

@@ -1,0 +1,218 @@
+//! Slice 12: `.sbxm/<project>/sandbox.toml` is merged over the profile
+//! (decision 57).
+
+use crate::common;
+
+use common::Env;
+use sbxm::backend::{FakeBackend, SandboxInfo, SkillsStore};
+use sbxm::commands::{list, open};
+
+/// Writes `.sbxm/demo/sandbox.toml`.
+fn write_project_config(env: &Env, contents: &str) {
+    let dir = env.base_dir().join(".sbxm").join("demo");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("sandbox.toml"), contents).unwrap();
+}
+
+/// The generated `spec.yaml` of `demo`, parsed.
+fn spec(env: &Env) -> serde_json::Value {
+    let text = std::fs::read_to_string(env.kit_dir("demo").join("spec.yaml")).unwrap();
+    serde_norway::from_str(&text).unwrap()
+}
+
+#[test]
+fn project_network_lists_are_appended_to_the_profile() {
+    let env = Env::new();
+    env.write_profile(
+        "default",
+        "[network]\nallow = [\"github.com\"]\ndeny = [\"a.example.com\"]\n",
+    );
+    write_project_config(
+        &env,
+        "[network]\nallow = [\"example.org\"]\ndeny = [\"b.example.com\"]\n",
+    );
+
+    env.run("demo", &FakeBackend::default()).unwrap();
+
+    let network = &spec(&env)["permissions"]["network"];
+    assert_eq!(
+        network["allow"],
+        serde_json::json!(["github.com", "example.org"])
+    );
+    assert_eq!(
+        network["deny"],
+        serde_json::json!(["a.example.com", "b.example.com"])
+    );
+}
+
+#[test]
+fn project_env_is_merged_per_key_with_the_project_winning() {
+    let env = Env::new();
+    env.write_profile("default", "[env]\nA = \"1\"\nB = \"2\"\n");
+    write_project_config(&env, "[env]\nB = \"9\"\nC = \"3\"\n");
+
+    env.run("demo", &FakeBackend::default()).unwrap();
+
+    let variables = &spec(&env)["environment"]["variables"];
+    assert_eq!(variables["A"], "1");
+    assert_eq!(variables["B"], "9");
+    assert_eq!(variables["C"], "3");
+}
+
+fn created_skills(env: &Env) -> SkillsStore {
+    let backend = FakeBackend::default();
+    env.run("demo", &backend).unwrap();
+    backend.creates()[0].skills
+}
+
+#[test]
+fn project_skills_store_overrides_the_profile() {
+    let env = Env::new();
+    write_project_config(&env, "[skills]\nstore = \"off\"\n");
+
+    assert_eq!(created_skills(&env), SkillsStore::Off);
+}
+
+#[test]
+fn profile_skills_store_is_kept_when_the_project_sets_none() {
+    let env = Env::new();
+    env.write_profile("default", "[skills]\nstore = \"off\"\n");
+    write_project_config(&env, "[env]\nA = \"1\"\n");
+
+    assert_eq!(created_skills(&env), SkillsStore::Off);
+}
+
+/// Runs `new demo`, expecting an error; checks nothing was created.
+fn rejected(env: &Env) -> String {
+    let backend = FakeBackend::default();
+    let err = env.run("demo", &backend).unwrap_err();
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!env.base_dir().join("demo").exists());
+    assert!(!env.base_dir().join(".sbxm/demo/kits").exists());
+    format!("{err:#}")
+}
+
+fn project_config_path(env: &Env) -> String {
+    env.base_dir()
+        .join(".sbxm")
+        .join("demo")
+        .join("sandbox.toml")
+        .display()
+        .to_string()
+}
+
+#[test]
+fn unknown_key_in_project_config_is_an_error() {
+    let env = Env::new();
+    write_project_config(&env, "[netwrk]\nallow = [\"github.com\"]\n");
+
+    let message = rejected(&env);
+
+    assert!(
+        message.contains(&format!(
+            "invalid project config {}",
+            project_config_path(&env)
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn readwrite_skills_store_in_project_config_is_rejected() {
+    let env = Env::new();
+    write_project_config(&env, "[skills]\nstore = \"readwrite\"\n");
+
+    let message = rejected(&env);
+
+    assert!(
+        message.contains("skills.store = \"readwrite\" in project config is not allowed"),
+        "{message}"
+    );
+    assert!(message.contains(&project_config_path(&env)), "{message}");
+}
+
+#[test]
+fn reserved_env_name_in_project_config_is_rejected() {
+    let env = Env::new();
+    write_project_config(&env, "[env]\nSBXM_PROFILE = \"x\"\n");
+
+    let message = rejected(&env);
+
+    assert!(
+        message
+            .contains("env name 'SBXM_PROFILE' in project config uses the reserved prefix SBXM_"),
+        "{message}"
+    );
+    assert!(message.contains(&project_config_path(&env)), "{message}");
+}
+
+fn state_hash(env: &Env, project: &str) -> String {
+    let path = env
+        .base_dir()
+        .join(".sbxm")
+        .join(project)
+        .join("state.json");
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    state["sandboxes"]["claude"]["config_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn project_secrets_are_part_of_the_hash() {
+    let env = Env::new();
+    env.run("one", &FakeBackend::default()).unwrap();
+    write_project_config(&env, "[secrets]\nservices = [\"github\"]\n");
+    env.run("demo", &FakeBackend::with_secrets(&["github"]))
+        .unwrap();
+
+    assert_ne!(state_hash(&env, "one"), state_hash(&env, "demo"));
+}
+
+#[test]
+fn editing_project_config_is_drift_for_list_and_open() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    write_project_config(&env, "[network]\nallow = [\"example.org\"]\n");
+    let backend = FakeBackend::with_sandboxes(vec![SandboxInfo {
+        name: "sbxm-demo-claude".into(),
+        agent: "claude".into(),
+        status: "running".into(),
+    }]);
+
+    let entries = list::entries(&env.config_dir(), &backend).unwrap();
+    assert_eq!(entries[0].config, Some(list::ConfigStatus::Changed));
+
+    let err = open::run(
+        &env.config_dir(),
+        "demo",
+        &open::Options::default(),
+        &backend,
+        &mut std::io::sink(),
+    )
+    .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("changed since it was created"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn template_table_in_project_config_is_refused() {
+    let env = Env::new();
+    env.write_profile("default", "[template]\nallow = []\n");
+    write_project_config(&env, "[template]\nstrict = true\nallow = []\n");
+
+    let message = rejected(&env);
+
+    assert!(
+        message.contains(&format!(
+            "[template] in project config {} is not allowed: templates belong to the profile; \
+             move it to the profile or remove it",
+            project_config_path(&env)
+        )),
+        "{message}"
+    );
+}
