@@ -1885,7 +1885,7 @@ impl Loop<'_> {
         Ok(due)
     }
 
-    /// The issues of `dead`'s children that ended after it died, each with its `outcome.json`
+    /// The issues of `dead`'s children that ended with an `outcome.json` `dead` never acted on
     /// (issue 657): this repo's issue tasks, not finished and with no PR, that `dead` owns
     /// ([`dead_owns`]), whose recorded process has ended and that have an `outcome.json`, whose
     /// issue has no row in a log `dead` wrote: one with a row there was acted on (parked, say)
@@ -4248,7 +4248,6 @@ fn run_loop(
     // first; then the cut-off tasks: their owed resumes are written before anything else can fail.
     let result = lp.ended_under(dead.as_ref()).and_then(|ended| {
         let due = lp.cut_off(dead.as_ref(), &ended, out, warn)?;
-
         // The children that outlived the dead loop, adopted (issue 643), and those that ended
         // with an outcome (issue 657).
         let adopted = lp.adopt(dead.as_ref(), &ended, out)?;
