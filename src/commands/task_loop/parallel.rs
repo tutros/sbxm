@@ -632,12 +632,13 @@ fn sync(lp: &mut Loop, live: &[Live]) {
 }
 
 /// Whether a new task may start now, checked before every start, a held or owed task's too
-/// (issue 615): not while the loop stops, a child waits out a usage limit of the worker's or the
-/// reviewer's provider (317(10)), `--cap` is reached, or the PRs awaiting the user plus the
-/// running children reach [`PR_CAP`] (317(6)); the stop is asked again after those reads. Its
+/// (issue 615): not while the loop stops, a child waits out a usage limit of one of `providers`,
+/// the ones the task would use (317(10)), `--cap` is reached, or the PRs awaiting the user plus
+/// the running children reach [`PR_CAP`] (317(6)); the stop is asked again after those reads. Its
 /// slot is checked by the caller.
 fn may_start(
     lp: &mut Loop,
+    providers: [&'static str; 2],
     opts: &Options,
     pass: &Pass,
     live: &[Live],
@@ -647,7 +648,7 @@ fn may_start(
     if lp.stopping() {
         return Ok(false);
     }
-    if let Some(hold) = lp.usage_held(&lp.task_providers()).cloned() {
+    if let Some(hold) = lp.usage_held(&providers).cloned() {
         let named = lp.issue_named(hold.issue);
         let line = match hold.provider {
             Some(p) => format!("no new task on {p} starts while {named} waits out its usage limit"),
@@ -712,7 +713,8 @@ fn steps_and_starts<'a>(
         let fits = lp
             .record(again.issue)
             .is_none_or(|rec| !lp.slot_taken(Some(rec.location)));
-        if !fits || !may_start(lp, opts, pass, live, out, warn)? {
+        let providers = lp.providers_of(again.issue);
+        if !fits || !may_start(lp, providers, opts, pass, live, out, warn)? {
             later.push_back(again);
             continue;
         }
@@ -723,7 +725,7 @@ fn steps_and_starts<'a>(
     }
     pass.due = later;
     let mut open = None;
-    while lp.free().any() && may_start(lp, opts, pass, live, out, warn)? {
+    while lp.free().any() && may_start(lp, lp.task_providers(), opts, pass, live, out, warn)? {
         let open = match &open {
             Some(open) => open,
             None => open.insert(lp.github.issues_open(&lp.repo)?),
@@ -1202,7 +1204,10 @@ impl Loop<'_> {
         let job = jobs::parse(&text).ok()?;
         let task = self.task_providers().to_vec();
         let (at, uses) = match job {
-            jobs::Job::Review { pr } => (self.review_slot(pr), vec![self.reviewer_provider]),
+            jobs::Job::Review { pr } => (
+                self.review_slot(pr),
+                vec![self.roles.reviewer.harness.provider_secret()],
+            ),
             jobs::Job::Fix { pr, .. } => (self.fix_slot(pr), task),
             // Where its labels pin it, as the job's run reads them.
             jobs::Job::Run { issue } => {
@@ -1236,9 +1241,32 @@ impl Loop<'_> {
     }
 
     /// The providers a new task uses, and a fix, `run` or `spec` job (317(10)): its worker's and
-    /// its reviewer's.
+    /// its reviewer's, as `sbxm-task.toml` names them.
     pub(super) fn task_providers(&self) -> [&'static str; 2] {
-        [self.worker_provider, self.reviewer_provider]
+        [
+            self.roles.worker.harness.provider_secret(),
+            self.roles.reviewer.harness.provider_secret(),
+        ]
+    }
+
+    /// The providers issue `issue`'s task uses from its next phase (review M-1): its recorded
+    /// worker's, as `task resume` restores it, and the reviewer's after that worker (a default
+    /// reviewer differs from it, decision 148); a task with no worker recorded uses
+    /// [`Self::task_providers`].
+    fn providers_of(&self, issue: u32) -> [&'static str; 2] {
+        let recorded = self
+            .record(issue)
+            .and_then(|rec| rec.worker)
+            .and_then(|w| <Harness as clap::ValueEnum>::from_str(&w.harness, true).ok());
+        let Some(worker) = recorded else {
+            return self.task_providers();
+        };
+        let mut roles = self.roles.clone();
+        roles.set_worker_harness(worker);
+        [
+            roles.worker.harness.provider_secret(),
+            roles.reviewer.harness.provider_secret(),
+        ]
     }
 
     /// The first child's usage limit that holds a step using `providers` (317(10)): one on one of

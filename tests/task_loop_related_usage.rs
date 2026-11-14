@@ -823,3 +823,123 @@ fn with_no_child_limited_nothing_waits_for_a_usage_limit() {
     play.at("review 150");
     assert!(!run.out.contains("usage limit"), "{}", run.out);
 }
+
+// --- an owed task is admitted by the providers its resume uses (review M-1) ---
+
+/// A codex worker, a claude reviewer chosen in the file (kept whatever the worker).
+const CODEX_CHOSEN_CLAUDE: &str =
+    "[worker]\nharness = \"codex\"\n\n[reviewer]\nharness = \"claude\"\n\n";
+/// A codex worker, the reviewer left to the default (claude, the first that differs).
+const CODEX_DEFAULT: &str = "[worker]\nharness = \"codex\"\n\n";
+
+/// Issue `issue`'s task cut off at `working` in `location` by a loop that died, its resume owed
+/// (decision 310), its worker recorded as `worker` (`None`: none recorded).
+fn owed(base: &Path, issue: u32, location: Location, worker: Option<&str>) {
+    write_record(base, issue, Act::UsageLimit(None), location);
+    let dir = record::task_dir(base, &format!("issue-{issue}"));
+    let mut rec = record::read(&dir.join("task.json")).unwrap();
+    let dead = Process::new(77_000 + issue, 5);
+    rec.status = Status::Running;
+    rec.process = Some(dead.clone());
+    rec.hooks = serde_json::json!({ task_loop::RESUMED_HOOK: dead });
+    rec.worker = worker.map(|harness| {
+        serde_json::from_value(serde_json::json!({
+            "harness": harness,
+            "model": null,
+            "sandbox": format!("sbxm-task-issue-{issue}-{harness}"),
+            "workspace": "w",
+        }))
+        .unwrap()
+    });
+    record::write(&dir, &rec).unwrap();
+}
+
+/// Three owed tasks: #1 local (no worker recorded) holding the local slot for about 100 s, #2 in
+/// the cloud whose resume stops on `limited`'s usage limit at once, and #3 local whose worker is
+/// `third`; the events of the loop run under `roles`.
+fn owed_three(roles: &str, limited: &'static str, third: &str) -> (Play<'static>, String) {
+    let f = fixture(Some(2), roles);
+    let base = f.base();
+    owed(&base, 1, Location::Local, None);
+    owed(&base, 2, Location::Cloud, Some("antigravity"));
+    owed(&base, 3, Location::Local, Some(third));
+    let gh = github(Vec::new());
+    let play = Play::new(&base)
+        .plays(1, &[(50, Act::Ready)])
+        .plays(2, &[(0, Act::UsageLimit(Some(limited))), (0, Act::Ready)]);
+
+    let run = run_loop(&f, &play, &gh, &[]);
+
+    run.result.unwrap();
+    // The fixture's folders go with `f`; the events stay.
+    let out = run.out;
+    (play, out)
+}
+
+/// The index of the `n`th (from 1) event equal to `event`.
+fn nth(play: &Play, event: &str, n: usize) -> usize {
+    play.events()
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| *e == event)
+        .nth(n - 1)
+        .map(|(i, _)| i)
+        .unwrap_or_else(|| panic!("no {event:?} #{n} in {:?}", play.events()))
+}
+
+#[test]
+fn an_owed_task_whose_recorded_worker_is_limited_waits_until_the_limit_clears() {
+    // The config's roles (claude, codex) aren't limited; #3's recorded antigravity worker is.
+    let (play, out) = owed_three(CLAUDE_CODEX, "google", "antigravity");
+
+    let cleared = nth(&play, "start 2 resume cloud", 2);
+    assert!(
+        cleared < play.at("start 3 resume local"),
+        "{:?}\n{out}",
+        play.events()
+    );
+    assert!(
+        out.contains("no new task on google starts while #2 (Fix 2) waits out its usage limit"),
+        "{out}"
+    );
+}
+
+#[test]
+fn an_owed_task_on_other_providers_starts_while_the_limit_holds() {
+    // #3's recorded claude worker and its default codex reviewer use neither google provider.
+    let (play, out) = owed_three(CODEX_CHOSEN_CLAUDE, "google", "claude");
+
+    let three = play.at("start 3 resume local");
+    assert!(play.at("end 1 Ready") < three, "{:?}\n{out}", play.events());
+    assert!(
+        three < nth(&play, "start 2 resume cloud", 2),
+        "{:?}\n{out}",
+        play.events()
+    );
+}
+
+#[test]
+fn an_owed_tasks_default_reviewer_follows_its_recorded_worker() {
+    // The config's default reviewer is claude (its worker is codex); #3's recorded antigravity
+    // worker makes it codex, so an anthropic limit doesn't hold #3.
+    let (play, out) = owed_three(CODEX_DEFAULT, "anthropic", "antigravity");
+
+    let three = play.at("start 3 resume local");
+    assert!(
+        three < nth(&play, "start 2 resume cloud", 2),
+        "{:?}\n{out}",
+        play.events()
+    );
+}
+
+#[test]
+fn an_owed_tasks_chosen_reviewer_keeps_its_provider() {
+    // The reviewer claude is chosen in the file: #3 (antigravity worker) still uses anthropic.
+    let (play, out) = owed_three(CODEX_CHOSEN_CLAUDE, "anthropic", "antigravity");
+
+    assert!(
+        nth(&play, "start 2 resume cloud", 2) < play.at("start 3 resume local"),
+        "{:?}\n{out}",
+        play.events()
+    );
+}

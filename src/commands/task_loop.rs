@@ -801,9 +801,9 @@ struct Loop<'a> {
     /// The running children that wait out a usage limit: no step of the loop's own that would use
     /// a provider one holds starts meanwhile (317(10)).
     usage_holds: Vec<parallel::Hold>,
-    /// The providers of `sbxm-task.toml`'s worker and reviewer harnesses (317(10)).
-    worker_provider: &'static str,
-    reviewer_provider: &'static str,
+    /// `sbxm-task.toml` as the loop read it: the worker and reviewer harnesses whose providers a
+    /// step uses (317(10)).
+    roles: TaskConfig,
     /// The job children running (issue 633): resolves, log-fixes and queued jobs.
     jobs: Vec<job_children::JobChild<'a>>,
     /// The queued `run` jobs taken in this pass, started as task children before any new issue
@@ -3846,8 +3846,7 @@ fn run_loop(
     }
     let task_config = TaskConfig::load(&opts.repo_root)?;
     let default_location = pipeline::choose_location(None, &task_config);
-    let worker_provider = task_config.worker.harness.provider_secret();
-    let reviewer_provider = task_config.reviewer.harness.provider_secret();
+    let roles = task_config.clone();
     let settings = task_config.task_loop;
     let global = GlobalConfig::load(config_dir)?;
     // Several children at once only with `cloud_slots` set (decision 321(5)); the local ones as
@@ -3953,8 +3952,7 @@ fn run_loop(
         default_location,
         draining: false,
         usage_holds: Vec::new(),
-        worker_provider,
-        reviewer_provider,
+        roles,
         jobs: Vec::new(),
         run_jobs: Vec::new(),
         running_issues: Vec::new(),
