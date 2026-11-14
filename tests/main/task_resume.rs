@@ -1393,13 +1393,14 @@ fn a_ready_task_that_did_not_stop_is_refused_and_names_finish() {
 
 #[test]
 fn a_repeat_stop_with_rounds_left_resumes_without_rounds_and_its_first_review_ignores_repeats() {
-    let f = config_with_fix_rounds(3);
-    // Round 1 finds M-1, the fix round runs, round 2 repeats it: stopped with 2 rounds left.
-    let mut prepared = stopped_task(&f, &[FINDING1, REPEAT]);
+    let f = config_with_fix_rounds(4);
+    // Round 1 finds M-1, a fix round runs, round 2 repeats it (tolerated once, issue 647), a fix
+    // round runs, round 3 repeats it again: stopped with 2 rounds left.
+    let mut prepared = stopped_task(&f, &[FINDING1, REPEAT, REPEAT]);
     assert_eq!(prepared.record.stopped, Some(Stopped::RepeatFinding));
-    assert_eq!(prepared.record.round, 1);
-    // After the resumed fix round, round 3 repeats M-1 again: ignored once, so another fix round
-    // runs instead of an immediate stop; then round 4 (narrow) and 5 (full) are clean.
+    assert_eq!(prepared.record.round, 2);
+    // After the resumed fix round, round 4 repeats M-1 again: ignored once, so another fix round
+    // runs instead of an immediate stop; then round 5 (narrow) and 6 (full) are clean.
     let backend = backend(&f, &[REPEAT, CLEAN, CLEAN]);
 
     let resumed = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
@@ -1412,10 +1413,10 @@ fn a_repeat_stop_with_rounds_left_resumes_without_rounds_and_its_first_review_ig
         .iter()
         .map(|r| r.round)
         .collect();
-    assert_eq!(rounds, [3, 4, 5]);
+    assert_eq!(rounds, [4, 5, 6]);
     let record = saved(&f);
     assert_eq!((record.stage, record.stopped), (Stage::Ready, None));
-    assert_eq!((record.round, record.fix_rounds), (3, 3));
+    assert_eq!((record.round, record.fix_rounds), (4, 4));
 }
 
 #[test]
