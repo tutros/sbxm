@@ -10,8 +10,10 @@
 //! - **The loop's own steps never wait for a slot:** a resolve, a log-fix or a queued job whose
 //!   slot a child holds is postponed to a later pass; once free, they start as job children
 //!   ([`super::job_children`], issue 633) before any new issue.
-//! - **Pauses:** no new task while any child waits out a usage limit, or while the PRs awaiting
-//!   the user plus the running task children and `spec` job children reach [`PR_CAP`] (317(6)).
+//! - **Pauses:** no new task or job that would use a provider while a child waits out that
+//!   provider's usage limit (any provider when its limit names none sbxm knows; 317(10)), and no
+//!   new task while the PRs awaiting the user plus the running task children and `spec` job
+//!   children reach [`PR_CAP`] (317(6)).
 //! - **Records:** one log row per task as it ends, in finish order, with its slot; children are
 //!   finished one at a time, in this process.
 //! - **Stop:** a stop request, or a stop that needs the user (a lapsed sign-in, two parked in a
@@ -28,6 +30,7 @@ use super::{
     Retry, Started, first_line, jobs as queued, needs_user, note, sign_in_stop,
 };
 use crate::backend::Location;
+use crate::harness::Harness;
 use crate::task::outcome;
 use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Stage};
@@ -76,6 +79,29 @@ impl Free {
     }
 }
 
+/// A running child that waits out a usage limit (317(10)): no new task or job that would use its
+/// provider starts meanwhile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Hold {
+    pub issue: u32,
+    /// The provider whose limit it is; `None` when its outcome names none sbxm knows, which holds
+    /// every provider.
+    pub provider: Option<&'static str>,
+}
+
+/// `name` when it is a provider sbxm knows (`anthropic`, `openai`, `google`).
+fn known_provider(name: Option<&str>) -> Option<&'static str> {
+    [
+        Harness::Claude,
+        Harness::Codex,
+        Harness::Pi,
+        Harness::Antigravity,
+    ]
+    .into_iter()
+    .map(Harness::provider_secret)
+    .find(|p| Some(*p) == name)
+}
+
 /// A task the loop runs as a child, from its start to its end: what [`Loop::task`] keeps on its
 /// stack, kept here between passes.
 struct Live<'a> {
@@ -102,8 +128,9 @@ struct Live<'a> {
     usage: Option<(u64, u64)>,
     /// Its usage-limit waits in a row.
     usage_waited: Duration,
-    /// Its last phase ended on a usage limit: no new task starts until it clears (answer 4).
-    limited: bool,
+    /// Its last phase ended on a usage limit and its next phase hasn't started: no new task or job
+    /// on that provider starts meanwhile (317(10)).
+    limited: Option<Hold>,
     /// Since when it waits for room on the disk.
     room_since: Option<u64>,
     /// For a task tried again: how, whether it was cut off, and the resume it owed.
@@ -256,6 +283,8 @@ impl<'a> Loop<'a> {
         };
         t.resuming = resuming;
         t.phase = Some(started);
+        // Its limit has cleared once its next phase runs (317(10)).
+        t.limited = None;
         Ok(None)
     }
 
@@ -306,7 +335,13 @@ impl<'a> Loop<'a> {
         let issue = t.issue;
         let ended = ended.masked();
         let kind = ended.kind();
-        t.limited = kind == outcome::Kind::UsageLimit;
+        t.limited = (kind == outcome::Kind::UsageLimit).then(|| Hold {
+            issue,
+            provider: match &ended {
+                super::PhaseEnd::Outcome(o) => known_provider(o.provider.as_deref()),
+                _ => None,
+            },
+        });
         if kind == outcome::Kind::Stopped {
             if !t.ran {
                 return Ok(Some(Err(Halt::Stopped)));
@@ -349,10 +384,15 @@ impl<'a> Loop<'a> {
                 return Ok(Some(Err(Halt::UsageLimit(total))));
             }
             let wait = self.settings.usage_wait;
+            let on = t
+                .limited
+                .as_ref()
+                .and_then(|h| h.provider)
+                .map_or_else(String::new, |p| format!(" on {p}"));
             writeln!(
                 out,
                 "{issue_named}: usage limit; waiting {} before `task resume` ({} of {} waited in a \
-                 row); no new task starts meanwhile",
+                 row); no new task{on} starts meanwhile",
                 queue::span(wait.as_secs()),
                 queue::span(t.usage_waited.as_secs()),
                 queue::span(total.as_secs()),
@@ -447,7 +487,7 @@ impl<'a> Loop<'a> {
             phase: None,
             usage: None,
             usage_waited: Duration::ZERO,
-            limited: false,
+            limited: None,
             room_since: None,
             retried: Some((again.retry, again.cut_off, None)),
             idle_before: None,
@@ -584,15 +624,16 @@ fn tasks(live: &[Live]) -> u32 {
     live.iter().filter(|t| t.job.is_none()).count() as u32
 }
 
-/// What the loop's own steps read of the running children: their slots and a usage hold.
+/// What the loop's own steps read of the running children: their slots and their usage holds.
 fn sync(lp: &mut Loop, live: &[Live]) {
     lp.children = live.iter().map(|t| t.slot).collect();
     lp.running_issues = live.iter().map(|t| t.issue).collect();
-    lp.usage_hold = live.iter().find(|t| t.limited).map(|t| t.issue);
+    lp.usage_holds = live.iter().filter_map(|t| t.limited.clone()).collect();
 }
 
 /// Whether a new task may start now, checked before every start, a held or owed task's too
-/// (issue 615): not while the loop stops, a child waits out a usage limit (answer 4), `--cap`
+/// (issue 615): not while the loop stops, a child waits out a usage limit of the worker's or the
+/// reviewer's provider (317(10)), `--cap`
 /// is reached, or the PRs awaiting the user plus the running children reach [`PR_CAP`]
 /// (317(6)); the stop is asked again after those reads. Its slot is checked by the caller.
 fn may_start(
@@ -606,11 +647,12 @@ fn may_start(
     if lp.stopping() {
         return Ok(false);
     }
-    if let Some(t) = live.iter().find(|t| t.limited) {
-        let line = format!(
-            "no new task starts while {} waits out a usage limit",
-            lp.issue_named(t.issue)
-        );
+    if let Some(hold) = lp.usage_held(&lp.task_providers()).cloned() {
+        let named = lp.issue_named(hold.issue);
+        let line = match hold.provider {
+            Some(p) => format!("no new task on {p} starts while {named} waits out its usage limit"),
+            None => format!("no new task starts while {named} waits out a usage limit"),
+        };
         lp.say_once(out, line)?;
         return Ok(false);
     }
@@ -781,7 +823,7 @@ fn steps_and_starts<'a>(
             phase: None,
             usage: None,
             usage_waited: Duration::ZERO,
-            limited: false,
+            limited: None,
             room_since: None,
             retried: None,
             idle_before: live
@@ -831,7 +873,7 @@ fn start_run_jobs<'a>(
             phase: None,
             usage: None,
             usage_waited: Duration::ZERO,
-            limited: false,
+            limited: None,
             room_since: None,
             retried: None,
             idle_before: None,
@@ -917,7 +959,7 @@ fn start_again<'a>(
                 phase: None,
                 usage: None,
                 usage_waited: Duration::ZERO,
-                limited: false,
+                limited: None,
                 room_since: None,
                 retried: Some((retry, cut_off, owed)),
                 idle_before: None,
@@ -1145,36 +1187,38 @@ impl Loop<'_> {
     }
 
     /// Queued job `path`'s label, where it runs (`None`: as `[sandbox] location` says) as the
-    /// job's own command chooses it, and whether it starts a task; `None` for a job that takes no
-    /// slot, or whose file or issue can't be read here (the job's own run says why).
+    /// job's own command chooses it, and the providers its harnesses use (none for a job that
+    /// starts no task); `None` for a job that takes no slot, or whose file or issue can't be read
+    /// here (the job's own run says why).
     pub(super) fn job_slot(
         &self,
         path: &std::path::Path,
-    ) -> Option<(String, Option<Location>, bool)> {
+    ) -> Option<(String, Option<Location>, Vec<&'static str>)> {
         let meta = std::fs::symlink_metadata(path).ok()?;
         if !meta.is_file() {
             return None;
         }
         let text = std::fs::read_to_string(path).ok()?;
         let job = jobs::parse(&text).ok()?;
-        let (at, task) = match job {
-            jobs::Job::Review { pr } => (self.review_slot(pr), true),
-            jobs::Job::Fix { pr, .. } => (self.fix_slot(pr), true),
+        let task = self.task_providers().to_vec();
+        let (at, uses) = match job {
+            jobs::Job::Review { pr } => (self.review_slot(pr), vec![self.reviewer_provider]),
+            jobs::Job::Fix { pr, .. } => (self.fix_slot(pr), task),
             // Where its labels pin it, as the job's run reads them.
             jobs::Job::Run { issue } => {
                 let open = self.github.issues_open(&self.repo).ok()?;
                 let found = open.iter().find(|i| i.number == issue)?;
                 (
                     location::for_loop(&found.labels, self.cloud_slots).ok()?,
-                    true,
+                    task,
                 )
             }
-            jobs::Job::Spec { .. } => (None, true),
+            jobs::Job::Spec { .. } => (None, task),
             // A template build makes a sandbox, no task.
-            jobs::Job::Template { .. } => (Some(Location::Local), false),
+            jobs::Job::Template { .. } => (Some(Location::Local), Vec::new()),
             jobs::Job::RmMerged {} => return None,
         };
-        Some((job.label(), at, task))
+        Some((job.label(), at, uses))
     }
 
     /// Where `task review --pr N` runs PR `pr`'s review with no flag, as it chooses it
@@ -1191,14 +1235,44 @@ impl Loop<'_> {
             .unwrap_or_else(|_| self.fix_location(pr))
     }
 
+    /// The providers a new task uses, and a fix, `run` or `spec` job (317(10)): its worker's and
+    /// its reviewer's.
+    pub(super) fn task_providers(&self) -> [&'static str; 2] {
+        [self.worker_provider, self.reviewer_provider]
+    }
+
+    /// The first child's usage limit that holds a step using `providers` (317(10)): one on one of
+    /// them, or one whose provider isn't known; none for a step that uses no provider.
+    pub(super) fn usage_held(&self, providers: &[&str]) -> Option<&Hold> {
+        if providers.is_empty() {
+            return None;
+        }
+        self.usage_holds
+            .iter()
+            .find(|h| h.provider.is_none_or(|p| providers.contains(&p)))
+    }
+
+    /// Why a step using `providers` waits for a child's usage limit to clear, or `None`.
+    pub(super) fn usage_wait(&self, providers: &[&str]) -> Option<String> {
+        let hold = self.usage_held(providers)?;
+        Some(match hold.provider {
+            Some(p) => format!("#{}'s usage limit on {p} to clear", hold.issue),
+            None => format!("#{}'s usage limit to clear", hold.issue),
+        })
+    }
+
     /// Why a step of the loop's own that runs in `location` waits for a later pass (issue 615):
-    /// its slot is held by children, or, for a step that starts a task (`task`), a child waits out
-    /// a usage limit (answer 4). `None`: it may run now; always so for a loop that runs one task
-    /// at a time.
-    pub(super) fn wait_reason(&self, location: Option<Location>, task: bool) -> Option<String> {
+    /// a child waits out a usage limit of a provider in `providers`, the ones it would use
+    /// (317(10)), or its slot is held by children. `None`: it may run now; always so for a loop
+    /// that runs one task at a time.
+    pub(super) fn wait_reason(
+        &self,
+        location: Option<Location>,
+        providers: &[&str],
+    ) -> Option<String> {
         self.slots?;
-        if task && let Some(issue) = self.usage_hold {
-            return Some(format!("#{issue}'s usage limit to clear"));
+        if let Some(waits) = self.usage_wait(providers) {
+            return Some(waits);
         }
         self.slot_taken(location).then(|| {
             format!(

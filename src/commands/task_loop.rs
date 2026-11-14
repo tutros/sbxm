@@ -798,9 +798,12 @@ struct Loop<'a> {
     default_location: Location,
     /// Whether the loop waits for its running children to end before it stops (issue 615).
     draining: bool,
-    /// The issue of a running child that waits out a usage limit: no step of the loop's own
-    /// starts a task meanwhile (issue 615, answer 4).
-    usage_hold: Option<u32>,
+    /// The running children that wait out a usage limit: no step of the loop's own that would use
+    /// a provider one holds starts meanwhile (317(10)).
+    usage_holds: Vec<parallel::Hold>,
+    /// The providers of `sbxm-task.toml`'s worker and reviewer harnesses (317(10)).
+    worker_provider: &'static str,
+    reviewer_provider: &'static str,
     /// The job children running (issue 633): resolves, log-fixes and queued jobs.
     jobs: Vec<job_children::JobChild<'a>>,
     /// The queued `run` jobs taken in this pass, started as task children before any new issue
@@ -2272,7 +2275,7 @@ impl Loop<'_> {
             }
             // A resolve whose slot a child holds, or that a child's usage limit holds back, waits
             // for a later pass (issue 615): the loop never waits while it supervises children.
-            if let Some(waits) = self.wait_reason(self.fix_slot(number), true) {
+            if let Some(waits) = self.wait_reason(self.fix_slot(number), &self.task_providers()) {
                 let line = format!(
                     "{pr_named}: its resolve waits for {waits}; tried again at a later pass",
                     pr_named = self.pr_named(number)
@@ -3080,7 +3083,9 @@ impl Loop<'_> {
                 } else if self.pr_busy(number) {
                     // One child per PR at a time (issue 633).
                     Some("the job running on it".to_owned())
-                } else if let Some(waits) = self.wait_reason(self.fix_slot(number), true) {
+                } else if let Some(waits) =
+                    self.wait_reason(self.fix_slot(number), &self.task_providers())
+                {
                     // A child holds its slot or its usage limit holds it back (issue 615): a
                     // later pass, never a wait.
                     Some(waits)
@@ -3841,6 +3846,8 @@ fn run_loop(
     }
     let task_config = TaskConfig::load(&opts.repo_root)?;
     let default_location = pipeline::choose_location(None, &task_config);
+    let worker_provider = task_config.worker.harness.provider_secret();
+    let reviewer_provider = task_config.reviewer.harness.provider_secret();
     let settings = task_config.task_loop;
     let global = GlobalConfig::load(config_dir)?;
     // Several children at once only with `cloud_slots` set (decision 321(5)); the local ones as
@@ -3945,7 +3952,9 @@ fn run_loop(
         children: Vec::new(),
         default_location,
         draining: false,
-        usage_hold: None,
+        usage_holds: Vec::new(),
+        worker_provider,
+        reviewer_provider,
         jobs: Vec::new(),
         run_jobs: Vec::new(),
         running_issues: Vec::new(),

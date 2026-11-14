@@ -2,9 +2,6 @@
 //! has a task record waits for it instead of being refused for the run, and a child's usage limit
 //! holds only the new tasks and jobs that would use its provider.
 
-// The usage-limit helpers are used by the next step's tests.
-#![allow(dead_code)]
-
 mod common;
 
 use std::cell::{Cell, RefCell};
@@ -628,4 +625,201 @@ fn check_and_status_say_a_related_issue_waits() {
         status.contains("#2: Fix 2 (size S) — blocked: waits for #1 (related)"),
         "{status}"
     );
+}
+
+// --- the usage pause holds per provider (317(10)) ---
+
+/// PR 150, opened by an earlier task of issue 50, open on GitHub.
+fn pr_150(f: &Fixture, gh: FakeGitHub) -> FakeGitHub {
+    finished_task(&f.base(), 50, 150);
+    gh.with_pr(pr(150))
+}
+
+/// Boundary cases 9 and 12: `anthropic` limited; a review (codex) starts meanwhile, an issue
+/// task (claude and codex) waits and starts at the pass after the limit clears.
+#[test]
+fn an_anthropic_limit_lets_a_codex_review_start_and_holds_an_issue_task_until_it_clears() {
+    let f = fixture(Some(2), CLAUDE_CODEX);
+    let gh = pr_150(&f, github(vec![ready(1, &["run-cloud"], "")]));
+    let base = f.base();
+    let play = Play::new(&base)
+        .plays(
+            1,
+            &[(0, Act::UsageLimit(Some("anthropic"))), (400, Act::Ready)],
+        )
+        .on_end(|issue, act| {
+            if issue == 1 && matches!(act, Act::UsageLimit(_)) {
+                queue_job(&base, "review-150.json", r#"{"kind": "review", "pr": 150}"#);
+                gh.set_open_issues(vec![ready(1, &["run-cloud"], ""), ready(2, &[], "")]);
+            }
+        });
+
+    let run = run_loop(&f, &play, &gh, &[]);
+
+    run.result.unwrap();
+    assert!(
+        run.out
+            .contains("no new task on anthropic starts while #1 (Fix 1) waits out its usage limit"),
+        "{}",
+        run.out
+    );
+    let resumed = play.at("start 1 resume cloud");
+    assert!(play.at("review 150") < resumed, "{:?}", play.events());
+    // It starts once the limited child's next phase started, not when that phase ends.
+    let second = play.first("start 2 run");
+    assert!(resumed < second, "{:?}", play.events());
+    assert!(second < play.at("end 1 Ready"), "{:?}", play.events());
+}
+
+/// Boundary case 10: `openai` limited; an issue task waits (its reviewer is codex), and a job on
+/// `anthropic` only (a review by a claude reviewer) starts.
+#[test]
+fn an_openai_limit_holds_an_issue_task_and_lets_a_claude_review_start() {
+    let f = fixture(Some(2), CODEX_CLAUDE);
+    let gh = pr_150(&f, github(vec![ready(1, &["run-cloud"], "")]));
+    let base = f.base();
+    let play = Play::new(&base)
+        .plays(
+            1,
+            &[(0, Act::UsageLimit(Some("openai"))), (400, Act::Ready)],
+        )
+        .on_end(|issue, act| {
+            if issue == 1 && matches!(act, Act::UsageLimit(_)) {
+                queue_job(&base, "review-150.json", r#"{"kind": "review", "pr": 150}"#);
+                gh.set_open_issues(vec![ready(1, &["run-cloud"], ""), ready(2, &[], "")]);
+            }
+        });
+
+    let run = run_loop(&f, &play, &gh, &[]);
+
+    run.result.unwrap();
+    assert!(
+        run.out
+            .contains("no new task on openai starts while #1 (Fix 1) waits out its usage limit"),
+        "{}",
+        run.out
+    );
+    let resumed = play.at("start 1 resume cloud");
+    assert!(play.at("review 150") < resumed, "{:?}", play.events());
+    assert!(resumed < play.first("start 2 run"), "{:?}", play.events());
+}
+
+/// Boundary case 11: two children limited on two providers; each hold applies, and the one that
+/// clears first lifts only its own.
+#[test]
+fn two_limits_on_two_providers_each_hold_and_clearing_one_lifts_only_its_own() {
+    let f = fixture(Some(2), CLAUDE_CODEX);
+    let gh = pr_150(
+        &f,
+        github(vec![
+            ready(1, &["run-cloud"], ""),
+            ready(3, &["run-cloud"], ""),
+        ]),
+    );
+    let base = f.base();
+    // #3's openai limit first; #1's anthropic limit about 400 s later.
+    let play = Play::new(&base)
+        .plays(
+            1,
+            &[(200, Act::UsageLimit(Some("anthropic"))), (400, Act::Ready)],
+        )
+        .plays(
+            3,
+            &[(0, Act::UsageLimit(Some("openai"))), (400, Act::Ready)],
+        )
+        .on_end(|issue, act| {
+            if issue == 3 && matches!(act, Act::UsageLimit(_)) {
+                queue_job(&base, "review-150.json", r#"{"kind": "review", "pr": 150}"#);
+                gh.set_open_issues(vec![
+                    ready(1, &["run-cloud"], ""),
+                    ready(2, &[], ""),
+                    ready(3, &["run-cloud"], ""),
+                ]);
+            }
+        });
+
+    let run = run_loop(&f, &play, &gh, &[]);
+
+    run.result.unwrap();
+    assert!(
+        run.out.contains(
+            "job review #150: waits for #3's usage limit on openai to clear; tried again at a \
+             later pass"
+        ),
+        "{}",
+        run.out
+    );
+    let three = play.at("start 3 resume cloud");
+    let one = play.at("start 1 resume cloud");
+    let review = play.at("review 150");
+    let second = play.first("start 2 run");
+    assert!(three < review && review < one, "{:?}", play.events());
+    assert!(one < second, "{:?}", play.events());
+}
+
+/// Boundary case 13: a limit whose provider isn't known holds every new task and job.
+#[test]
+fn a_limit_with_no_provider_holds_every_task_and_job() {
+    unknown_provider_holds_everything(None);
+}
+
+/// Boundary case 14: a provider name sbxm doesn't know holds them all too.
+#[test]
+fn a_limit_of_an_unknown_provider_holds_every_task_and_job() {
+    unknown_provider_holds_everything(Some("mistral"));
+}
+
+fn unknown_provider_holds_everything(provider: Option<&'static str>) {
+    let f = fixture(Some(2), CLAUDE_CODEX);
+    let gh = pr_150(&f, github(vec![ready(1, &["run-cloud"], "")]));
+    let base = f.base();
+    let play = Play::new(&base)
+        .plays(1, &[(0, Act::UsageLimit(provider)), (400, Act::Ready)])
+        .on_end(|issue, act| {
+            if issue == 1 && matches!(act, Act::UsageLimit(_)) {
+                queue_job(&base, "review-150.json", r#"{"kind": "review", "pr": 150}"#);
+                gh.set_open_issues(vec![ready(1, &["run-cloud"], ""), ready(2, &[], "")]);
+            }
+        });
+
+    let run = run_loop(&f, &play, &gh, &[]);
+
+    run.result.unwrap();
+    assert!(
+        run.out
+            .contains("no new task starts while #1 (Fix 1) waits out a usage limit"),
+        "{}",
+        run.out
+    );
+    assert!(
+        run.out.contains(
+            "job review #150: waits for #1's usage limit to clear; tried again at a later pass"
+        ),
+        "{}",
+        run.out
+    );
+    let resumed = play.at("start 1 resume cloud");
+    assert!(resumed < play.at("review 150"), "{:?}", play.events());
+    assert!(resumed < play.first("start 2 run"), "{:?}", play.events());
+}
+
+/// Boundary case 15: no child limited, nothing waits on a usage limit.
+#[test]
+fn with_no_child_limited_nothing_waits_for_a_usage_limit() {
+    let f = fixture(Some(2), CLAUDE_CODEX);
+    let gh = pr_150(&f, github(vec![ready(1, &["run-cloud"], "")]));
+    let base = f.base();
+    let play = Play::new(&base)
+        .plays(1, &[(0, Act::Ready)])
+        .on_end(|issue, _| {
+            if issue == 1 {
+                queue_job(&base, "review-150.json", r#"{"kind": "review", "pr": 150}"#);
+            }
+        });
+
+    let run = run_loop(&f, &play, &gh, &[]);
+
+    run.result.unwrap();
+    play.at("review 150");
+    assert!(!run.out.contains("usage limit"), "{}", run.out);
 }

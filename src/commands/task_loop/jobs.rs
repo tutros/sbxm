@@ -89,8 +89,8 @@ impl Loop<'_> {
             }
             // A job whose slot a child holds, or that a child's usage limit holds back, waits for
             // a later pass, the jobs after it too, so they still run oldest first (issue 615).
-            if let Some((label, at, task)) = self.job_slot(path)
-                && let Some(waits) = self.wait_reason(at, task)
+            if let Some((label, at, uses)) = self.job_slot(path)
+                && let Some(waits) = self.wait_reason(at, &uses)
             {
                 let line = format!("{label}: waits for {waits}; tried again at a later pass");
                 self.say_once(out, line)?;
@@ -150,12 +150,20 @@ impl Loop<'_> {
                 continue;
             }
             let slot = match self.job_slot(&path) {
-                Some((label, at, task)) => {
+                Some((label, at, uses)) => {
                     let place = at.unwrap_or(self.default_location);
                     if held.contains(&place) {
                         continue;
                     }
-                    if let Some(waits) = self.wait_reason(at, task) {
+                    // A child's usage limit on a provider it would use (317(10)): it keeps its
+                    // place, and the jobs after it on other providers go on.
+                    if let Some(waits) = self.usage_wait(&uses) {
+                        let line =
+                            format!("{label}: waits for {waits}; tried again at a later pass");
+                        self.say_once(out, line)?;
+                        continue;
+                    }
+                    if let Some(waits) = self.wait_reason(at, &[]) {
                         let line =
                             format!("{label}: waits for {waits}; tried again at a later pass");
                         self.say_once(out, line)?;
