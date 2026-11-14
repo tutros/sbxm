@@ -3,6 +3,7 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
@@ -49,8 +50,61 @@ impl GhRunner for Process {
 /// may have been cut off, so it is an error.
 pub const LABELED_LIMIT: u32 = 1000;
 
+/// The waits before each new try of a read that failed with a network error (issue 639): three
+/// retries, about 65 s in all, then the read fails.
+pub const RETRY_WAITS: [Duration; 3] = [
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(45),
+];
+
+/// The words of a `gh` failure that make it a network error (issue 639), matched in any case.
+/// Anything else, an auth error included, fails at once.
+const NETWORK_WORDS: [&str; 11] = [
+    "tls handshake timeout",
+    "connection reset",
+    "i/o timeout",
+    "unexpected eof",
+    "eof",
+    "connection refused",
+    "no such host",
+    "timeout awaiting response headers",
+    "502",
+    "503",
+    "504",
+];
+
+/// Whether `error`, a failed `gh` run's text, is a network error worth trying again.
+fn network_error(error: &str) -> bool {
+    let error = error.to_lowercase();
+    NETWORK_WORDS.iter().any(|word| error.contains(word))
+}
+
+type Sleep = Box<dyn Fn(Duration) + Send + Sync>;
+type Warn = Box<dyn Fn(&str) + Send + Sync>;
+type WarningSink = Box<dyn FnMut(&str) + Send>;
+
+/// Where a retry's line goes when the backend was given no `warn` of its own: set once by the
+/// program (`set_warning_sink`) to its warning stream; with none set, standard error.
+static WARNING_SINK: std::sync::Mutex<Option<WarningSink>> = std::sync::Mutex::new(None);
+
+/// Sends each later retry line of a backend given no `warn` of its own (as
+/// [`GhBackend::default`] is) to `sink`, in place of the one before.
+pub fn set_warning_sink(sink: impl FnMut(&str) + Send + 'static) {
+    *WARNING_SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(sink));
+}
+
+fn sink_warning(line: &str) {
+    match &mut *WARNING_SINK.lock().unwrap_or_else(|e| e.into_inner()) {
+        Some(sink) => sink(line),
+        None => eprintln!("warning: {line}"),
+    }
+}
+
 pub struct GhBackend {
     runner: Box<dyn GhRunner>,
+    sleep: Sleep,
+    warn: Warn,
 }
 
 impl Default for GhBackend {
@@ -59,26 +113,85 @@ impl Default for GhBackend {
     }
 }
 
+/// The command a `gh` failure names: its first two arguments.
+fn command(args: &[String]) -> String {
+    args.iter().take(2).cloned().collect::<Vec<_>>().join(" ")
+}
+
+/// The context of a failed `gh` run that wasn't a network error, with the fix hint.
+fn failed(args: &[String]) -> String {
+    format!(
+        "`gh {}` failed (is `gh` installed and logged in? try `gh auth status`)",
+        command(args)
+    )
+}
+
 fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|a| (*a).to_owned()).collect()
 }
 
 impl GhBackend {
     pub fn with_runner(runner: Box<dyn GhRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            sleep: Box::new(std::thread::sleep),
+            warn: Box::new(sink_warning),
+        }
     }
 
-    /// Runs `gh`, naming the command in any failure; fix hint included.
+    /// The same backend, waiting between the tries of a read through `sleep` and saying each
+    /// retry through `warn` (issue 639), so tests don't wait.
+    pub fn retrying_with(
+        self,
+        sleep: impl Fn(Duration) + Send + Sync + 'static,
+        warn: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            sleep: Box::new(sleep),
+            warn: Box::new(warn),
+            ..self
+        }
+    }
+
+    /// Runs `gh` once, naming the command in any failure; fix hint included. Every write goes
+    /// through here: a write that landed but whose answer was lost would run twice if tried
+    /// again (issue 639).
     fn run(&self, args: &[String], stdin: Option<&str>) -> Result<String> {
-        let command = args.iter().take(2).cloned().collect::<Vec<_>>().join(" ");
-        self.runner.run(args, stdin).with_context(|| {
-            format!("`gh {command}` failed (is `gh` installed and logged in? try `gh auth status`)")
-        })
+        self.runner.run(args, stdin).with_context(|| failed(args))
+    }
+
+    /// Runs a `gh` call that changes nothing on GitHub, trying it again after a network error
+    /// with the waits of [`RETRY_WAITS`]; any other failure fails at once (issue 639).
+    fn read(&self, args: &[String]) -> Result<String> {
+        let command = command(args);
+        let mut waits = RETRY_WAITS.iter().enumerate();
+        loop {
+            let error = match self.runner.run(args, None) {
+                Ok(out) => return Ok(out),
+                Err(error) => error,
+            };
+            if !network_error(&format!("{error:#}")) {
+                return Err(error.context(failed(args)));
+            }
+            let Some((at, wait)) = waits.next() else {
+                let tries = RETRY_WAITS.len() + 1;
+                return Err(error.context(format!(
+                    "`gh {command}` failed with a network error after {tries} tries"
+                )));
+            };
+            (self.warn)(&format!(
+                "gh {command}: network error, trying again in {} s ({} of {})",
+                wait.as_secs(),
+                at + 1,
+                RETRY_WAITS.len()
+            ));
+            (self.sleep)(*wait);
+        }
     }
 
     fn json<T: for<'de> Deserialize<'de>>(&self, args: &[String]) -> Result<T> {
-        let out = self.run(args, None)?;
-        let command = args.iter().take(2).cloned().collect::<Vec<_>>().join(" ");
+        let out = self.read(args)?;
+        let command = command(args);
         serde_json::from_str(&out)
             .with_context(|| format!("could not parse the output of `gh {command}`"))
     }
@@ -403,7 +516,7 @@ struct RawRepo {
 
 impl GitHubBackend for GhBackend {
     fn whoami(&self) -> Result<String> {
-        let out = self.run(&strings(&["api", "user", "--jq", ".login"]), None)?;
+        let out = self.read(&strings(&["api", "user", "--jq", ".login"]))?;
         Ok(out.trim().to_owned())
     }
 
@@ -484,10 +597,13 @@ impl GitHubBackend for GhBackend {
     }
 
     fn issue(&self, repo: &str, number: u32) -> Result<IssueText> {
-        let text = self.run(
-            &strings(&["issue", "view", &number.to_string(), "--repo", repo]),
-            None,
-        )?;
+        let text = self.read(&strings(&[
+            "issue",
+            "view",
+            &number.to_string(),
+            "--repo",
+            repo,
+        ]))?;
         let header = |key: &str| {
             text.lines()
                 .take_while(|line| *line != "--")
@@ -811,7 +927,7 @@ impl GitHubBackend for GhBackend {
         }
         // Newest first, every page: the first of `context` is its latest.
         let path = format!("repos/{repo}/commits/{sha}/statuses?per_page=100");
-        let out = self.run(&strings(&["api", &path, "--paginate"]), None)?;
+        let out = self.read(&strings(&["api", &path, "--paginate"]))?;
         for page in serde_json::Deserializer::from_str(&out).into_iter::<Vec<RawStatus>>() {
             let page =
                 page.with_context(|| format!("could not parse the output of `gh api {path}`"))?;
@@ -878,10 +994,14 @@ impl GitHubBackend for GhBackend {
                 log: String::new(),
             })
             .collect();
-        let log = self.run(
-            &strings(&["run", "view", &id, "--repo", repo, "--log-failed"]),
-            None,
-        )?;
+        let log = self.read(&strings(&[
+            "run",
+            "view",
+            &id,
+            "--repo",
+            repo,
+            "--log-failed",
+        ]))?;
         // Each line starts with its job's name and a tab; a line without one goes with the line
         // before it.
         let mut last = None;
@@ -940,7 +1060,7 @@ impl GitHubBackend for GhBackend {
         let pull = format!("repos/{repo}/pulls/{number}");
         let files = format!("{pull}/files");
         // `--paginate` prints each page's array in turn, `[...][...]`: read them one by one.
-        let out = self.run(&strings(&["api", &files, "--paginate"]), None)?;
+        let out = self.read(&strings(&["api", &files, "--paginate"]))?;
         let mut listed = Vec::new();
         for page in serde_json::Deserializer::from_str(&out).into_iter::<Vec<RawPrFile>>() {
             let page =
@@ -959,7 +1079,7 @@ impl GitHubBackend for GhBackend {
 
     fn pr_labels(&self, repo: &str, number: u32) -> Result<Vec<String>> {
         let path = format!("repos/{repo}/issues/{number}/labels");
-        let out = self.run(&strings(&["api", &path, "--paginate"]), None)?;
+        let out = self.read(&strings(&["api", &path, "--paginate"]))?;
         let labels: Vec<Named> = pages(&out, &path)?;
         Ok(labels.into_iter().map(|l| l.name).collect())
     }
@@ -987,7 +1107,7 @@ impl GitHubBackend for GhBackend {
             bail!("`{sha}` is not a full commit id, so its statuses can't be read");
         }
         let path = format!("repos/{repo}/commits/{sha}/statuses");
-        let out = self.run(&strings(&["api", &path, "--paginate"]), None)?;
+        let out = self.read(&strings(&["api", &path, "--paginate"]))?;
         let raw: Vec<RawPostedStatus> = pages(&out, &path)?;
         raw.into_iter()
             .map(|s| {
@@ -1008,14 +1128,14 @@ impl GitHubBackend for GhBackend {
 
     fn issue_comment_bodies(&self, repo: &str, number: u32) -> Result<Vec<String>> {
         let path = format!("repos/{repo}/issues/{number}/comments");
-        let out = self.run(&strings(&["api", &path, "--paginate"]), None)?;
+        let out = self.read(&strings(&["api", &path, "--paginate"]))?;
         let comments: Vec<RawIssueComment> = pages(&out, &path)?;
         Ok(comments.into_iter().map(|c| c.body).collect())
     }
 
     fn label_events(&self, repo: &str, number: u32) -> Result<Vec<LabelEvent>> {
         let path = format!("repos/{repo}/issues/{number}/events");
-        let out = self.run(&strings(&["api", &path, "--paginate"]), None)?;
+        let out = self.read(&strings(&["api", &path, "--paginate"]))?;
         let raw: Vec<RawIssueEvent> = pages(&out, &path)?;
         let mut events = Vec::new();
         for event in raw {
