@@ -519,14 +519,15 @@ const CODEX_EXTRA_HOSTS: [&str; 9] = [
     "ports.ubuntu.com",
 ];
 
-/// The Anthropic host the built-in `pi` kit allows, which a strict `pi` sandbox keeps (decision
-/// 323; provider secret `anthropic`).
-const PI_PROVIDER_HOSTS: [&str; 1] = ["api.anthropic.com"];
+/// The Anthropic hosts the built-in `pi` kit allows, which a strict `pi` sandbox keeps: the
+/// provider host (decision 323; provider secret `anthropic`) and the host Pi refreshes its OAuth
+/// token on (decision 324). Hosts without a port, as [`check_kit_rules`] compares them.
+const PI_PROVIDER_HOSTS: [&str; 2] = ["api.anthropic.com", "platform.claude.com"];
 
-/// The other hosts the built-in `pi` kit allows (`sbx` 0.46.0, the real check of issue #266,
-/// decision 323), written as the kit's rule writes them. Like [`CODEX_EXTRA_HOSTS`], sbxm keeps
-/// the list and [`check_kit_rules`] catches a newer kit that adds one.
-const PI_EXTRA_HOSTS: [&str; 2] = ["registry.npmjs.org", "platform.claude.com:443"];
+/// The other host the built-in `pi` kit allows (`sbx` 0.46.0, the real check of issue #266,
+/// decisions 323 and 324), written as the kit's rule writes it. Like [`CODEX_EXTRA_HOSTS`], sbxm
+/// keeps the list and [`check_kit_rules`] catches a newer kit that adds one.
+const PI_EXTRA_HOSTS: [&str; 1] = ["registry.npmjs.org"];
 
 /// The provider hosts and the extra hosts of the kit of a harness whose strict sandboxes sbxm
 /// can hold to their allow list (decisions 221, 323); `None` for any other harness.
