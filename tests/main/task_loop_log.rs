@@ -1,0 +1,1188 @@
+//! Issue 463 (decision 305): `task loop` writes its log under the base dir, one file per run
+//! (`<base>/.sbxm/loop-logs/<date>-<HHMMSS>-loop.md`), never in the checkout, and posts it at
+//! the stop as a comment on the open `loop-log` issue, split between rows past 65,000
+//! characters.
+
+use crate::common;
+
+use std::cell::Cell;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Result, anyhow};
+use common::Env as TestEnv;
+use common::task_fixture::{Probe, issue_text, open_issue};
+use sbxm::commands::task_loop::{self, Env, Options, Steps};
+use sbxm::github::fake::{FakeGitHub, GhCall};
+use sbxm::github::{Issue, IssueRequest};
+use sbxm::task::loop_log;
+
+const REPO: &str = "o/r";
+const READY: &str = "ready-for-worker";
+/// 2026-11-08T10:00:00Z.
+const START: u64 = 1_794_132_000;
+
+// --- The file's name ---
+
+#[test]
+fn the_log_is_named_by_the_loop_start_in_utc_with_seconds_under_the_base_dir() {
+    let path = loop_log::path(Path::new("base"), START + 3_723);
+
+    assert_eq!(
+        path,
+        Path::new("base")
+            .join(".sbxm")
+            .join("loop-logs")
+            .join("2026-11-08-110203-loop.md")
+    );
+}
+
+// --- Splitting a long log into comments ---
+
+const TABLE: &str = "# Loop log\n\n| # | Issue |\n|---|---|\n";
+
+/// A row of exactly `len` characters, its newline included.
+fn row(number: usize, len: usize) -> String {
+    let start = format!("| {number} | #");
+    let pad = len - start.chars().count() - " |\n".len();
+    format!("{start}{} |\n", "a".repeat(pad))
+}
+
+/// A log of `TABLE` and two rows whose single comment under `heading` is `total` characters.
+fn log_of(heading: &str, total: usize) -> String {
+    let fixed = heading.chars().count() + 2 + TABLE.chars().count();
+    let first = row(1, 100);
+    format!("{TABLE}{first}{}", row(2, total - fixed - 100))
+}
+
+#[test]
+fn a_comment_of_65000_characters_is_posted_whole() {
+    let heading = "Loop started 2026-11-08T10:00:00Z";
+    let log = log_of(heading, 65_000);
+
+    let comments = loop_log::comments(heading, &log);
+
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0], format!("{heading}\n\n{log}"));
+    assert_eq!(comments[0].chars().count(), 65_000);
+}
+
+#[test]
+fn a_comment_of_65001_characters_is_split_between_rows_each_part_with_the_header() {
+    let heading = "Loop started 2026-11-08T10:00:00Z";
+    let log = log_of(heading, 65_001);
+    let first = row(1, 100);
+
+    let comments = loop_log::comments(heading, &log);
+
+    assert_eq!(comments.len(), 2);
+    assert_eq!(
+        comments[0],
+        format!("{heading} (part 1 of 2)\n\n{TABLE}{first}")
+    );
+    assert!(
+        comments[1].starts_with(&format!("{heading} (part 2 of 2)\n\n{TABLE}| 2 | #")),
+        "{}",
+        &comments[1][..200]
+    );
+    assert!(comments[1].ends_with(" |\n"));
+    assert!(comments.iter().all(|c| c.chars().count() <= 65_000));
+}
+
+#[test]
+fn a_row_longer_than_a_comment_is_posted_alone_and_whole() {
+    let heading = "Loop started";
+    let (small, huge) = (row(1, 50), row(2, 70_000));
+    let log = format!("{TABLE}{small}{huge}{}", row(3, 50));
+
+    let comments = loop_log::comments(heading, &log);
+
+    assert_eq!(comments.len(), 3);
+    assert_eq!(
+        comments[1],
+        format!("{heading} (part 2 of 3)\n\n{TABLE}{huge}")
+    );
+    assert!(comments[2].starts_with(&format!("{heading} (part 3 of 3)\n\n{TABLE}| 3 |")));
+}
+
+// --- The loop ---
+
+/// Every task's `run` and `resume` fails for `sbx` not running, so each task is parked after its
+/// second failure with one log row; a task in `refused` is refused before any record.
+struct Script {
+    refused: Vec<u32>,
+    clock: Cell<u64>,
+}
+
+impl Script {
+    fn new(start: u64) -> Self {
+        Self {
+            refused: Vec::new(),
+            clock: Cell::new(start),
+        }
+    }
+
+    fn act(&self, issue: u32) -> Result<()> {
+        self.clock.set(self.clock.get() + 300);
+        if self.refused.contains(&issue) {
+            return Err(anyhow!("the issue is not ready"));
+        }
+        Err(anyhow::Error::new(sbxm::headless::ExecUnavailable(
+            "sbx exec failed".into(),
+        )))
+    }
+}
+
+impl Steps for Script {
+    fn run(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        self.act(issue)
+    }
+
+    fn resume(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        self.act(issue)
+    }
+
+    fn finish(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected finish of #{issue}"))
+    }
+
+    fn file_findings(&self, _: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Ok(())
+    }
+
+    fn fix_pr(&self, pr: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected resolve of PR #{pr}"))
+    }
+
+    fn fix_check(&self, pr: u32, _: u64, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected log-fix of PR #{pr}"))
+    }
+
+    fn rm_merged(&self, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Ok(())
+    }
+
+    fn room(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct Fixture {
+    env: TestEnv,
+    repo_root: PathBuf,
+}
+
+fn fixture() -> Fixture {
+    let env = TestEnv::new();
+    let repo_root = env.tmp.path().join("repo");
+    fs::create_dir_all(&repo_root).unwrap();
+    fs::write(
+        repo_root.join("sbxm-task.toml"),
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = []\n",
+    )
+    .unwrap();
+    Fixture { env, repo_root }
+}
+
+impl Fixture {
+    fn logs(&self) -> PathBuf {
+        self.env.base_dir().join(".sbxm").join("loop-logs")
+    }
+
+    fn log_files(&self) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = fs::read_dir(self.logs())
+            .map(|d| d.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default();
+        // The logs only, not the markers of the posted ones (issue 594).
+        files.retain(|p| p.extension().is_some_and(|e| e == "md"));
+        files.sort();
+        files
+    }
+}
+
+/// Every file under `dir`, relative, with its contents.
+fn tree(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut all = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            all.extend(tree(&path));
+        } else {
+            all.push((path.clone(), fs::read(&path).unwrap()));
+        }
+    }
+    all.sort();
+    all
+}
+
+fn loop_log_issue(number: u32) -> Issue {
+    open_issue(number, &["loop-log"], "")
+}
+
+fn github(mut issues: Vec<Issue>) -> FakeGitHub {
+    issues.insert(0, open_issue(3, &[READY, "size:S"], ""));
+    FakeGitHub::default()
+        .with_user("me")
+        .with_default_branch("main")
+        .with_branch_head("main", &"a".repeat(40))
+        .with_issue_text(issue_text(3))
+        .with_next_issue_number(900)
+        .with_open_issues(issues)
+}
+
+struct Run {
+    result: Result<()>,
+    out: String,
+    warn: String,
+}
+
+fn run_loop(f: &Fixture, script: &Script, gh: &FakeGitHub) -> Run {
+    run_loop_for(f, script, gh, REPO)
+}
+
+/// [`run_loop`] for the repository `repo`.
+fn run_loop_for(f: &Fixture, script: &Script, gh: &FakeGitHub, repo: &str) -> Run {
+    let now = || script.clock.get();
+    let sleep = |d: Duration| script.clock.set(script.clock.get() + d.as_secs());
+    let env = Env {
+        now: &now,
+        sleep: &sleep,
+        stop_requested: &|| false,
+    };
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = task_loop::run(
+        &f.env.config_dir(),
+        &Options {
+            repo_root: f.repo_root.clone(),
+            issues: Vec::new(),
+            cap: Some(1),
+            repo: Some(repo.into()),
+            wait: false,
+        },
+        script,
+        gh,
+        &Probe,
+        &env,
+        &mut out,
+        &mut warn,
+    );
+    Run {
+        result,
+        out: String::from_utf8(out).unwrap(),
+        warn: String::from_utf8(warn).unwrap(),
+    }
+}
+
+fn creates(gh: &FakeGitHub) -> Vec<IssueRequest> {
+    gh.calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            GhCall::IssueCreate(_, request) => Some(request),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The issue and body of every `issue_comment`.
+fn comments(gh: &FakeGitHub) -> Vec<(u32, String)> {
+    gh.calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            GhCall::IssueComment(_, number, body) => Some((number, body)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_log_goes_to_one_file_under_the_base_dir_and_the_checkout_is_untouched() {
+    let f = fixture();
+    let before = tree(&f.repo_root);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop(&f, &Script::new(START), &gh);
+
+    run.result.unwrap();
+    let files = f.log_files();
+    assert_eq!(
+        files,
+        [f.logs().join("2026-11-08-100000-loop.md")],
+        "{}",
+        run.out
+    );
+    let text = fs::read_to_string(&files[0]).unwrap();
+    assert!(text.contains("| 1 | #3 "), "{text}");
+    assert_eq!(tree(&f.repo_root), before);
+}
+
+#[test]
+fn with_no_open_loop_log_issue_one_is_created_and_the_log_posted_to_it() {
+    let f = fixture();
+    let gh = github(Vec::new());
+
+    let run = run_loop(&f, &Script::new(START), &gh);
+
+    run.result.unwrap();
+    assert_eq!(
+        creates(&gh),
+        [IssueRequest {
+            title: "Loop logs since 2026-11-08".into(),
+            body: "Logs of `sbxm task loop` runs, one comment per loop, until the next retro \
+                   reads and closes this issue (issue 463)."
+                .into(),
+            labels: vec!["loop-log".into()],
+        }]
+    );
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 1);
+    assert_eq!(posted[0].0, 900);
+    let file = &f.log_files()[0];
+    let body = &posted[0].1;
+    let heading = body.lines().next().unwrap();
+    assert!(heading.contains("2026-11-08T10:00:00Z"), "{heading}");
+    assert!(heading.contains("--cap 1 reached"), "{heading}");
+    assert!(heading.contains(&file.display().to_string()), "{heading}");
+    assert!(body.ends_with(&fs::read_to_string(file).unwrap()), "{body}");
+    assert_eq!(run.warn, "");
+}
+
+#[test]
+fn with_one_open_loop_log_issue_the_log_is_posted_to_it_and_nothing_is_created() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]);
+
+    run_loop(&f, &Script::new(START), &gh).result.unwrap();
+
+    assert_eq!(creates(&gh), []);
+    let posted: Vec<u32> = comments(&gh).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(posted, [40]);
+}
+
+#[test]
+fn with_two_open_loop_log_issues_the_log_goes_to_the_lower_number() {
+    let f = fixture();
+    let gh = github(vec![
+        loop_log_issue(52),
+        open_issue(7, &["bug"], ""),
+        loop_log_issue(41),
+    ]);
+
+    run_loop(&f, &Script::new(START), &gh).result.unwrap();
+
+    assert_eq!(creates(&gh), []);
+    let posted: Vec<u32> = comments(&gh).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(posted, [41]);
+}
+
+#[test]
+fn a_failed_create_is_one_warning_naming_the_file_and_the_loop_ends_as_before() {
+    let f = fixture();
+    let gh = github(Vec::new()).failing_issue_create_at(1);
+
+    let run = run_loop(&f, &Script::new(START), &gh);
+
+    run.result.unwrap();
+    assert!(run.out.contains("--cap 1 reached"), "{}", run.out);
+    assert_eq!(comments(&gh), []);
+    let file = f.log_files()[0].display().to_string();
+    assert_eq!(run.warn.lines().count(), 1, "{}", run.warn);
+    assert!(run.warn.contains(&file), "{}", run.warn);
+    assert!(run.warn.contains("issue create 1 fails"), "{}", run.warn);
+}
+
+#[test]
+fn a_failed_comment_is_one_warning_naming_the_file_and_the_loop_ends_as_before() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]).failing_issue_comments_on(40);
+
+    let run = run_loop(&f, &Script::new(START), &gh);
+
+    run.result.unwrap();
+    assert_eq!(comments(&gh).len(), 1, "not retried");
+    let file = f.log_files()[0].display().to_string();
+    assert_eq!(run.warn.lines().count(), 1, "{}", run.warn);
+    assert!(run.warn.contains(&file), "{}", run.warn);
+    assert!(
+        run.warn.contains("comment on issue 40 fails"),
+        "{}",
+        run.warn
+    );
+}
+
+#[test]
+fn a_loop_that_stops_on_an_error_still_posts_and_keeps_its_error() {
+    let f = fixture();
+    // Two tasks parked in a row stop the loop with an error; no cap here.
+    let mut gh = github(vec![loop_log_issue(40)]);
+    gh = gh.with_issue_text(issue_text(4));
+    gh.set_open_issues(vec![
+        open_issue(3, &[READY, "size:S"], ""),
+        open_issue(4, &[READY, "size:S"], ""),
+        loop_log_issue(40),
+    ]);
+    let script = Script::new(START);
+    let now = || script.clock.get();
+    let sleep = |d: Duration| script.clock.set(script.clock.get() + d.as_secs());
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+
+    let result = task_loop::run(
+        &f.env.config_dir(),
+        &Options {
+            repo_root: f.repo_root.clone(),
+            issues: Vec::new(),
+            cap: None,
+            repo: Some(REPO.into()),
+            wait: false,
+        },
+        &script,
+        &gh,
+        &Probe,
+        &Env {
+            now: &now,
+            sleep: &sleep,
+            stop_requested: &|| false,
+        },
+        &mut out,
+        &mut warn,
+    );
+
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(err.contains("two tasks parked in a row"), "{err}");
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 1);
+    let heading = posted[0].1.lines().next().unwrap().to_owned();
+    assert!(heading.contains("two tasks parked in a row"), "{heading}");
+    assert!(posted[0].1.contains("| 2 | #4 "), "{}", posted[0].1);
+}
+
+#[test]
+fn two_loops_in_a_row_write_two_files_each_numbered_from_1() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]);
+
+    run_loop(&f, &Script::new(START), &gh).result.unwrap();
+    // The first task's record stays; the second loop takes another issue.
+    gh.set_open_issues(vec![
+        open_issue(5, &[READY, "size:S"], ""),
+        loop_log_issue(40),
+    ]);
+    let gh = gh.with_issue_text(issue_text(5));
+    run_loop(&f, &Script::new(START + 3_600), &gh)
+        .result
+        .unwrap();
+
+    let files = f.log_files();
+    assert_eq!(
+        files,
+        [
+            f.logs().join("2026-11-08-100000-loop.md"),
+            f.logs().join("2026-11-08-110000-loop.md"),
+        ]
+    );
+    let second = fs::read_to_string(&files[1]).unwrap();
+    assert!(second.contains("| 1 | #5 "), "{second}");
+    assert!(!second.contains("#3 "), "{second}");
+    assert_eq!(comments(&gh).len(), 2);
+}
+
+#[test]
+fn a_loop_that_runs_no_task_posts_nothing() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]);
+    let mut script = Script::new(START);
+    script.refused.push(3);
+
+    let run = run_loop(&f, &script, &gh);
+
+    run.result.unwrap();
+    assert!(run.out.contains("the queue is empty"), "{}", run.out);
+    assert_eq!(comments(&gh), []);
+    assert_eq!(creates(&gh), []);
+    assert_eq!(f.log_files(), Vec::<PathBuf>::new());
+}
+
+// --- Issue 594: earlier logs a loop never posted are posted late at the next start ---
+
+const LATE: &str = "Posted late by the loop started 2026-11-08T10:00:00Z: the loop that wrote it \
+                    ended without its stop (Ctrl-C, a crash or a restart).";
+
+/// An earlier loop's log of [`REPO`], started `ago` seconds before `START`, with `rows` rows.
+fn plant_earlier(f: &Fixture, ago: u64, rows: usize) -> PathBuf {
+    plant_headed(f, ago, rows, &own_table(REPO))
+}
+
+/// An earlier loop's log under `table`, started `ago` seconds before `START`, with `rows` rows.
+fn plant_headed(f: &Fixture, ago: u64, rows: usize, table: &str) -> PathBuf {
+    fs::create_dir_all(f.logs()).unwrap();
+    let path = loop_log::path(&f.env.base_dir(), START - ago);
+    let rows: String = (1..=rows).map(|n| row(n, 40)).collect();
+    fs::write(&path, format!("{table}{rows}")).unwrap();
+    path
+}
+
+/// A log's header naming `repo` (issue 602).
+fn own_table(repo: &str) -> String {
+    format!("# Loop log\n\nRepository: {repo}\n\n| # | Issue |\n|---|---|\n")
+}
+
+/// A loop that runs no task of its own, so it posts nothing at its stop.
+fn idle_script() -> Script {
+    let mut script = Script::new(START);
+    script.refused.push(3);
+    script
+}
+
+#[test]
+fn with_no_earlier_log_nothing_is_posted_late() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop(&f, &Script::new(START), &gh);
+
+    run.result.unwrap();
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 1, "only its own at the stop");
+    assert!(!posted[0].1.contains("Posted late"), "{}", posted[0].1);
+    assert_eq!(run.warn, "");
+}
+
+#[test]
+fn an_unposted_earlier_log_with_rows_is_posted_once_with_the_late_marker() {
+    let f = fixture();
+    let earlier = plant_earlier(&f, 86_400, 2);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 1);
+    assert_eq!(posted[0].0, 40);
+    let body = &posted[0].1;
+    assert!(body.starts_with(&format!("{LATE}\n")), "{body}");
+    assert!(body.contains("2026-11-07T10:00:00Z"), "{body}");
+    assert!(body.contains(&earlier.display().to_string()), "{body}");
+    assert!(
+        body.ends_with(&fs::read_to_string(&earlier).unwrap()),
+        "{body}"
+    );
+    assert!(loop_log::marker(&earlier).exists());
+    assert_eq!(run.warn, "");
+
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+    assert_eq!(comments(&gh).len(), 1, "not posted twice");
+}
+
+#[test]
+fn an_earlier_log_without_rows_is_not_posted_and_is_marked() {
+    let f = fixture();
+    let earlier = plant_earlier(&f, 600, 0);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+    assert_eq!(comments(&gh), []);
+    assert_eq!(creates(&gh), []);
+    assert!(loop_log::marker(&earlier).exists());
+}
+
+#[test]
+fn a_log_posted_at_its_stop_is_marked_and_not_posted_again() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]);
+    run_loop(&f, &Script::new(START - 3_600), &gh)
+        .result
+        .unwrap();
+    assert!(loop_log::marker(&f.log_files()[0]).exists());
+
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+    assert_eq!(comments(&gh).len(), 1, "only the stop's post");
+}
+
+#[test]
+fn several_unposted_logs_are_posted_oldest_first_one_comment_each_before_any_task() {
+    let f = fixture();
+    let middle = plant_earlier(&f, 3_600, 1);
+    let oldest = plant_earlier(&f, 86_400, 1);
+    let newest = plant_earlier(&f, 60, 3);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    run_loop(&f, &Script::new(START), &gh).result.unwrap();
+
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 4, "three late, then its own");
+    for (comment, log) in posted.iter().zip([&oldest, &middle, &newest]) {
+        assert!(comment.1.starts_with(LATE), "{}", comment.1);
+        assert!(
+            comment.1.contains(&log.display().to_string()),
+            "{}",
+            comment.1
+        );
+    }
+    assert!(!posted[3].1.contains("Posted late"), "{}", posted[3].1);
+    assert!(posted[3].1.contains("| 1 | #3 "), "{}", posted[3].1);
+}
+
+#[test]
+fn a_failed_late_post_is_a_warning_the_log_stays_unposted_and_the_next_start_posts_it() {
+    let f = fixture();
+    let earlier = plant_earlier(&f, 86_400, 1);
+    let gh = github(vec![loop_log_issue(40)]).failing_issue_comments_on(40);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert!(run.out.contains("the queue is empty"), "{}", run.out);
+    assert_eq!(run.warn.lines().count(), 1, "{}", run.warn);
+    assert!(
+        run.warn.contains(&earlier.display().to_string()),
+        "{}",
+        run.warn
+    );
+    assert!(
+        run.warn.contains("comment on issue 40 fails"),
+        "{}",
+        run.warn
+    );
+    assert!(!loop_log::marker(&earlier).exists());
+
+    gh.set_issue_comments_failing(40, false);
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 2, "the failed one, then the retry");
+    assert!(posted[1].1.starts_with(LATE), "{}", posted[1].1);
+    assert!(loop_log::marker(&earlier).exists());
+    assert_eq!(run.warn, "");
+}
+
+#[test]
+fn with_no_open_loop_log_issue_a_late_post_creates_one_as_the_stop_does() {
+    let f = fixture();
+    plant_earlier(&f, 86_400, 1);
+    plant_earlier(&f, 60, 1);
+    let gh = github(Vec::new());
+
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+    let created = creates(&gh);
+    assert_eq!(created.len(), 1, "one issue for both");
+    assert_eq!(created[0].title, "Loop logs since 2026-11-07");
+    assert_eq!(created[0].labels, ["loop-log"]);
+    let posted: Vec<u32> = comments(&gh).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(posted, [900, 900]);
+}
+
+// --- Issue 602: a loop recovers only its own repository's logs ---
+
+/// The repository, issue and body of every `issue_comment`.
+fn comments_to(gh: &FakeGitHub) -> Vec<(String, u32, String)> {
+    gh.calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            GhCall::IssueComment(repo, number, body) => Some((repo, number, body)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_new_logs_header_names_the_loops_repository() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]);
+
+    run_loop(&f, &Script::new(START), &gh).result.unwrap();
+
+    let text = fs::read_to_string(&f.log_files()[0]).unwrap();
+    let header = &text[..text.find("|---").unwrap()];
+    assert!(header.contains("\nRepository: o/r\n"), "{text}");
+}
+
+#[test]
+fn an_unposted_log_of_another_repository_is_left_alone() {
+    let f = fixture();
+    let other = plant_headed(&f, 86_400, 2, &own_table("a/other"));
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert_eq!(comments(&gh), []);
+    assert_eq!(creates(&gh), []);
+    assert!(!loop_log::marker(&other).exists());
+    assert_eq!(run.warn, "");
+}
+
+#[test]
+fn a_log_naming_the_repository_in_other_case_is_recovered() {
+    let f = fixture();
+    let earlier = plant_headed(&f, 86_400, 1, &own_table("O/R"));
+    let gh = github(vec![loop_log_issue(40)]);
+
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+    assert_eq!(comments(&gh).len(), 1);
+    assert!(loop_log::marker(&earlier).exists());
+}
+
+#[test]
+fn an_old_log_without_a_repository_line_is_skipped_with_one_warning_and_marked() {
+    let f = fixture();
+    let first = plant_headed(&f, 86_400, 1, TABLE);
+    let second = plant_headed(&f, 3_600, 2, TABLE);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert_eq!(comments(&gh), []);
+    assert_eq!(creates(&gh), []);
+    assert_eq!(run.warn.lines().count(), 1, "{}", run.warn);
+    for log in [&first, &second] {
+        assert!(
+            run.warn.contains(&log.display().to_string()),
+            "{}",
+            run.warn
+        );
+        assert!(loop_log::marker(log).exists());
+    }
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert_eq!(comments(&gh), []);
+    assert_eq!(run.warn, "", "no warning at the next start");
+}
+
+#[test]
+fn a_malformed_repository_line_is_treated_as_none() {
+    for line in [
+        "Repository: ",
+        "Repository: o",
+        "Repository: o/r/x",
+        "Repository: /r",
+        "Repository: o/",
+        "Repository: o r/x",
+        "Repository: `o/r`",
+    ] {
+        let f = fixture();
+        let table = format!("# Loop log\n\n{line}\n\n| # | Issue |\n|---|---|\n");
+        let log = plant_headed(&f, 86_400, 1, &table);
+        let gh = github(vec![loop_log_issue(40)]);
+
+        let run = run_loop(&f, &idle_script(), &gh);
+
+        run.result.unwrap();
+        assert_eq!(comments(&gh), [], "{line}");
+        assert_eq!(run.warn.lines().count(), 1, "{line}: {}", run.warn);
+        assert!(
+            run.warn.contains(&log.display().to_string()),
+            "{line}: {}",
+            run.warn
+        );
+        assert!(loop_log::marker(&log).exists(), "{line}");
+        assert_eq!(run_loop(&f, &idle_script(), &gh).warn, "", "{line}");
+    }
+}
+
+#[test]
+fn two_repositories_loops_on_one_base_dir_each_post_only_their_own_log() {
+    let f = fixture();
+    let ours = plant_headed(&f, 86_400, 1, &own_table(REPO));
+    let theirs = plant_headed(&f, 3_600, 2, &own_table("a/other"));
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop_for(&f, &idle_script(), &gh, REPO);
+
+    run.result.unwrap();
+    let posted = comments_to(&gh);
+    assert_eq!(posted.len(), 1);
+    assert_eq!(posted[0].0, REPO);
+    assert!(
+        posted[0].2.contains(&ours.display().to_string()),
+        "{}",
+        posted[0].2
+    );
+    assert!(loop_log::marker(&ours).exists());
+    assert!(!loop_log::marker(&theirs).exists());
+
+    let run = run_loop_for(&f, &idle_script(), &gh, "a/other");
+
+    run.result.unwrap();
+    assert_eq!(run.warn, "");
+    let posted = comments_to(&gh);
+    assert_eq!(posted.len(), 2, "theirs, once, after ours");
+    assert_eq!(posted[1].0, "a/other");
+    assert!(
+        posted[1].2.contains(&theirs.display().to_string()),
+        "{}",
+        posted[1].2
+    );
+    assert!(loop_log::marker(&theirs).exists());
+}
+
+// --- Issue 594, review M-1: logs posted before markers existed; review M-2: one bad log ---
+
+/// A log the stop of a loop from before the markers posted: on GitHub, with no marker.
+fn post_legacy(gh: &FakeGitHub, log: &Path) {
+    loop_log::post(gh, REPO, log, START - 86_400, "--cap 1 reached").unwrap();
+    assert!(!loop_log::marker(log).exists());
+}
+
+#[test]
+fn a_log_posted_before_markers_existed_is_marked_without_another_comment() {
+    let f = fixture();
+    let earlier = plant_earlier(&f, 86_400, 1);
+    let gh = github(vec![loop_log_issue(40)]).with_issues(vec![loop_log_issue(40)]);
+    post_legacy(&gh, &earlier);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert_eq!(comments(&gh).len(), 1, "only the legacy stop's post");
+    assert!(loop_log::marker(&earlier).exists());
+    assert_eq!(run.warn, "");
+}
+
+#[test]
+fn a_log_posted_before_markers_to_a_since_closed_issue_is_marked_without_another_comment() {
+    let f = fixture();
+    let earlier = plant_earlier(&f, 86_400, 1);
+    let name = earlier.file_name().unwrap().to_string_lossy().into_owned();
+    let mut closed = loop_log_issue(30);
+    closed.open = false;
+    let heading = format!(
+        "Loop started 2026-11-07T10:00:00Z, stopped: --cap 1 reached. Local file: \
+         `H:/old/.sbxm/loop-logs/{name}`\n\n{}",
+        fs::read_to_string(&earlier).unwrap()
+    );
+    let gh = github(vec![loop_log_issue(40)])
+        .with_issues(vec![closed, loop_log_issue(40)])
+        .with_issue_comments(30, &[&heading]);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert_eq!(comments(&gh), []);
+    assert!(loop_log::marker(&earlier).exists());
+    assert_eq!(run.warn, "");
+}
+
+#[test]
+fn a_historical_log_not_on_github_is_posted_late_once_beside_one_that_is() {
+    let f = fixture();
+    let posted = plant_earlier(&f, 86_400, 1);
+    let unposted = plant_earlier(&f, 3_600, 1);
+    let gh = github(vec![loop_log_issue(40)]).with_issues(vec![loop_log_issue(40)]);
+    post_legacy(&gh, &posted);
+
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+    let bodies = comments(&gh);
+    assert_eq!(bodies.len(), 2, "the legacy post, then one late post");
+    assert!(bodies[1].1.starts_with(LATE), "{}", bodies[1].1);
+    assert!(
+        bodies[1].1.contains(&unposted.display().to_string()),
+        "{}",
+        bodies[1].1
+    );
+    assert!(loop_log::marker(&posted).exists());
+    assert!(loop_log::marker(&unposted).exists());
+}
+
+#[test]
+fn an_unreadable_loop_log_issue_list_is_one_warning_and_nothing_is_posted_or_marked() {
+    let f = fixture();
+    let earlier = plant_earlier(&f, 86_400, 1);
+    let gh = github(vec![loop_log_issue(40)]).failing_issues_labeled("labeled listing fails");
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert!(run.out.contains("the queue is empty"), "{}", run.out);
+    assert_eq!(comments(&gh), []);
+    assert!(!loop_log::marker(&earlier).exists());
+    assert_eq!(run.warn.lines().count(), 1, "{}", run.warn);
+    assert!(run.warn.contains("labeled listing fails"), "{}", run.warn);
+}
+
+#[test]
+fn unreadable_comments_of_a_loop_log_issue_are_one_warning_and_nothing_is_posted_or_marked() {
+    let f = fixture();
+    let earlier = plant_earlier(&f, 86_400, 1);
+    let gh = github(vec![loop_log_issue(40)]).failing_issue_comment_reads("comments fail");
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert_eq!(comments(&gh), []);
+    assert!(!loop_log::marker(&earlier).exists());
+    assert_eq!(run.warn.lines().count(), 1, "{}", run.warn);
+    assert!(run.warn.contains("comments fail"), "{}", run.warn);
+}
+
+/// Review M-4: the repository's other issues, open or closed, never stop the recovery.
+#[test]
+fn with_999_1000_or_1001_other_issues_logs_are_still_recovered_once() {
+    for total in [999, 1_000, 1_001] {
+        let f = fixture();
+        let legacy = plant_earlier(&f, 86_400, 1);
+        let unposted = plant_earlier(&f, 3_600, 1);
+        let many: Vec<_> = (1..=total)
+            .map(|n| {
+                let mut issue = open_issue(1_000 + n, &["bug"], "");
+                issue.open = n % 2 == 0;
+                issue
+            })
+            .collect();
+        let gh = github(vec![loop_log_issue(40)]).with_issues(many);
+        post_legacy(&gh, &legacy);
+
+        let run = run_loop(&f, &idle_script(), &gh);
+        run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+        run.result.unwrap();
+        assert_eq!(run.warn, "", "{total}");
+        let posted = comments(&gh);
+        assert_eq!(posted.len(), 2, "{total}: the legacy post, then one late");
+        assert!(
+            posted[1].1.contains(&unposted.display().to_string()),
+            "{total}"
+        );
+        assert!(loop_log::marker(&legacy).exists(), "{total}");
+        assert!(loop_log::marker(&unposted).exists(), "{total}");
+    }
+}
+
+// --- Review M-3: a split log only partly on GitHub ---
+
+/// An earlier log, started a day before `START`, of two rows of 40,000 characters: two parts.
+fn plant_split(f: &Fixture) -> (PathBuf, String) {
+    fs::create_dir_all(f.logs()).unwrap();
+    let path = loop_log::path(&f.env.base_dir(), START - 86_400);
+    let text = format!("{}{}{}", own_table(REPO), row(1, 40_000), row(2, 40_000));
+    fs::write(&path, &text).unwrap();
+    (path, text)
+}
+
+/// The parts the stop of a loop from before the markers posted for `log`.
+fn legacy_parts(log: &Path, text: &str) -> Vec<String> {
+    let heading = format!(
+        "Loop started 2026-11-07T10:00:00Z, stopped: --cap 1 reached. Local file: `{}`",
+        log.display()
+    );
+    let parts = loop_log::comments(&heading, text);
+    assert_eq!(parts.len(), 2);
+    parts
+}
+
+#[test]
+fn a_split_log_with_only_its_first_part_on_github_gets_the_missing_rows_posted_late() {
+    let f = fixture();
+    let (log, text) = plant_split(&f);
+    let parts = legacy_parts(&log, &text);
+    let gh = github(vec![loop_log_issue(40)]).with_issue_comments(40, &[&parts[0]]);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert_eq!(run.warn, "");
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 1);
+    let body = &posted[0].1;
+    assert!(body.starts_with(LATE), "{}", &body[..300]);
+    assert!(body.contains(&log.display().to_string()));
+    assert!(body.contains(&row(2, 40_000)), "the missing row");
+    assert!(!body.contains(&row(1, 40_000)), "not the row already there");
+    assert!(body.contains(&own_table(REPO)), "with the table's header");
+    assert!(loop_log::marker(&log).exists());
+
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+    assert_eq!(comments(&gh).len(), 1, "not posted twice");
+}
+
+#[test]
+fn a_failed_completion_of_a_split_log_leaves_it_unmarked_and_the_next_start_completes_it() {
+    let f = fixture();
+    let (log, text) = plant_split(&f);
+    let parts = legacy_parts(&log, &text);
+    let gh = github(vec![loop_log_issue(40)])
+        .with_issue_comments(40, &[&parts[0]])
+        .failing_issue_comments_on(40);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert_eq!(run.warn.lines().count(), 1, "{}", run.warn);
+    assert!(!loop_log::marker(&log).exists());
+
+    gh.set_issue_comments_failing(40, false);
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 2, "the failed try, then the completion");
+    assert!(posted[1].1.contains(&row(2, 40_000)));
+    assert!(!posted[1].1.contains(&row(1, 40_000)));
+    assert!(loop_log::marker(&log).exists());
+}
+
+#[test]
+fn a_split_log_with_every_part_on_github_is_marked_without_another_comment() {
+    let f = fixture();
+    let (log, text) = plant_split(&f);
+    let parts = legacy_parts(&log, &text);
+    let gh = github(vec![loop_log_issue(40)]).with_issue_comments(40, &[&parts[0], &parts[1]]);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert_eq!(comments(&gh), []);
+    assert!(loop_log::marker(&log).exists());
+    assert_eq!(run.warn, "");
+}
+
+#[test]
+fn an_unreadable_oldest_log_is_a_warning_and_the_later_ones_are_still_posted() {
+    let f = fixture();
+    let bad = plant_earlier(&f, 86_400, 1);
+    fs::write(&bad, [0xff, 0xfe, b'|']).unwrap();
+    let good = plant_earlier(&f, 3_600, 1);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert!(run.out.contains("the queue is empty"), "{}", run.out);
+    assert_eq!(run.warn.lines().count(), 1, "{}", run.warn);
+    assert!(
+        run.warn.contains(&bad.display().to_string()),
+        "{}",
+        run.warn
+    );
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 1);
+    assert!(
+        posted[0].1.contains(&good.display().to_string()),
+        "{}",
+        posted[0].1
+    );
+    assert!(loop_log::marker(&good).exists());
+    assert!(!loop_log::marker(&bad).exists());
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    assert_eq!(comments(&gh).len(), 1, "the later one is not posted twice");
+    assert!(run.warn.contains(&bad.display().to_string()), "tried again");
+}
+
+// --- Review M-2: loops that start in the same second ---
+
+#[test]
+fn a_loop_starting_in_the_second_of_an_earlier_log_takes_the_next_free_name() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]);
+    run_loop(&f, &Script::new(START), &gh).result.unwrap();
+    gh.set_open_issues(vec![
+        open_issue(5, &[READY, "size:S"], ""),
+        loop_log_issue(40),
+    ]);
+    let gh = gh.with_issue_text(issue_text(5));
+
+    // The second loop's clock starts at the same second as the first's.
+    let run = run_loop(&f, &Script::new(START), &gh);
+
+    run.result.unwrap();
+    let files = f.log_files();
+    assert_eq!(
+        files,
+        [
+            f.logs().join("2026-11-08-100000-loop.md"),
+            f.logs().join("2026-11-08-100001-loop.md"),
+        ]
+    );
+    let first = fs::read_to_string(&files[0]).unwrap();
+    assert!(!first.contains("#5 "), "{first}");
+    let second = fs::read_to_string(&files[1]).unwrap();
+    assert!(second.contains("| 1 | #5 "), "{second}");
+    assert!(!second.contains("#3 "), "{second}");
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 2);
+    assert!(
+        posted[1].1.contains("2026-11-08T10:00:01Z"),
+        "{}",
+        posted[1].1
+    );
+    assert!(!posted[1].1.contains("#3 "), "{}", posted[1].1);
+}
+
+#[test]
+fn a_loop_that_runs_no_task_never_posts_an_earlier_loops_log() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]);
+    run_loop(&f, &Script::new(START), &gh).result.unwrap();
+    gh.set_open_issues(vec![
+        open_issue(5, &[READY, "size:S"], ""),
+        loop_log_issue(40),
+    ]);
+    let gh = gh.with_issue_text(issue_text(5));
+    let mut script = Script::new(START);
+    script.refused.push(5);
+
+    let run = run_loop(&f, &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(comments(&gh).len(), 1, "only the first loop's");
+    assert_eq!(f.log_files().len(), 1);
+}
+
+/// Plants earlier loops' logs for the `n` seconds from `START` on.
+fn plant_logs(f: &Fixture, n: u64) {
+    fs::create_dir_all(f.logs()).unwrap();
+    for s in 0..n {
+        fs::write(loop_log::path(&f.env.base_dir(), START + s), "earlier\n").unwrap();
+    }
+}
+
+#[test]
+fn with_four_names_taken_the_loop_uses_the_fifth_second() {
+    let f = fixture();
+    plant_logs(&f, 4);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    run_loop(&f, &Script::new(START), &gh).result.unwrap();
+
+    let file = f.logs().join("2026-11-08-100004-loop.md");
+    assert!(fs::read_to_string(file).unwrap().contains("| 1 | #3 "));
+    assert_eq!(comments(&gh).len(), 1);
+}
+
+#[test]
+fn with_five_names_taken_the_loop_refuses_before_any_task_and_posts_nothing() {
+    let f = fixture();
+    plant_logs(&f, 5);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop(&f, &Script::new(START), &gh);
+
+    let err = format!("{:#}", run.result.unwrap_err());
+    assert!(err.contains("loop-logs"), "{err}");
+    assert_eq!(f.log_files().len(), 5);
+    assert!(
+        f.log_files()
+            .iter()
+            .all(|p| fs::read_to_string(p).unwrap() == "earlier\n")
+    );
+    assert_eq!(gh.calls(), []);
+    assert!(!loop_lock(&f).exists(), "the lock is released");
+}
+
+fn loop_lock(f: &Fixture) -> PathBuf {
+    f.env.base_dir().join(".sbxm").join("task-loop.lock")
+}
