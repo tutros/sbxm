@@ -17,8 +17,10 @@ use crate::status::tasks::truncate;
 use crate::task::finish::check_own_folder;
 use crate::task::jobs::{self, Job, Running};
 use crate::task::lock;
+use crate::task::loop_log;
 use crate::task::loop_pause;
 use crate::task::merged;
+use crate::task::outcome;
 use crate::task::queue::{self, LOOP_HOOK, LockFile, Outcome, Progress};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status};
 use crate::task::risk::Level;
@@ -70,6 +72,82 @@ pub fn read_lock_file(base: &Path, probe: &dyn ProcessProbe) -> (Lock, Option<Lo
             None,
         ),
     }
+}
+
+/// What a loop whose process is gone left behind (issue 671).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Dead {
+    /// When it was last seen: the latest write of its lock or of its log
+    /// ([`loop_log::path`]), whichever is later; `None` when neither can be read.
+    pub last_seen: Option<u64>,
+    /// The tasks it left, in the order the records list them.
+    pub left: Vec<Left>,
+}
+
+/// A task a dead loop left: a child still running, or a task at `ready` whose last command
+/// failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Left {
+    pub id: String,
+    pub title: String,
+    pub stage: &'static str,
+    pub slot: &'static str,
+    pub why: LeftWhy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeftWhy {
+    /// Its child is still running: the process id.
+    Running(u32),
+    /// The first line of what its `outcome.json` says.
+    Failed(String),
+}
+
+/// What the dead loop of the lock `file` left (issue 671): when it was last seen, and each task it
+/// owns (the loop its child recorded, else its process, or a child it had adopted, as
+/// `task loop` decides it when it takes the lock over) that is either still running under a live
+/// process or at `ready` with an `outcome.json` that says its last command didn't end well (any
+/// end but `ready`, and `held`, which wrote nothing). Reads only.
+pub fn dead(base: &Path, file: &LockFile, probe: &dyn ProcessProbe) -> Dead {
+    let modified = |path: &Path| {
+        fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+    };
+    let log = parse_timestamp(&file.process.started_at)
+        .and_then(|started| modified(&loop_log::path(base, started)));
+    let last_seen = modified(&queue::lock_path(base)).max(log);
+    let mut left = Vec::new();
+    for rec in record::load_all(base).unwrap_or_default() {
+        let owned = rec.owner() == Some(&file.process) || file.adopted.iter().any(|a| a.is(&rec));
+        if !owned {
+            continue;
+        }
+        let dir = record::task_dir(base, &rec.id);
+        let live = rec.process.as_ref().filter(|p| p.alive(probe));
+        let why = match (rec.status, rec.stage, live) {
+            (Status::Running, _, Some(process)) => LeftWhy::Running(process.pid),
+            (_, Stage::Ready, _) => match outcome::read(&dir) {
+                outcome::Read::Outcome(o)
+                    if !matches!(o.end, outcome::Kind::Ready | outcome::Kind::Held) =>
+                {
+                    LeftWhy::Failed(o.detail.lines().next().unwrap_or(o.end.name()).to_owned())
+                }
+                _ => continue,
+            },
+            _ => continue,
+        };
+        left.push(Left {
+            id: rec.id.clone(),
+            title: rec.title.clone(),
+            stage: rec.stage.name(),
+            slot: rec.location.as_str(),
+            why,
+        });
+    }
+    Dead { last_seen, left }
 }
 
 /// The task a running loop is on.
@@ -685,6 +763,8 @@ pub struct View {
     pub jobs: Jobs,
     /// Whether the loop routes with `[resources] placement = "cloud-first"` (issue 648).
     pub cloud_first: bool,
+    /// For a lock whose process is gone: what that loop left (issue 671).
+    pub dead: Option<Dead>,
 }
 
 /// What the loop's job queue holds (issue 528, decision 309), read from its files alone.
@@ -827,10 +907,31 @@ pub fn render(view: &View, width: Option<usize>) -> String {
     let mut lines = Vec::new();
     match &view.lock {
         Lock::Absent => lines.push("Loop: not running".to_owned()),
-        Lock::Stale(p) => lines.push(format!(
-            "Loop: not running (stale lock: {} is gone)",
-            process(p)
-        )),
+        Lock::Stale(p) => {
+            let seen = view
+                .dead
+                .as_ref()
+                .and_then(|d| d.last_seen)
+                .map_or_else(String::new, |at| {
+                    format!("; last seen {}", format_timestamp(at))
+                });
+            lines.push(format!(
+                "Loop: not running (stale lock: {} is gone{seen})",
+                process(p)
+            ));
+            for left in view.dead.iter().flat_map(|d| &d.left) {
+                let why = match &left.why {
+                    LeftWhy::Running(pid) => format!("still running (process {pid})"),
+                    LeftWhy::Failed(detail) => format!("its last command failed ({detail})"),
+                };
+                lines.push(format!(
+                    "  left: {} at {}, {}: {why}",
+                    crate::title::named(&left.id, &left.title),
+                    left.stage,
+                    left.slot
+                ));
+            }
+        }
         Lock::Unreadable(why) => lines.push(format!("Loop: lock unreadable ({why})")),
         Lock::Running(p) => lines.push(format!("Loop: running ({})", process(p))),
     }

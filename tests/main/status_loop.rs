@@ -857,6 +857,7 @@ fn the_section_writes_nothing_and_never_calls_sbx() {
 fn render_is_pure_over_its_view() {
     let view = View {
         cloud_first: false,
+        dead: None,
         lock: Lock::Running(loop_process()),
         work: Some(Work::default()),
         snapshot: Some(Snapshot {

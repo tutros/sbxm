@@ -270,6 +270,10 @@ fn loop_view(
             )
         })
         .clone();
+    let dead = match (&lock, &file) {
+        (looping::Lock::Stale(_), Some(file)) => Some(looping::dead(base, file, probe)),
+        _ => None,
+    };
     looping::View {
         lock,
         work,
@@ -277,6 +281,7 @@ fn loop_view(
         pause: crate::task::loop_pause::read(base),
         jobs: looping::read_jobs(base),
         cloud_first: false,
+        dead,
     }
 }
 

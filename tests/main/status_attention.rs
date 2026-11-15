@@ -9,13 +9,16 @@ use std::fs;
 use std::path::Path;
 
 use common::Env as TestEnv;
-use sbxm::backend::Location;
+use sbxm::backend::{FakeBackend, Location};
+use sbxm::commands::status::{self, Env, LoopSource};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState};
+use sbxm::run::results::format_timestamp;
 use sbxm::status::looping::{self, Jobs, Lock, View};
 use sbxm::status::tasks::{self, Parked, TaskRow, TaskTime};
 use sbxm::task::loop_pause;
-use sbxm::task::queue::LOOP_HOOK;
+use sbxm::task::outcome::{self, Outcome};
+use sbxm::task::queue::{LOOP_HOOK, LockFile, lock_path};
 use sbxm::task::record::{
     self, Kind, NewTask, Process, ProcessProbe, Record, ReviewResult, SandboxLife, SandboxRole,
     Stage, Status,
@@ -414,6 +417,7 @@ fn section(base: &Path, gh: &FakeGitHub) -> String {
         pause: loop_pause::State::None,
         jobs: Jobs::default(),
         cloud_first: false,
+        dead: None,
     };
     looping::render(&view, None)
 }
@@ -478,4 +482,200 @@ fn a_github_failure_is_one_line_and_the_rest_still_shows() {
     assert_eq!(text.matches("open task PRs").count(), 1, "{text}");
     assert!(text.contains("  queue: unreadable (offline)\n"), "{text}");
     assert!(text.contains("  jobs: none\n"), "{text}");
+}
+
+// ---- 4. a dead loop and the tasks it left -----------------------------------------------------
+
+/// When the loop in these fixtures started.
+const LOOP_START: u64 = T0 - 1_000;
+
+/// The loop's process: pid 1.
+fn loop_process() -> Process {
+    Process::new(1, LOOP_START)
+}
+
+/// A child the loop started: pid 2.
+fn child() -> Process {
+    Process::new(2, T0)
+}
+
+/// Which pids are alive, each with its start time.
+struct Alive(Vec<(u32, u64)>);
+
+impl ProcessProbe for Alive {
+    fn start_time(&self, pid: u32) -> Option<u64> {
+        self.0.iter().find(|(p, _)| *p == pid).map(|(_, t)| *t)
+    }
+}
+
+fn write_loop_lock(base: &Path) {
+    let path = lock_path(base);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let file = LockFile {
+        process: loop_process(),
+        issues: Vec::new(),
+        cap: None,
+        progress: None,
+        adopted: Vec::new(),
+    };
+    fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
+}
+
+/// A task the loop's child runs: the loop recorded as its owner.
+fn loops_child(number: u32, stage: Stage, status: Status) -> Record {
+    let mut rec = task(number);
+    rec.stage = stage;
+    rec.status = status;
+    rec.process = Some(child());
+    rec.loop_owner = Some(loop_process());
+    rec
+}
+
+fn quiet_disk() -> sbxm::status::footer::Disk {
+    sbxm::status::footer::Disk {
+        free_space: |_| Ok(40 * 1024 * 1024 * 1024),
+        same_drive: |_, _| true,
+        state_dir: Some(std::path::PathBuf::from("/state")),
+        min_free_disk: sbxm::disk::DEFAULT_MIN_FREE,
+    }
+}
+
+fn env(now: u64) -> Env {
+    Env {
+        placement: Default::default(),
+        now: Box::new(move || now),
+        sleep: Box::new(|_| {}),
+        terminal: false,
+        width: 80,
+        iterations: None,
+        monotonic: Box::new(|| std::time::Duration::ZERO),
+        slots: None,
+        cloud_slots: None,
+        disk: quiet_disk(),
+    }
+}
+
+/// One frame's Loop section, up to the disk footer.
+fn loop_section(base: &Path, probe: &dyn ProcessProbe, now: u64) -> String {
+    let gh = FakeGitHub::default();
+    let source = LoopSource {
+        github: &gh,
+        repo: Ok(REPO.into()),
+    };
+    let mut out = Vec::new();
+    status::run_with(
+        base,
+        &FakeBackend::default(),
+        probe,
+        &env(now),
+        None,
+        Some(&source),
+        &mut out,
+    )
+    .unwrap();
+    let text = String::from_utf8(out).unwrap();
+    let section = text.split("\nLoop:").nth(1).expect("a Loop section");
+    format!("Loop:{}", section.split("\nFree space:").next().unwrap())
+}
+
+/// The tasks a dead loop could leave: a child still running, one at `ready` whose last command
+/// failed, one at `ready` that went well, and a running child of another loop.
+fn leave_tasks(base: &Path) {
+    save(base, &loops_child(11, Stage::Working, Status::Running));
+    let failed = loops_child(12, Stage::Ready, Status::Ok);
+    save(base, &failed);
+    outcome::write(
+        &record::task_dir(base, &failed.id),
+        &Outcome::new(outcome::Kind::Failed, None, "finish refused\nmore"),
+    )
+    .unwrap();
+    let fine = loops_child(13, Stage::Ready, Status::Ok);
+    save(base, &fine);
+    outcome::write(
+        &record::task_dir(base, &fine.id),
+        &Outcome::new(outcome::Kind::Ready, None, ""),
+    )
+    .unwrap();
+    let mut other = loops_child(14, Stage::Working, Status::Running);
+    other.loop_owner = Some(Process::new(7, LOOP_START));
+    save(base, &other);
+}
+
+#[test]
+fn no_loop_ever_run_leaves_nothing() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    leave_tasks(&b);
+
+    let text = loop_section(&b, &Alive(vec![(2, T0)]), T0);
+
+    assert!(text.starts_with("Loop: not running\n"), "{text}");
+    assert!(!text.contains("left:"), "{text}");
+}
+
+#[test]
+fn a_running_loop_has_no_orphans() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    write_loop_lock(&b);
+    leave_tasks(&b);
+
+    let text = loop_section(&b, &Alive(vec![(1, LOOP_START), (2, T0)]), T0);
+
+    assert!(text.starts_with("Loop: running (process 1"), "{text}");
+    assert!(!text.contains("left:"), "{text}");
+    assert!(!text.contains("last seen"), "{text}");
+}
+
+#[test]
+fn a_dead_loop_says_when_it_was_last_seen_and_lists_the_tasks_it_left() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    write_loop_lock(&b);
+    leave_tasks(&b);
+    let written = fs::metadata(lock_path(&b))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let text = loop_section(&b, &Alive(vec![(2, T0)]), T0);
+
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next().unwrap(),
+        format!(
+            "Loop: not running (stale lock: process 1, started {} is gone; last seen {})",
+            format_timestamp(LOOP_START),
+            format_timestamp(written)
+        ),
+        "{text}"
+    );
+    assert_eq!(
+        lines.next().unwrap(),
+        "  left: issue-11 (title 11) at working, local: still running (process 2)",
+        "{text}"
+    );
+    assert_eq!(
+        lines.next().unwrap(),
+        "  left: issue-12 (title 12) at ready, local: its last command failed (finish refused)",
+        "{text}"
+    );
+    assert!(!text.contains("issue-13"), "{text}");
+    assert!(!text.contains("issue-14"), "{text}");
+}
+
+#[test]
+fn a_dead_loops_child_that_died_too_is_not_a_live_child() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    write_loop_lock(&b);
+    save(&b, &loops_child(11, Stage::Working, Status::Running));
+
+    let text = loop_section(&b, &Alive(Vec::new()), T0);
+
+    assert!(text.starts_with("Loop: not running (stale lock"), "{text}");
+    assert!(!text.contains("left:"), "{text}");
 }
