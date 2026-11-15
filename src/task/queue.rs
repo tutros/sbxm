@@ -18,6 +18,10 @@ use crate::task::record::{self, Kind, Record};
 /// task starts and never adds it (decision 4).
 pub const READY_LABEL: &str = "ready-for-worker";
 
+/// The label that puts a queued issue ahead of the others (issue 486): the loop takes these
+/// first, in the queue's own order among them, and `sbxm status`'s queue shows them first.
+pub const PRIORITY_LABEL: &str = "priority:high";
+
 /// The key in a task record's free-form `hooks` (decisions 139, 146) marking a task the loop
 /// finished: unless the task continued an open PR, its PR is one the loop opened, which counts
 /// toward the loop's cap of PRs awaiting the user (decision 3).
@@ -258,9 +262,15 @@ pub fn size(labels: &[String]) -> Option<&'static str> {
     })
 }
 
-/// The queue (decision 2, 245(b)): the open issues labeled [`READY_LABEL`], size S, then M, then
-/// L, then unsized, and within a size the oldest first. Issue numbers grow with creation, so the
-/// oldest is the lowest number.
+/// Whether an issue carries [`PRIORITY_LABEL`].
+fn is_priority(labels: &[String]) -> bool {
+    labels.iter().any(|l| l == PRIORITY_LABEL)
+}
+
+/// The queue (decision 2, 245(b)): the open issues labeled [`READY_LABEL`], those labeled
+/// [`PRIORITY_LABEL`] first (issue 486), then within each group size S, then M, then L, then
+/// unsized, and within a size the oldest first. Issue numbers grow with creation, so the oldest is
+/// the lowest number.
 pub fn queue_order(open: &[Issue]) -> Vec<u32> {
     let rank = |issue: &Issue| match size(&issue.labels) {
         Some("S") => 0,
@@ -272,22 +282,27 @@ pub fn queue_order(open: &[Issue]) -> Vec<u32> {
         .iter()
         .filter(|i| i.labels.iter().any(|l| l == READY_LABEL))
         .collect();
-    queue.sort_by_key(|i| (rank(i), i.number));
+    queue.sort_by_key(|i| (!is_priority(&i.labels), rank(i), i.number));
     queue.into_iter().map(|i| i.number).collect()
 }
 
 /// The queue as a free cloud slot takes it with `[resources] placement = "cloud-first"` (issue
-/// 648): the issues of [`queue_order`], size L, then M, then S, then unsized, and within a size
-/// the oldest first.
+/// 648): the issues of [`queue_order`], those labeled [`PRIORITY_LABEL`] still first (issue 486),
+/// then within each group size L, then M, then S, then unsized, and within a size the oldest first.
 pub fn largest_first(open: &[Issue]) -> Vec<u32> {
     let rank = |number: &u32| {
-        let labels = open.iter().find(|i| i.number == *number).map(|i| &i.labels);
-        match labels.and_then(|l| size(l)) {
+        let labels = open
+            .iter()
+            .find(|i| i.number == *number)
+            .map(|i| i.labels.as_slice())
+            .unwrap_or_default();
+        let size = match size(labels) {
             Some("L") => 0,
             Some("M") => 1,
             Some("S") => 2,
             _ => 3,
-        }
+        };
+        (!is_priority(labels), size)
     };
     let mut queue = queue_order(open);
     queue.sort_by_key(|n| (rank(n), *n));
