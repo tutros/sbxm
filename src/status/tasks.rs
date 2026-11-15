@@ -34,6 +34,9 @@ pub struct TaskRow {
     pub must_fix: Option<u32>,
     /// The PR's URL, in full, as `task.json` recorded it.
     pub pr: Option<String>,
+    /// Where the task runs (issue 671): `local`, or `cloud` with its sandbox still there in
+    /// brackets; `None` for an older record that has no location field.
+    pub location: Option<String>,
     /// The last `run.log` line that isn't a header, without its timestamp.
     pub log_line: Option<String>,
 }
@@ -90,10 +93,32 @@ pub fn rows(base: &Path, probe: &dyn ProcessProbe) -> Result<Vec<TaskRow>> {
                 commits_ahead: crate::commands::commits_ahead(base, &record),
                 must_fix: record.review.as_ref().map(|r| r.must_fix),
                 pr: record.pr.clone(),
+                location: location(&dir, &record),
                 log_line: last_log_line(&dir.join("run.log")),
             })
         })
         .collect()
+}
+
+/// What the WHERE column shows for `record` (issue 671): `local`, `cloud (<sandbox>)` for the
+/// cloud sandbox it has now (its last one not removed, else the one being created), or `cloud`
+/// with none. `None` when its `task.json` in `dir` has no `location` field (a record from before
+/// milestone 4, which reads as local), so the column shows a dash rather than a guess.
+fn location(dir: &Path, record: &record::Record) -> Option<String> {
+    let text = fs::read_to_string(dir.join("task.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    json.get("location")?;
+    let sandbox = record
+        .sandboxes
+        .iter()
+        .rev()
+        .find(|s| s.removed_at.is_none())
+        .map(|s| &s.name)
+        .or(record.creating.as_ref().map(|c| &c.name));
+    Some(match (record.location, sandbox) {
+        (crate::backend::Location::Cloud, Some(name)) => format!("cloud ({name})"),
+        (location, _) => location.as_str().to_owned(),
+    })
 }
 
 /// The last line of `run.log` that isn't a header (`# ...`), with its leading timestamp removed;
@@ -166,10 +191,12 @@ pub(crate) fn pad(cell: &str, width: usize) -> String {
     format!("{cell}{}", " ".repeat(fill))
 }
 
-const HEADER: [&str; 7] = ["ID", "STAGE", "STATUS", "TIME", "AHEAD", "FINDINGS", "PR"];
+const HEADER: [&str; 8] = [
+    "ID", "STAGE", "STATUS", "TIME", "AHEAD", "FINDINGS", "PR", "WHERE",
+];
 
 /// The fixed columns of one row (everything but the log line, which is last and variable).
-fn fixed_cells(row: &TaskRow, now: u64) -> [String; 7] {
+fn fixed_cells(row: &TaskRow, now: u64) -> [String; 8] {
     [
         row.id.clone(),
         row.stage.to_owned(),
@@ -184,6 +211,7 @@ fn fixed_cells(row: &TaskRow, now: u64) -> [String; 7] {
         row.must_fix
             .map_or_else(|| DASH.to_owned(), |n| n.to_string()),
         row.pr.clone().unwrap_or_else(|| DASH.to_owned()),
+        row.location.clone().unwrap_or_else(|| DASH.to_owned()),
     ]
 }
 
@@ -246,7 +274,7 @@ const MIN_TITLE: usize = 10;
 /// wide as the longest title, never cut; on one, at most the space left after the other fixed
 /// columns, the title's own gap and one column for the log's `…`, and dropped below
 /// [`MIN_TITLE`]. Left out too when no task has a title (a record written without one).
-fn title_width(rows: &[TaskRow], fixed: &[usize; 7], total_width: Option<usize>) -> Option<usize> {
+fn title_width(rows: &[TaskRow], fixed: &[usize; 8], total_width: Option<usize>) -> Option<usize> {
     let longest = rows
         .iter()
         .map(|row| display_width(row.title.trim()))
@@ -264,8 +292,8 @@ fn title_width(rows: &[TaskRow], fixed: &[usize; 7], total_width: Option<usize>)
 const TITLE: &str = "TITLE";
 
 /// The cells of one line with the title (cut to `width`) after the ID.
-fn with_title(cells: &[String; 7], title: &str, width: usize) -> [String; 8] {
-    let [id, stage, status, time, ahead, findings, pr] = cells.clone();
+fn with_title(cells: &[String; 8], title: &str, width: usize) -> [String; 9] {
+    let [id, stage, status, time, ahead, findings, pr, place] = cells.clone();
     [
         id,
         truncate(title, width),
@@ -275,6 +303,7 @@ fn with_title(cells: &[String; 7], title: &str, width: usize) -> [String; 8] {
         ahead,
         findings,
         pr,
+        place,
     ]
 }
 
@@ -285,7 +314,7 @@ pub fn render(rows: &[TaskRow], now: u64, width: Option<usize>) -> String {
     if rows.is_empty() {
         return crate::hint::named("No tasks yet; start one with `sbxm task start --issue <n>`.\n");
     }
-    let data: Vec<[String; 7]> = rows.iter().map(|row| fixed_cells(row, now)).collect();
+    let data: Vec<[String; 8]> = rows.iter().map(|row| fixed_cells(row, now)).collect();
     let mut widths = HEADER.map(display_width);
     for row in &data {
         for (width, cell) in widths.iter_mut().zip(row) {
@@ -294,10 +323,10 @@ pub fn render(rows: &[TaskRow], now: u64, width: Option<usize>) -> String {
     }
     let titles = title_width(rows, &widths, width);
     let line =
-        |out: &mut String, cells: &[String; 7], title: &str, log: &str, real: bool| match titles {
+        |out: &mut String, cells: &[String; 8], title: &str, log: &str, real: bool| match titles {
             Some(tw) => {
-                let [id, stage, status, time, ahead, findings, pr] = widths;
-                let widths = [id, tw, stage, status, time, ahead, findings, pr];
+                let [id, stage, status, time, ahead, findings, pr, place] = widths;
+                let widths = [id, tw, stage, status, time, ahead, findings, pr, place];
                 push_row(
                     out,
                     &with_title(cells, title, tw),

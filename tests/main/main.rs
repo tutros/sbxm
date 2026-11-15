@@ -106,6 +106,7 @@ mod sandbox_slot_stop;
 mod secrets;
 mod setup_install;
 mod status;
+mod status_attention;
 mod status_disk;
 mod status_loop;
 mod status_loop_blocked;
