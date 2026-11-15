@@ -71,18 +71,21 @@ jobs:
       run: |
         docs_only=false
         if [ "${{ github.event_name }}" = pull_request ]; then
-          # --no-renames lists a rename's old and new paths, so both must be docs.
-          files=$(git diff --name-only --no-renames HEAD^1 HEAD)
-          echo "$files"
-          if [ -n "$files" ]; then
+          # --no-renames lists a rename's old and new paths, so both must be docs. -z gives the raw
+          # paths, NUL-delimited, to a file (a Bash variable can't hold a NUL): the display form
+          # quotes a non-ASCII or quoted path, which then doesn't end in `.md` (issue 416).
+          files=$(mktemp)
+          git diff --name-only --no-renames -z HEAD^1 HEAD > "$files"
+          if [ -s "$files" ]; then
             docs_only=true
-            while IFS= read -r f; do
+            while IFS= read -r -d '' f; do
+              printf '%s\n' "$f"
               case "$f" in
                 prompts/*|.github/*) docs_only=false ;;
                 *.md) ;;
                 *) docs_only=false ;;
               esac
-            done <<< "$files"
+            done < "$files"
           fi
         fi
         build=true

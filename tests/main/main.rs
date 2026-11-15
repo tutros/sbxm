@@ -11,6 +11,7 @@ mod backend_custom_secrets;
 mod backend_exec;
 mod backend_scoped_secrets;
 mod backend_template;
+mod ci_docs_only_step;
 mod cli;
 mod cloud_slot;
 mod cloud_slot_cli;
