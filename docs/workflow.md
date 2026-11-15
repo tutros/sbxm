@@ -316,7 +316,8 @@ flag runs where the PR's task ran, so the loop's resolves and log-fixes follow t
 loop runs several tasks at once (issue 615): up to `sandbox_slots` (one when unset) local and `cloud_slots` cloud
 children, each new issue in the first free slot, local first, unless a label pins it; an issue whose place is full
 keeps its place while the next that fits starts. `[resources] placement = "cloud-first"` (issue 648) sends the
-largest queued issue to a free cloud slot instead, and the smallest to the free local slot. `sbxm status` lists each
+largest queued issue to a free cloud slot instead, and the smallest to the free local slot; either way an issue
+labeled `priority:high` goes before the others (issue 486). `sbxm status` lists each
 running child with its slot, and the loop's log row names it (`Slot`). Unset `cloud_slots` to go back to one task
 at a time.
 Tasks on this repo run in the cloud (proven end to end on 2026-11-11, issue #350) with `cloud_shape = "large"` or
