@@ -24,19 +24,24 @@ struct GateState {
     blocked: usize,
 }
 
-/// A test that waits longer than this has hung; fail it instead.
-const GATE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A test that waits longer than this has hung; fail it instead. Generous, because it bounds only
+/// a hang: what runs before an exec reaches the gate (a run hashes the test binary for its log
+/// header, issue 662) takes many seconds on a loaded machine.
+const GATE_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl ExecGate {
     /// Waits until `n` execs are blocked at the gate.
     pub fn wait_for_blocked(&self, n: usize) {
         let (state, cv) = &*self.inner;
-        let (_guard, timeout) = cv
+        let (guard, timeout) = cv
             .wait_timeout_while(state.lock().unwrap(), GATE_TIMEOUT, |s| s.blocked < n)
             .unwrap();
+        let blocked = guard.blocked;
+        // Released before failing, so the blocked execs don't panic on a poisoned lock as well.
+        drop(guard);
         assert!(
             !timeout.timed_out(),
-            "fewer than {n} execs reached the gate"
+            "{blocked} of the {n} execs expected reached the gate in {GATE_TIMEOUT:?}"
         );
     }
 

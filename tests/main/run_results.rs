@@ -307,14 +307,24 @@ fn completed_at_is_only_set_after_every_pair_finished() {
             .file_name();
         let dir = runs.join(&id);
         let record = read_json(&dir.join("run.json"));
-        assert!(record["started_at"].is_string());
-        assert!(record.get("completed_at").is_none() || record["completed_at"].is_null());
+        assert!(record["started_at"].is_string(), "run.json: {record}");
+        assert!(
+            record.get("completed_at").is_none() || record["completed_at"].is_null(),
+            "completed_at is set while both pairs are mid-run: {record}"
+        );
         assert!(dir.join("run-config.toml").is_file());
-        assert!(!dir.join("0").exists() && !dir.join("1").exists());
+        assert!(
+            !dir.join("0").exists() && !dir.join("1").exists(),
+            "a pair's results are on disk before it finished"
+        );
 
         gate.open();
         running.join().unwrap().unwrap();
-        assert!(read_json(&dir.join("run.json"))["completed_at"].is_string());
+        let record = read_json(&dir.join("run.json"));
+        assert!(
+            record["completed_at"].is_string(),
+            "completed_at is not set after every pair finished: {record}"
+        );
     });
 }
 
@@ -348,18 +358,25 @@ fn one_pair_stuck_mid_run_leaves_the_others_results_already_on_disk() {
                 .unwrap()
                 .file_name(),
         );
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // Bounds a hang only (issue 662): contestant 0 runs on while contestant 1 waits.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while !dir.join("0/0/result.json").is_file() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "contestant 0's results never appeared"
+                "contestant 0's results never appeared in 60 s while contestant 1 was held"
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(dir.join("0/0/answer.md").is_file());
-        assert!(!dir.join("1/0").exists());
+        assert!(
+            !dir.join("1/0").exists(),
+            "contestant 1's results are on disk while it is held"
+        );
         let record = read_json(&dir.join("run.json"));
-        assert!(record.get("completed_at").is_none() || record["completed_at"].is_null());
+        assert!(
+            record.get("completed_at").is_none() || record["completed_at"].is_null(),
+            "completed_at is set while contestant 1 is held: {record}"
+        );
 
         gate.open();
         running.join().unwrap().unwrap();
