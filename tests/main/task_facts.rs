@@ -470,6 +470,26 @@ fn task_facts_skips_an_archive_entry_that_is_a_link() {
 }
 
 #[test]
+fn task_facts_does_not_read_a_review_file_that_is_a_link() {
+    let env = Env::new();
+    let dir = save_live(&env, &issue_task(9, "2026-11-10T08:00:00Z"));
+    let elsewhere = env.tmp.path().join("review.md");
+    fs::write(&elsewhere, "Must-fix findings: 5\n").unwrap();
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&elsewhere, dir.join("review-1.md")).is_ok();
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&elsewhere, dir.join("review-1.md")).is_ok();
+    if !linked {
+        return; // no right to make a link here (Windows without developer mode)
+    }
+
+    let rows = json_rows(&env, "2026-11-10", None);
+
+    assert_eq!(rows[0]["review_rounds"], 0);
+    assert_eq!(rows[0]["must_fix"], json!([]));
+}
+
+#[test]
 fn task_facts_cli_takes_since_until_and_json() {
     let env = Env::new();
     save_live(&env, &issue_task(1, "2026-11-10T08:00:00Z"));

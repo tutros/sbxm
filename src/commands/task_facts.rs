@@ -103,7 +103,7 @@ pub fn run(
         );
     for (dir, live) in folders {
         let path = dir.join("task.json");
-        if !fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
+        if !plain_file(&path) {
             continue;
         }
         let task = match read(&path) {
@@ -179,6 +179,11 @@ fn folders(base_dir: &Path, root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// Whether `path` is a file, not a link to one.
+fn plain_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
+}
+
 /// The record at `path`, or why it can't be read, on one line.
 fn read(path: &Path) -> Result<Record, String> {
     let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
@@ -188,8 +193,10 @@ fn read(path: &Path) -> Result<Record, String> {
 fn row(task: &Record, dir: &Path, live: bool, started: String) -> Row {
     let must_fix: Vec<Option<u32>> = review::saved_rounds(dir)
         .into_iter()
-        .map(|r| {
-            fs::read_to_string(dir.join(format!("review-{r}.md")))
+        .map(|r| dir.join(format!("review-{r}.md")))
+        .filter(|path| plain_file(path))
+        .map(|path| {
+            fs::read_to_string(path)
                 .ok()
                 .and_then(|text| review::saved_must_fix_count(&text))
         })
@@ -231,7 +238,7 @@ fn cost(run: &RunInfo) -> Option<f64> {
 /// The size label on the `labels:` line of the `issue.md` (`gh issue view`'s text) in `dir`.
 fn size(dir: &Path) -> Option<&'static str> {
     let path = dir.join("issue.md");
-    if !fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
+    if !plain_file(&path) {
         return None;
     }
     let text = fs::read_to_string(path).ok()?;
