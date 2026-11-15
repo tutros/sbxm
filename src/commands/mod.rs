@@ -12,6 +12,7 @@ pub mod run_review;
 pub mod run_show;
 pub mod status;
 pub mod stop;
+pub mod task_facts;
 pub mod task_file_findings;
 pub mod task_finish;
 pub mod task_fix;

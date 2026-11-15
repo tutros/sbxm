@@ -27,6 +27,11 @@ decide, one at a time, and an adopted one goes through the normal branch and PR.
 
 Read only; nothing is written in this step. For every task and PR in the window:
 
+Start with `sbxm task facts --since <start> [--until <end>]` (issue 593): one read-only command prints the
+per-task table below from the task records and the archive (issue, size, review rounds, must-fix per round, wall time
+to `ready`, the latest worker and reviewer seconds and cost, outcome, PR; `-` for a fact the records don't hold, and
+`--json` for the same rows as JSON). Fill in the rest from the sources in the table.
+
 Gather with the Read, Grep and Glob tools and single plain commands that are already allowed (`gh pr list`, `gh pr view`, `gh issue view N --comments`, `gh issue list`, `gh run list`, `gh run view`, with `--json`/`--jq` inside `gh`, no pipes): no Python or shell scripts, heredocs, `;`/`|`/`&&` chains, and never the session transcripts (`*.jsonl`). An agent gathering for you gets this in its brief. A fact only a transcript would show is written "unknown (not in records)" (decision 319).
 
 | What | Where |
