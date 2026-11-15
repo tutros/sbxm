@@ -696,6 +696,22 @@ pub enum TaskCommand {
         #[arg(long)]
         follow: bool,
     },
+    /// Print one row of facts per task started in a window, for a retro: issue, size, review
+    /// rounds and must-fix per round, wall time to ready, the latest worker's and reviewer's
+    /// seconds and cost, outcome and PR. Reads the task records and the archive only (no GitHub);
+    /// a fact they don't hold prints `-` (null in JSON). Read-only.
+    Facts {
+        /// The first day the window holds, YYYY-MM-DD (UTC; tasks started on it count).
+        #[arg(long, value_name = "DATE")]
+        since: String,
+        /// The last day the window holds, YYYY-MM-DD (UTC; tasks started on it count). Default:
+        /// up to now.
+        #[arg(long, value_name = "DATE")]
+        until: Option<String>,
+        /// Print the rows as a JSON array instead of a Markdown table.
+        #[arg(long)]
+        json: bool,
+    },
     /// File the findings of a review as GitHub issues, one per finding. A dry run unless
     /// --create: it shows every issue and changes nothing.
     #[command(group(clap::ArgGroup::new("source").required(true).args(["issue", "pr", "file"])))]

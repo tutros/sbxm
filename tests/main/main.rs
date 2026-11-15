@@ -136,6 +136,7 @@ mod task_cloud_warm_up;
 mod task_config;
 mod task_crate_handback;
 mod task_dispatch_errors;
+mod task_facts;
 mod task_findings_cli;
 mod task_findings_create;
 mod task_findings_dry_run;

@@ -1175,6 +1175,17 @@ fn run() -> anyhow::Result<()> {
                 &mut screen::stdout(),
             )
         }
+        Command::Task {
+            command: TaskCommand::Facts { since, until, json },
+        } => {
+            // Read-only (issue 593), like `task logs`: no `task_writers`/`RunLog`, no lock.
+            commands::task_facts::run(
+                &config::config_dir()?,
+                &commands::task_facts::Options { since, until, json },
+                &mut screen::stdout(),
+                &mut std::io::stderr(),
+            )
+        }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
         Command::Template {
             command:
