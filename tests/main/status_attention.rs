@@ -23,8 +23,8 @@ use sbxm::task::outcome::{self, Outcome};
 use sbxm::task::pipeline::Prepared;
 use sbxm::task::queue::{LOOP_HOOK, LockFile, lock_path};
 use sbxm::task::record::{
-    self, Kind, NewTask, Process, ProcessProbe, Record, ReviewResult, SandboxLife, SandboxRole,
-    Stage, Status,
+    self, Kind, NewTask, PrBranch, Process, ProcessProbe, Record, ReviewResult, SandboxLife,
+    SandboxRole, Stage, Status,
 };
 use sbxm::task::risk::Level;
 
@@ -593,9 +593,16 @@ fn fix_of(number: u32, head: char, risk: Level, finished: bool) -> Record {
 
 /// The risk the open-PR list shows for PR 102, given its opener's risk and its fixes.
 fn shown_risk(opener: Level, fixes: &[Record]) -> String {
+    shown_risk_of(Some(opener), fixes)
+}
+
+/// [`shown_risk`], with no opener record at all when `opener` is `None`.
+fn shown_risk_of(opener: Option<Level>, fixes: &[Record]) -> String {
     let base = TestEnv::new();
     let b = base.base_dir();
-    save(&b, &with_pr(2, Some(opener), true));
+    if let Some(opener) = opener {
+        save(&b, &with_pr(2, Some(opener), true));
+    }
     for fix in fixes {
         save(&b, fix);
     }
@@ -628,6 +635,55 @@ fn a_later_low_risk_fix_does_not_clear_a_high_risk_openers_pr() {
 #[test]
 fn a_fix_not_finished_yet_does_not_count_toward_its_prs_risk() {
     let line = shown_risk(Level::Low, &[fix_of(2, 'a', Level::High, false)]);
+    assert!(line.contains("— low risk"), "{line}");
+}
+
+/// An issue task `number` that continued PR 102 (decision 169), with its review's `risk`;
+/// `finished` or still at `ready`.
+fn continuation(number: u32, risk: Level, finished: bool) -> Record {
+    let mut rec = task(number);
+    rec.stage = if finished {
+        Stage::Finished
+    } else {
+        Stage::Ready
+    };
+    rec.status = Status::Ok;
+    rec.continues = Some(PrBranch {
+        pr: 102,
+        branch: "b102".to_owned(),
+        base: "0".repeat(40),
+    });
+    rec.pr = Some(format!("https://github.com/{REPO}/pull/102"));
+    rec.review = Some(review(risk));
+    rec
+}
+
+#[test]
+fn a_finished_continuation_alone_shows_its_own_risk() {
+    let line = shown_risk_of(None, &[continuation(3, Level::High, true)]);
+    assert!(line.contains("— high risk"), "{line}");
+}
+
+#[test]
+fn a_finished_high_risk_continuation_raises_a_low_risk_openers_pr() {
+    // Ids before and after the opener's (`issue-2`) in name order.
+    for number in [1, 9] {
+        let line = shown_risk(Level::Low, &[continuation(number, Level::High, true)]);
+        assert!(line.contains("— high risk"), "{line}");
+    }
+}
+
+#[test]
+fn a_low_risk_continuation_does_not_lower_a_high_risk_openers_pr() {
+    for number in [1, 9] {
+        let line = shown_risk(Level::High, &[continuation(number, Level::Low, true)]);
+        assert!(line.contains("— high risk"), "{line}");
+    }
+}
+
+#[test]
+fn a_continuation_not_finished_yet_does_not_count_toward_its_prs_risk() {
+    let line = shown_risk(Level::Low, &[continuation(3, Level::High, false)]);
     assert!(line.contains("— low risk"), "{line}");
 }
 

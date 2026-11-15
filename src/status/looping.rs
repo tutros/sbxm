@@ -581,12 +581,15 @@ pub struct OpenPr {
 }
 
 /// Each PR the task records under `base` name for `repo`, read as [`queue::loop_prs`] reads the
-/// records: a folder that isn't sbxm's own or a record that can't be read is skipped. By PR
-/// number, each once, with the risk of its whole review history ([`queue::history_risk`], the
-/// rule the loop arms by): the tasks that opened it and every finished fix pushed onto it, so the
-/// order the records are read in never decides it (review M-2); unknown with no review.
+/// records: a folder that isn't sbxm's own or a record that can't be read is skipped. A record
+/// names a PR by its `pr` or, for a task continuing one (decision 169), by its `continues`. By PR
+/// number, each once, with the risk of its whole review history, so the order the records are
+/// read in never decides it (review M-2): [`queue::history_risk`] over the issue or spec tasks
+/// that opened it, the issue or spec tasks that continued it and finished (review M-1 of the
+/// second round), and its finished fixes; unknown with no review.
 fn task_prs(base: &Path, repo: &str) -> anyhow::Result<Vec<(u32, Level)>> {
-    let mut records: Vec<(u32, Record)> = Vec::new();
+    let mut records: Vec<Record> = Vec::new();
+    let mut numbers: Vec<u32> = Vec::new();
     for dir in record::task_folders(base)? {
         if check_own_folder(base, &dir).is_err() {
             continue;
@@ -597,24 +600,24 @@ fn task_prs(base: &Path, repo: &str) -> anyhow::Result<Vec<(u32, Level)>> {
         if rec.repo != repo {
             continue;
         }
-        if let Some(number) = rec.pr.as_deref().and_then(queue::pr_number) {
-            records.push((number, rec));
-        }
+        let named = rec.pr.as_deref().and_then(queue::pr_number);
+        let continued = rec.continues.as_ref().map(|c| c.pr);
+        numbers.extend(named.into_iter().chain(continued));
+        records.push(rec);
     }
-    let mut numbers: Vec<u32> = records.iter().map(|(n, _)| *n).collect();
     numbers.sort_unstable();
     numbers.dedup();
     Ok(numbers
         .into_iter()
         .map(|number| {
-            // The tasks that opened it: an issue's or a spec's, not one continuing a PR.
-            let openers = records.iter().filter_map(|(n, rec)| {
-                (*n == number
-                    && matches!(rec.kind, Kind::Issue | Kind::Spec)
-                    && rec.continues.is_none())
-                .then_some(rec)
+            let reviewed = records.iter().filter(|rec| {
+                let own = matches!(rec.kind, Kind::Issue | Kind::Spec);
+                match &rec.continues {
+                    None => own && rec.pr.as_deref().and_then(queue::pr_number) == Some(number),
+                    Some(c) => own && c.pr == number && rec.stage == Stage::Finished,
+                }
             });
-            let risk = queue::history_risk(base, repo, number, openers).unwrap_or(Level::Unknown);
+            let risk = queue::history_risk(base, repo, number, reviewed).unwrap_or(Level::Unknown);
             (number, risk)
         })
         .collect())
