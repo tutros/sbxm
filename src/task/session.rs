@@ -358,6 +358,7 @@ mod tests {
                 cost_usd: None,
             },
             session_id: None,
+            model: None,
         }
     }
 

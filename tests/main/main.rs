@@ -55,6 +55,7 @@ mod headless;
 mod headless_antigravity;
 mod headless_antigravity_mcp;
 mod headless_codex;
+mod headless_model;
 mod hint_cli;
 mod hint_config_dir;
 mod home_files;
