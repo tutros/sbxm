@@ -12,11 +12,17 @@ pub use fake::{ExecGate, FakeBackend, FakeCopy};
 
 pub use sbx::{SbxBackend, set_trailer_sink};
 
+/// Where the output lines of an `sbx create` or `sbx rm` go besides the screen (issue 114): the
+/// calling task's own `run.log`, one line at a time, or nowhere (`None`, for a command with no
+/// task log). Each call names its own, so tasks running at once never mix their lines.
+pub type SbxLog<'a> = Option<&'a dyn Fn(&str)>;
+
 pub trait SandboxBackend: Send + Sync {
     /// The backend for sandboxes at `location` (P3 (a), decision 262(c)): a task gets the
     /// instance for the location it runs in, and passes only that one on.
     fn located(&self, location: Location) -> &dyn SandboxBackend;
-    fn create(&self, spec: &CreateSpec) -> Result<()>;
+    /// Creates a sandbox (`sbx create`); its output lines go to the screen and to `log`.
+    fn create(&self, spec: &CreateSpec, log: SbxLog) -> Result<()>;
     /// Copies a host file into a running sandbox (`sbx cp <host> <sandbox>:<path>`), for a sandbox
     /// with no mounted workspace (decision 257).
     fn copy_in(&self, sandbox: &str, host: &Path, path: &str) -> Result<()>;
@@ -58,8 +64,9 @@ pub trait SandboxBackend: Send + Sync {
             .collect())
     }
     fn stop(&self, name: &str) -> Result<()>;
-    /// Removes the sandbox without prompting (`sbx rm -f`).
-    fn remove(&self, name: &str) -> Result<()>;
+    /// Removes the sandbox without prompting (`sbx rm -f`); its output lines go to the screen and
+    /// to `log`.
+    fn remove(&self, name: &str, log: SbxLog) -> Result<()>;
     /// Attaches the terminal to the sandbox's agent, starting it if stopped.
     fn attach(&self, name: &str) -> Result<()>;
     /// Checks a kit directory (`sbx kit validate --json`).

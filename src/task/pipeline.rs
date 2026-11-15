@@ -1687,7 +1687,8 @@ fn prepare_source_with(
 
         match cloud_ttl {
             None => {
-                plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?;
+                let log = |line: &str| runlog::task_line(&meta, line);
+                plan.create(ctx.backend, &sandbox, worker.harness, &workspace, &log)?;
                 // Its removal once the worker's phase ends is recorded against it (issue 341).
                 task.add_sandbox(&sandbox, SandboxRole::Worker, Location::Local, now(), 0);
                 record::write(&meta, task)?;
@@ -1742,7 +1743,8 @@ fn prepare_source_with(
             // removes its sandbox even if `create` failed, as before this milestone, and keeps
             // no record of it.
             if local {
-                let _ = ctx.backend.remove(&sandbox);
+                let log = |line: &str| runlog::task_line(&meta, line);
+                let _ = ctx.backend.remove(&sandbox, Some(&log));
                 let _ = fs::remove_dir_all(&workspace);
                 let _ = fs::remove_dir_all(&meta);
                 return Err(e);
@@ -2579,20 +2581,24 @@ impl SandboxPlan {
         sandbox: &str,
         harness: Harness,
         workspace: &Path,
+        log: &dyn Fn(&str),
     ) -> Result<()> {
         backend
-            .create(&CreateSpec {
-                name: sandbox.to_owned(),
-                agent: harness.agent_arg().into(),
-                workspace: Some(workspace.to_path_buf()),
-                cpus: self.kit_set.resources.cpus,
-                memory: self.kit_set.resources.memory.clone(),
-                skills: self.kits.skills_store,
-                kits: self.kits.dirs.clone(),
-                template: self.template.clone(),
-                deny_network: self.deny_network.clone().unwrap_or_default(),
-                ttl: None,
-            })
+            .create(
+                &CreateSpec {
+                    name: sandbox.to_owned(),
+                    agent: harness.agent_arg().into(),
+                    workspace: Some(workspace.to_path_buf()),
+                    cpus: self.kit_set.resources.cpus,
+                    memory: self.kit_set.resources.memory.clone(),
+                    skills: self.kits.skills_store,
+                    kits: self.kits.dirs.clone(),
+                    template: self.template.clone(),
+                    deny_network: self.deny_network.clone().unwrap_or_default(),
+                    ttl: None,
+                },
+                Some(log),
+            )
             .with_context(|| format!("cannot create sandbox {sandbox}"))?;
         template::check_kit_rules(
             &self.profile_name,
@@ -2601,6 +2607,7 @@ impl SandboxPlan {
             sandbox,
             backend,
             self.deny_network.as_deref(),
+            Some(log),
         )
     }
 }
@@ -2660,20 +2667,24 @@ impl SandboxPlan {
         sandbox: &str,
         harness: Harness,
         ttl: Duration,
+        log: &dyn Fn(&str),
     ) -> Result<()> {
         backend
-            .create(&CreateSpec {
-                name: sandbox.to_owned(),
-                agent: harness.agent_arg().into(),
-                workspace: None,
-                cpus: self.kit_set.resources.cpus,
-                memory: self.kit_set.resources.memory.clone(),
-                skills: self.kits.skills_store,
-                kits: self.kits.dirs.clone(),
-                template: None,
-                deny_network: Vec::new(),
-                ttl: Some(ttl),
-            })
+            .create(
+                &CreateSpec {
+                    name: sandbox.to_owned(),
+                    agent: harness.agent_arg().into(),
+                    workspace: None,
+                    cpus: self.kit_set.resources.cpus,
+                    memory: self.kit_set.resources.memory.clone(),
+                    skills: self.kits.skills_store,
+                    kits: self.kits.dirs.clone(),
+                    template: None,
+                    deny_network: Vec::new(),
+                    ttl: Some(ttl),
+                },
+                Some(log),
+            )
             .with_context(|| format!("cannot create sandbox {sandbox}"))
     }
 
@@ -3026,15 +3037,17 @@ pub(super) fn ensure_worker_sandbox(
         },
         (&mut prepared.warnings, &mut prepared.events),
     )?;
+    let meta = prepared.meta.clone();
+    let log = |line: &str| runlog::task_line(&meta, line);
     if replace {
-        let _ = env.backend.remove(&sandbox);
+        let _ = env.backend.remove(&sandbox, Some(&log));
     }
     adopt_rebuild(prepared, rebuild, &plan);
     // One that vanished or was replaced is gone: its open entry, if any, is closed.
     prepared.record.sandbox_removed(&sandbox, now());
     // The record goes first, as in `prepare`: `template rm` reads it to see what the sandbox uses.
     record::write(&prepared.meta, &prepared.record)?;
-    plan.create(env.backend, &sandbox, harness, &prepared.workspace)?;
+    plan.create(env.backend, &sandbox, harness, &prepared.workspace, &log)?;
     let role = match prepared.record.stage {
         Stage::Fixing => SandboxRole::Fix,
         _ => SandboxRole::Worker,
@@ -5309,7 +5322,8 @@ fn remove_reviewer(env: &TaskEnv, prepared: &mut Prepared, sandbox: &str, clone:
         release_cloud_sandbox(env, prepared, sandbox);
         return;
     }
-    let _ = env.backend.remove(sandbox);
+    let log = |line: &str| runlog::task_line(&prepared.meta, line);
+    let _ = env.backend.remove(sandbox, Some(&log));
     if let Err(e) = remove_with_retries(clone) {
         prepared
             .record
@@ -5416,8 +5430,9 @@ fn open_review_workspace(
     let branch = prepared.record.branch.clone();
 
     // A clone left by a killed run (and its sandbox) goes first.
+    let log = |line: &str| runlog::task_line(&prepared.meta, line);
     if clone.exists() {
-        let _ = env.backend.remove(sandbox);
+        let _ = env.backend.remove(sandbox, Some(&log));
         remove_with_retries(clone)
             .with_context(|| format!("cannot clear {}, left by an earlier run", clone.display()))?;
     }
@@ -5474,7 +5489,7 @@ fn open_review_workspace(
     // that `task rm` needs to find the sandbox.
     prepared.record.reviewer = Some(reviewer_agent(env, sandbox, slashes(clone), &plan));
     record::write(&prepared.meta, &prepared.record)?;
-    plan.create(env.backend, sandbox, reviewer.harness, clone)?;
+    plan.create(env.backend, sandbox, reviewer.harness, clone, &log)?;
     Ok(warnings)
 }
 
@@ -5742,8 +5757,9 @@ fn create_recorded(
     // the cleanup that follows an error trusts the in-memory record, and an open entry there
     // that `task.json` doesn't have would remove a sandbox the task can't prove is its own.
     record::write_change(meta, task, |t| t.create_started(sandbox, role, now()))?;
+    let log = |line: &str| runlog::task_line(meta, line);
     let asked = secrets::set_all(backend, sandbox, scoped_secrets)
-        .and_then(|()| plan.create_cloud(backend, sandbox, harness, ttl));
+        .and_then(|()| plan.create_cloud(backend, sandbox, harness, ttl, &log));
     let Err(e) = asked else {
         return record::write_change(meta, task, |t| {
             t.add_sandbox(sandbox, role, Location::Cloud, now(), ttl.as_secs());

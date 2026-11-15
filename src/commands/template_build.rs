@@ -596,7 +596,7 @@ impl Build {
     /// An interrupted build's sandbox and folders (decision 210).
     fn remove_leftovers(&self, backend: &dyn SandboxBackend) -> Result<()> {
         if backend.list()?.iter().any(|s| s.name == self.sandbox) {
-            backend.remove(&self.sandbox)?;
+            backend.remove(&self.sandbox, None)?;
         }
         for dir in [&self.workspace, &self.kits_dir] {
             if dir.exists() {
@@ -645,25 +645,28 @@ impl Build {
 
         let tag = &self.record.tag;
         progress.sandbox = true;
-        backend.create(&CreateSpec {
-            name: self.sandbox.clone(),
-            agent: harness.agent_arg().into(),
-            workspace: Some(self.workspace.clone()),
-            cpus: config.resources.cpus,
-            memory: config.resources.memory.clone(),
-            skills: profile.skills_store,
-            kits: kits.into_iter().map(|(dir, _)| dir).collect(),
-            template: None,
-            deny_network: Vec::new(),
-            ttl: None,
-        })?;
+        backend.create(
+            &CreateSpec {
+                name: self.sandbox.clone(),
+                agent: harness.agent_arg().into(),
+                workspace: Some(self.workspace.clone()),
+                cpus: config.resources.cpus,
+                memory: config.resources.memory.clone(),
+                skills: profile.skills_store,
+                kits: kits.into_iter().map(|(dir, _)| dir).collect(),
+                template: None,
+                deny_network: Vec::new(),
+                ttl: None,
+            },
+            None,
+        )?;
         if let Some(warm) = &self.warm {
             self.warm_up(warm, backend, warn)?;
         }
         backend.stop(&self.sandbox)?;
         backend.template_save(&self.sandbox, tag)?;
         progress.saved = true;
-        backend.remove(&self.sandbox)?;
+        backend.remove(&self.sandbox, None)?;
         progress.sandbox = false;
         for dir in [&self.workspace, &self.kits_dir] {
             fs::remove_dir_all(dir).with_context(|| format!("cannot remove {}", dir.display()))?;
@@ -798,7 +801,7 @@ impl Build {
     /// the job; `err` stays the cause.
     fn clean_up(&self, backend: &dyn SandboxBackend, progress: &Progress, err: Error) -> Error {
         let mut leftovers = Vec::new();
-        if progress.sandbox && backend.remove(&self.sandbox).is_err() {
+        if progress.sandbox && backend.remove(&self.sandbox, None).is_err() {
             leftovers.push(format!(
                 "could not remove build sandbox {0}; remove it with `sbx rm {0}`",
                 self.sandbox

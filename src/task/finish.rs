@@ -22,6 +22,7 @@ use super::record::{self, OpenFinding, Process, ProcessProbe, Record};
 use super::repo;
 use super::review::{self, COMMENT_CAP, defang, defang_mentions};
 use super::risk;
+use super::runlog;
 use super::summary;
 use crate::backend::{Location, SandboxBackend};
 use crate::confirm::Confirm;
@@ -347,7 +348,8 @@ pub(crate) fn check_own_folder(base_dir: &Path, dir: &Path) -> Result<()> {
 /// go through the retried removal, `sleep` waiting between tries (P6, decision 262(e)), one
 /// already gone counting as removed; then the secrets the cloud lists as scoped to each (slice
 /// 4), whatever its removal said. Returns `false` when a cloud sandbox may still be there: the
-/// task's record is then its only trace.
+/// task's record is then its only trace. Each `sbx rm`'s lines go to the task's `run.log` too
+/// (issue 114): the folder outlives a removal that fails.
 fn remove_sandboxes(
     plan: &RemovalPlan,
     backend: &dyn SandboxBackend,
@@ -355,9 +357,11 @@ fn remove_sandboxes(
     report: &mut RemovalReport,
 ) -> bool {
     let backend = backend.located(plan.location);
+    let meta = record::task_dir(&plan.base_dir, &plan.id);
+    let log = |line: &str| runlog::task_line(&meta, line);
     if plan.location == Location::Local {
         for sandbox in &plan.sandboxes {
-            match crate::commands::rm::remove_sandbox(backend, sandbox) {
+            match crate::commands::rm::remove_sandbox(backend, sandbox, Some(&log)) {
                 Ok(()) => report.removed.push(format!("sandbox {sandbox}")),
                 Err(e) => report
                     .stayed
@@ -369,7 +373,7 @@ fn remove_sandboxes(
     let cloud = backend;
     let mut all_gone = true;
     for sandbox in &plan.sandboxes {
-        match lifetime::remove_sandbox(cloud, sandbox, sleep) {
+        match lifetime::remove_sandbox(cloud, sandbox, Some(&log), sleep) {
             Removal::Removed => report.removed.push(format!("cloud sandbox {sandbox}")),
             Removal::AlreadyGone => report
                 .removed

@@ -141,18 +141,21 @@ fn scoped_custom_secret_swaps_the_placeholder_in_the_header_only() {
         "{listed:?}"
     );
     backend
-        .create(&CreateSpec {
-            name: sandbox.clone(),
-            agent: jev::AGENT.into(),
-            workspace: Some(workspace.clone()),
-            cpus: 2,
-            memory: "2g".into(),
-            skills: SkillsStore::Off,
-            kits: vec![kit_dir],
-            template: None,
-            deny_network: vec![],
-            ttl: None,
-        })
+        .create(
+            &CreateSpec {
+                name: sandbox.clone(),
+                agent: jev::AGENT.into(),
+                workspace: Some(workspace.clone()),
+                cpus: 2,
+                memory: "2g".into(),
+                skills: SkillsStore::Off,
+                kits: vec![kit_dir],
+                template: None,
+                deny_network: vec![],
+                ttl: None,
+            },
+            None,
+        )
         .unwrap();
 
     // The sandbox holds the placeholder only.
@@ -186,7 +189,7 @@ fn scoped_custom_secret_swaps_the_placeholder_in_the_header_only() {
     );
     assert_eq!(found.trim(), "0", "{found}");
 
-    backend.remove(&sandbox).unwrap();
+    backend.remove(&sandbox, None).unwrap();
     backend
         .remove_custom_secret(&placeholder, &sandbox)
         .unwrap();

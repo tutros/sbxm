@@ -4901,6 +4901,8 @@ impl TaskSteps<'_> {
     ) -> Result<()> {
         let log: Arc<Mutex<RunLog>> =
             task_log::open(self.config_dir, vec![id], None).unwrap_or_else(|_| task_log::none());
+        // The step's `sbx` lines go to the task's log after its header (issue 114).
+        let _route = crate::task::runlog::route(&log);
         let mut out = Tee::new(out, Arc::clone(&log));
         let mut warn = Tee::new(warn, log);
         let result = step(&mut out, &mut warn);

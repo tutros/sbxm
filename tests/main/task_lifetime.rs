@@ -143,7 +143,7 @@ fn unavailable() -> String {
 /// Removes [`SANDBOX`] through `backend`; returns the outcome and the waits it asked for.
 fn remove(backend: &FakeBackend, name: &str) -> (Removal, Vec<Duration>) {
     let waits = Mutex::new(Vec::new());
-    let removal = remove_sandbox(backend, name, &|d| waits.lock().unwrap().push(d));
+    let removal = remove_sandbox(backend, name, None, &|d| waits.lock().unwrap().push(d));
     (removal, waits.into_inner().unwrap())
 }
 

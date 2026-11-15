@@ -113,18 +113,21 @@ fn fake_can_fail_create_or_exec_for_one_sandbox_only() {
         .with_failing_create_for("bad")
         .with_failing_exec_for("worse");
     let create = |name: &str| {
-        fake.create(&sbxm::backend::CreateSpec {
-            name: name.into(),
-            agent: "claude".into(),
-            workspace: Some(PathBuf::from("/w")),
-            cpus: 1,
-            memory: "1g".into(),
-            skills: sbxm::backend::SkillsStore::Off,
-            kits: vec![],
-            template: None,
-            deny_network: Vec::new(),
-            ttl: None,
-        })
+        fake.create(
+            &sbxm::backend::CreateSpec {
+                name: name.into(),
+                agent: "claude".into(),
+                workspace: Some(PathBuf::from("/w")),
+                cpus: 1,
+                memory: "1g".into(),
+                skills: sbxm::backend::SkillsStore::Off,
+                kits: vec![],
+                template: None,
+                deny_network: Vec::new(),
+                ttl: None,
+            },
+            None,
+        )
     };
 
     assert!(create("bad").is_err());

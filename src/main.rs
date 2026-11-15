@@ -54,6 +54,9 @@ fn task_writers(
                 commands::task_log::none()
             })
     };
+    // The lines of a task's `sbx create` and `sbx rm` go to that task's log only (issue 114), for
+    // the rest of the process.
+    std::mem::forget(task::runlog::route(&log));
     // Notes about text after `sbx`'s JSON go through the same log as the other warnings.
     let mut notes = Local::new(Tee::new(screen::stderr(), Arc::clone(&log)));
     sbxm::backend::set_trailer_sink(move |note| {

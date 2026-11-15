@@ -156,20 +156,23 @@ pub fn run(
 
     super::write_unsupported_warnings(options.harness, &profile, &sandbox, warn)?;
     if options.replace {
-        backend.remove(&sandbox)?;
+        backend.remove(&sandbox, None)?;
     }
-    backend.create(&CreateSpec {
-        name: sandbox.clone(),
-        agent: options.harness.agent_arg().into(),
-        workspace: Some(workspace.clone()),
-        cpus: config.resources.cpus,
-        memory: config.resources.memory,
-        skills: profile.skills_store,
-        kits: kits.into_iter().map(|(dir, _)| dir).collect(),
-        template: template.clone(),
-        deny_network: deny_network.clone().unwrap_or_default(),
-        ttl: None,
-    })?;
+    backend.create(
+        &CreateSpec {
+            name: sandbox.clone(),
+            agent: options.harness.agent_arg().into(),
+            workspace: Some(workspace.clone()),
+            cpus: config.resources.cpus,
+            memory: config.resources.memory,
+            skills: profile.skills_store,
+            kits: kits.into_iter().map(|(dir, _)| dir).collect(),
+            template: template.clone(),
+            deny_network: deny_network.clone().unwrap_or_default(),
+            ttl: None,
+        },
+        None,
+    )?;
     template::check_kit_rules(
         profile_name,
         &profile,
@@ -177,6 +180,7 @@ pub fn run(
         &sandbox,
         backend,
         deny_network.as_deref(),
+        None,
     )?;
 
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();

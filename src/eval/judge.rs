@@ -267,18 +267,21 @@ pub fn judge_repeat(
             .ok_or_else(|| format!("no kits were built for {}", judge.harness.as_str()))?;
         created = true;
         backend
-            .create(&CreateSpec {
-                name: sandbox.clone(),
-                agent: judge.harness.agent_arg().into(),
-                workspace: Some(workspace.clone()),
-                cpus: kits.resources.cpus,
-                memory: kits.resources.memory.clone(),
-                skills: harness_kits.skills_store,
-                kits: harness_kits.dirs.clone(),
-                template: harness_kits.template.clone(),
-                deny_network: harness_kits.deny_network.clone().unwrap_or_default(),
-                ttl: None,
-            })
+            .create(
+                &CreateSpec {
+                    name: sandbox.clone(),
+                    agent: judge.harness.agent_arg().into(),
+                    workspace: Some(workspace.clone()),
+                    cpus: kits.resources.cpus,
+                    memory: kits.resources.memory.clone(),
+                    skills: harness_kits.skills_store,
+                    kits: harness_kits.dirs.clone(),
+                    template: harness_kits.template.clone(),
+                    deny_network: harness_kits.deny_network.clone().unwrap_or_default(),
+                    ttl: None,
+                },
+                None,
+            )
             .map_err(|e| format!("cannot create the judge sandbox {sandbox}: {e:#}"))?;
         // A strict `codex` or `pi` judge is held to its allow list before it runs (decisions 221, 323).
         if let Err(e) = template::check_kit_rules(
@@ -288,6 +291,7 @@ pub fn judge_repeat(
             &sandbox,
             backend,
             harness_kits.deny_network.as_deref(),
+            None,
         ) {
             // A refused sandbox is already removed, unless removing it failed.
             created = backend
@@ -336,7 +340,7 @@ pub fn judge_repeat(
     // Always, once create was asked for, whatever became of the judge.
     if created {
         run.remove_error = backend
-            .remove(&sandbox)
+            .remove(&sandbox, None)
             .err()
             .map(|e| format!("cannot remove sandbox {sandbox}: {e:#}; run `sbx rm -f {sandbox}`"));
     }

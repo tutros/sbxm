@@ -556,18 +556,21 @@ fn exec_and_skills_against_real_sbx() {
     };
     std::fs::create_dir_all(&workspace).unwrap();
     SbxBackend::LOCAL
-        .create(&CreateSpec {
-            name: name.clone(),
-            agent: "claude".into(),
-            workspace: Some(workspace),
-            cpus: 2,
-            memory: "2g".into(),
-            skills: SkillsStore::Off,
-            kits: vec![],
-            template: None,
-            deny_network: Vec::new(),
-            ttl: None,
-        })
+        .create(
+            &CreateSpec {
+                name: name.clone(),
+                agent: "claude".into(),
+                workspace: Some(workspace),
+                cpus: 2,
+                memory: "2g".into(),
+                skills: SkillsStore::Off,
+                kits: vec![],
+                template: None,
+                deny_network: Vec::new(),
+                ttl: None,
+            },
+            None,
+        )
         .unwrap();
 
     let run = |workdir: Option<&str>, argv: &[&str], stdin: Stdin| {
@@ -634,18 +637,21 @@ fn claude_headless_against_real_sbx() {
     };
     std::fs::create_dir_all(&workspace).unwrap();
     SbxBackend::LOCAL
-        .create(&CreateSpec {
-            name: name.clone(),
-            agent: "claude".into(),
-            workspace: Some(workspace.clone()),
-            cpus: 2,
-            memory: "2g".into(),
-            skills: SkillsStore::Off,
-            kits: vec![],
-            template: None,
-            deny_network: Vec::new(),
-            ttl: None,
-        })
+        .create(
+            &CreateSpec {
+                name: name.clone(),
+                agent: "claude".into(),
+                workspace: Some(workspace.clone()),
+                cpus: 2,
+                memory: "2g".into(),
+                skills: SkillsStore::Off,
+                kits: vec![],
+                template: None,
+                deny_network: Vec::new(),
+                ttl: None,
+            },
+            None,
+        )
         .unwrap();
     // The workspace is mounted at its host path in forward-slash form, drive
     // letter first and lowercase: E:\sbxm-it\x is /e/sbxm-it/x.
@@ -718,18 +724,21 @@ fn codex_headless_against_real_sbx() {
     };
     std::fs::create_dir_all(&workspace).unwrap();
     SbxBackend::LOCAL
-        .create(&CreateSpec {
-            name: name.clone(),
-            agent: "codex".into(),
-            workspace: Some(workspace.clone()),
-            cpus: 2,
-            memory: "2g".into(),
-            skills: SkillsStore::Off,
-            kits: vec![],
-            template: None,
-            deny_network: Vec::new(),
-            ttl: None,
-        })
+        .create(
+            &CreateSpec {
+                name: name.clone(),
+                agent: "codex".into(),
+                workspace: Some(workspace.clone()),
+                cpus: 2,
+                memory: "2g".into(),
+                skills: SkillsStore::Off,
+                kits: vec![],
+                template: None,
+                deny_network: Vec::new(),
+                ttl: None,
+            },
+            None,
+        )
         .unwrap();
     // E:\sbxm-it\x is mounted as /e/sbxm-it/x.
     let path = workspace.to_string_lossy().replace(char::from(92), "/");
@@ -2121,18 +2130,21 @@ fn task_sandbox_gates_against_real_sbx() {
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(workspace.join("marker.txt"), "here\n").unwrap();
     SbxBackend::LOCAL
-        .create(&CreateSpec {
-            name: name.clone(),
-            agent: "claude".into(),
-            workspace: Some(workspace.clone()),
-            cpus: 2,
-            memory: "2g".into(),
-            skills: SkillsStore::Off,
-            kits: vec![],
-            template: None,
-            deny_network: Vec::new(),
-            ttl: None,
-        })
+        .create(
+            &CreateSpec {
+                name: name.clone(),
+                agent: "claude".into(),
+                workspace: Some(workspace.clone()),
+                cpus: 2,
+                memory: "2g".into(),
+                skills: SkillsStore::Off,
+                kits: vec![],
+                template: None,
+                deny_network: Vec::new(),
+                ttl: None,
+            },
+            None,
+        )
         .unwrap();
     let dir = in_sandbox_path(&workspace);
     let cmds = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
@@ -2246,18 +2258,21 @@ fn task_bundle_round_trip_against_real_sbx() {
     repo::clone_workspace(&repo_git, &workspace, "issue-4", &identity).unwrap();
 
     SbxBackend::LOCAL
-        .create(&CreateSpec {
-            name: name.clone(),
-            agent: "claude".into(),
-            workspace: Some(workspace.clone()),
-            cpus: 2,
-            memory: "2g".into(),
-            skills: SkillsStore::Off,
-            kits: vec![],
-            template: None,
-            deny_network: Vec::new(),
-            ttl: None,
-        })
+        .create(
+            &CreateSpec {
+                name: name.clone(),
+                agent: "claude".into(),
+                workspace: Some(workspace.clone()),
+                cpus: 2,
+                memory: "2g".into(),
+                skills: SkillsStore::Off,
+                kits: vec![],
+                template: None,
+                deny_network: Vec::new(),
+                ttl: None,
+            },
+            None,
+        )
         .unwrap();
 
     // What the agent does, then the fixed bundle command (spec §6): all inside the sandbox.

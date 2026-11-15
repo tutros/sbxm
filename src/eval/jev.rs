@@ -985,18 +985,21 @@ pub fn evaluate_repeat(
             .map_err(|e| format!("cannot store the Jev token's scoped secret: {e:#}"))?;
         created = true;
         backend
-            .create(&CreateSpec {
-                name: sandbox.clone(),
-                agent: AGENT.into(),
-                workspace: Some(workspace.clone()),
-                cpus: kit.cpus,
-                memory: kit.memory.clone(),
-                skills: SkillsStore::Off,
-                kits: kit.dirs.clone(),
-                template: None,
-                deny_network: Vec::new(),
-                ttl: None,
-            })
+            .create(
+                &CreateSpec {
+                    name: sandbox.clone(),
+                    agent: AGENT.into(),
+                    workspace: Some(workspace.clone()),
+                    cpus: kit.cpus,
+                    memory: kit.memory.clone(),
+                    skills: SkillsStore::Off,
+                    kits: kit.dirs.clone(),
+                    template: None,
+                    deny_network: Vec::new(),
+                    ttl: None,
+                },
+                None,
+            )
             .map_err(|e| format!("cannot create the Jev sandbox {sandbox}: {e:#}"))
     })();
     match prepared {
@@ -1028,7 +1031,7 @@ pub fn evaluate_repeat(
     // Always, once asked for: the sandbox, then its secret.
     if created {
         run.remove_error = backend
-            .remove(&sandbox)
+            .remove(&sandbox, None)
             .err()
             .map(|e| format!("cannot remove sandbox {sandbox}: {e:#}; run `sbx rm -f {sandbox}`"));
     }
