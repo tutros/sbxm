@@ -418,6 +418,20 @@ pub struct FixRun {
     pub resumed: bool,
 }
 
+/// One run of a task's worker, fix round or reviewer (issue 419), kept in `Record::runs` in the
+/// order they ran, so every round's model and cost stay readable (model-router data).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunEntry {
+    pub role: SandboxRole,
+    /// The fix round or the review round, counted from 1; 0 for the worker's own run.
+    pub round: u32,
+    /// The model the harness's output says the run used, or `unknown` when it names none.
+    pub model: String,
+    pub status: String,
+    pub usage: Value,
+    pub duration_s: u64,
+}
+
 /// What a cloud sandbox of a task was for (P7 (a)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -543,6 +557,10 @@ pub struct Record {
     /// How each fix round ran (issue 430), in order; absent in older records, which recorded none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fix_runs: Vec<FixRun>,
+    /// Every worker, fix-round and reviewer run, in order (issue 419); absent in older records,
+    /// which kept only the latest run of each agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunEntry>,
     /// Set when the task's should-fix round starts (`task resume --should-fix`, issue 510,
     /// decision 306): a task gets at most one. Absent in older records and until then.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -775,6 +793,7 @@ impl Record {
             pr: None,
             issue_comments: Vec::new(),
             fix_runs: Vec::new(),
+            runs: Vec::new(),
             should_fix_round: false,
             repeat_tolerated: false,
             continues: None,

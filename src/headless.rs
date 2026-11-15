@@ -94,6 +94,9 @@ pub struct HeadlessResult {
     pub usage: Usage,
     /// The session the run used, where the harness names one (Claude's `session_id`, issue 418).
     pub session_id: Option<String>,
+    /// The model the harness says the run used, from its own output (issue 419); `None` when the
+    /// output names none (Codex's never does).
+    pub model: Option<String>,
 }
 
 /// `SandboxBackend::exec` returning `Err` means "`sbx` itself couldn't run" (its own doc comment),
@@ -181,6 +184,8 @@ pub(crate) fn parse_claude(raw: &str) -> HeadlessResult {
     };
     let mut status = RunStatus::Failed(NO_RESULT.into());
     let mut session_id = None;
+    // The `init` event's model, else the last assistant message's.
+    let (mut init_model, mut message_model) = (None, None);
     for event in raw
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -189,8 +194,14 @@ pub(crate) fn parse_claude(raw: &str) -> HeadlessResult {
             session_id = Some(id.to_owned());
         }
         match event["type"].as_str() {
+            Some("system") if event["subtype"] == "init" => {
+                init_model = event["model"].as_str().map(str::to_owned);
+            }
             Some("assistant") => {
                 let message = &event["message"];
+                if let Some(model) = message["model"].as_str() {
+                    message_model = Some(model.to_owned());
+                }
                 if let Some(text) = message["content"]
                     .as_array()
                     .and_then(|blocks| blocks.iter().rev().find_map(|b| b["text"].as_str()))
@@ -219,6 +230,7 @@ pub(crate) fn parse_claude(raw: &str) -> HeadlessResult {
         transcript: raw.to_owned(),
         usage,
         session_id,
+        model: init_model.or(message_model),
     }
 }
 
@@ -310,6 +322,7 @@ pub(crate) fn parse_codex(raw: &str) -> HeadlessResult {
         transcript: raw.to_owned(),
         usage,
         session_id: None,
+        model: None,
     }
 }
 
@@ -327,11 +340,13 @@ pub(crate) fn parse_antigravity(raw: &str) -> HeadlessResult {
         cost_usd: None,
     };
     let mut result: Option<(RunStatus, String, Usage)> = None;
+    let mut model = None;
     for event in raw
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
     {
         match event["event"].as_str() {
+            Some("init") => model = event["init"]["model"].as_str().map(str::to_owned),
             Some("step_update") => {
                 let step = &event["step_update"];
                 if step["step_type"] == "agent_response" {
@@ -389,6 +404,7 @@ pub(crate) fn parse_antigravity(raw: &str) -> HeadlessResult {
         transcript: raw.to_owned(),
         usage,
         session_id: None,
+        model,
     }
 }
 
