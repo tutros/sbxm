@@ -8,8 +8,21 @@ use std::path::{Path, PathBuf};
 
 use super::{
     CopyOut, CreateSpec, CustomSecret, CustomSecretSpec, ExecOutput, ExecSpec, KitValidation,
-    Location, NetworkRule, SandboxBackend, SandboxDetail, SandboxInfo, ScopedSecret, TemplateImage,
+    Location, NetworkRule, SandboxBackend, SandboxDetail, SandboxInfo, SbxLog, ScopedSecret,
+    TemplateImage,
 };
+
+/// Prints `lines` for the sandbox `name` as `sbx` would: on the screen, and in `log` if there is
+/// one.
+fn print_output(lines: &[String], name: &str, log: SbxLog) {
+    for line in lines {
+        let line = line.replace("{name}", name);
+        crate::screen::eprintln(&line);
+        if let Some(log) = log {
+            log(&line);
+        }
+    }
+}
 
 /// Holds every `exec` of a [`FakeBackend`] until [`ExecGate::open`], so a test
 /// can look at what exists while runs are "in progress".
@@ -81,6 +94,10 @@ pub struct FakeBackend {
     creates: Mutex<Vec<CreateSpec>>,
     stops: Mutex<Vec<String>>,
     removes: Mutex<Vec<String>>,
+    /// The lines each `create` and `remove` prints, `{name}` standing for the sandbox's name
+    /// (issue 114), before it fails if it does.
+    create_output: Vec<String>,
+    remove_output: Vec<String>,
     fail_remove: bool,
     /// What the next calls of `remove` fail with, one each, in order; `remove` succeeds once
     /// they are used up.
@@ -631,6 +648,23 @@ impl FakeBackend {
         }
     }
 
+    /// Makes each `create` print `lines`, `{name}` standing for the sandbox's name, as `sbx`'s
+    /// pull and install lines (issue 114).
+    pub fn with_create_output(self, lines: &[&str]) -> Self {
+        Self {
+            create_output: lines.iter().map(|l| (*l).to_owned()).collect(),
+            ..self
+        }
+    }
+
+    /// Makes each `remove` print `lines`, as [`FakeBackend::with_create_output`].
+    pub fn with_remove_output(self, lines: &[&str]) -> Self {
+        Self {
+            remove_output: lines.iter().map(|l| (*l).to_owned()).collect(),
+            ..self
+        }
+    }
+
     /// Makes the next `remove` calls fail with these errors, one each, in order, and the ones
     /// after them succeed.
     pub fn with_remove_errors(self, errors: &[&str]) -> Self {
@@ -871,12 +905,13 @@ impl SandboxBackend for FakeBackend {
         }
     }
 
-    fn create(&self, spec: &CreateSpec) -> Result<()> {
+    fn create(&self, spec: &CreateSpec, log: SbxLog) -> Result<()> {
         if let Some(hook) = &self.create_hook {
             (hook.0)(spec);
         }
         self.creates.lock().unwrap().push(spec.clone());
         self.record("create", &spec.name);
+        print_output(&self.create_output, &spec.name, log);
         // A new sandbox of the same name starts from the list again.
         self.cloud_policies.lock().unwrap().remove(&spec.name);
         if self.fail_create
@@ -993,9 +1028,10 @@ impl SandboxBackend for FakeBackend {
         Ok(())
     }
 
-    fn remove(&self, name: &str) -> Result<()> {
+    fn remove(&self, name: &str, log: SbxLog) -> Result<()> {
         self.removes.lock().unwrap().push(name.to_owned());
         self.record("rm", name);
+        print_output(&self.remove_output, name, log);
         if self.fail_remove {
             bail!("fake remove failure");
         }

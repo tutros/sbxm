@@ -1742,7 +1742,7 @@ fn prepare_source_with(
             // removes its sandbox even if `create` failed, as before this milestone, and keeps
             // no record of it.
             if local {
-                let _ = ctx.backend.remove(&sandbox);
+                let _ = ctx.backend.remove(&sandbox, None);
                 let _ = fs::remove_dir_all(&workspace);
                 let _ = fs::remove_dir_all(&meta);
                 return Err(e);
@@ -2581,18 +2581,21 @@ impl SandboxPlan {
         workspace: &Path,
     ) -> Result<()> {
         backend
-            .create(&CreateSpec {
-                name: sandbox.to_owned(),
-                agent: harness.agent_arg().into(),
-                workspace: Some(workspace.to_path_buf()),
-                cpus: self.kit_set.resources.cpus,
-                memory: self.kit_set.resources.memory.clone(),
-                skills: self.kits.skills_store,
-                kits: self.kits.dirs.clone(),
-                template: self.template.clone(),
-                deny_network: self.deny_network.clone().unwrap_or_default(),
-                ttl: None,
-            })
+            .create(
+                &CreateSpec {
+                    name: sandbox.to_owned(),
+                    agent: harness.agent_arg().into(),
+                    workspace: Some(workspace.to_path_buf()),
+                    cpus: self.kit_set.resources.cpus,
+                    memory: self.kit_set.resources.memory.clone(),
+                    skills: self.kits.skills_store,
+                    kits: self.kits.dirs.clone(),
+                    template: self.template.clone(),
+                    deny_network: self.deny_network.clone().unwrap_or_default(),
+                    ttl: None,
+                },
+                None,
+            )
             .with_context(|| format!("cannot create sandbox {sandbox}"))?;
         template::check_kit_rules(
             &self.profile_name,
@@ -2662,18 +2665,21 @@ impl SandboxPlan {
         ttl: Duration,
     ) -> Result<()> {
         backend
-            .create(&CreateSpec {
-                name: sandbox.to_owned(),
-                agent: harness.agent_arg().into(),
-                workspace: None,
-                cpus: self.kit_set.resources.cpus,
-                memory: self.kit_set.resources.memory.clone(),
-                skills: self.kits.skills_store,
-                kits: self.kits.dirs.clone(),
-                template: None,
-                deny_network: Vec::new(),
-                ttl: Some(ttl),
-            })
+            .create(
+                &CreateSpec {
+                    name: sandbox.to_owned(),
+                    agent: harness.agent_arg().into(),
+                    workspace: None,
+                    cpus: self.kit_set.resources.cpus,
+                    memory: self.kit_set.resources.memory.clone(),
+                    skills: self.kits.skills_store,
+                    kits: self.kits.dirs.clone(),
+                    template: None,
+                    deny_network: Vec::new(),
+                    ttl: Some(ttl),
+                },
+                None,
+            )
             .with_context(|| format!("cannot create sandbox {sandbox}"))
     }
 
@@ -3027,7 +3033,7 @@ pub(super) fn ensure_worker_sandbox(
         (&mut prepared.warnings, &mut prepared.events),
     )?;
     if replace {
-        let _ = env.backend.remove(&sandbox);
+        let _ = env.backend.remove(&sandbox, None);
     }
     adopt_rebuild(prepared, rebuild, &plan);
     // One that vanished or was replaced is gone: its open entry, if any, is closed.
@@ -5309,7 +5315,7 @@ fn remove_reviewer(env: &TaskEnv, prepared: &mut Prepared, sandbox: &str, clone:
         release_cloud_sandbox(env, prepared, sandbox);
         return;
     }
-    let _ = env.backend.remove(sandbox);
+    let _ = env.backend.remove(sandbox, None);
     if let Err(e) = remove_with_retries(clone) {
         prepared
             .record
@@ -5417,7 +5423,7 @@ fn open_review_workspace(
 
     // A clone left by a killed run (and its sandbox) goes first.
     if clone.exists() {
-        let _ = env.backend.remove(sandbox);
+        let _ = env.backend.remove(sandbox, None);
         remove_with_retries(clone)
             .with_context(|| format!("cannot clear {}, left by an earlier run", clone.display()))?;
     }

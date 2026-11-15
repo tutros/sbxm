@@ -11,8 +11,8 @@ use std::path::Path;
 
 use super::{
     CopyOut, CreateSpec, CustomSecret, CustomSecretSpec, ExecOutput, ExecSpec, KitValidation,
-    Location, NetworkRule, SandboxBackend, SandboxDetail, SandboxInfo, ScopedSecret, SecretSource,
-    Stdin, TemplateImage, check_template_tag,
+    Location, NetworkRule, SandboxBackend, SandboxDetail, SandboxInfo, SbxLog, ScopedSecret,
+    SecretSource, Stdin, TemplateImage, check_template_tag,
 };
 
 /// Shells out to the `sbx` CLI on PATH, for sandboxes on this machine or, in the cloud instance,
@@ -94,43 +94,6 @@ impl SbxBackend {
         Ok(())
     }
 
-    /// Runs `sbx create` with stdin and stdout attached, like [`Self::run_sbx`], and its stderr
-    /// both shown as it comes and kept: a failure's error carries what `sbx` said (issue 556).
-    fn create_keeping_stderr(&self, args: Vec<OsString>, sandbox: &str) -> Result<()> {
-        let mut child = self
-            .command()
-            .args(&args)
-            .stderr(Stdio::piped())
-            .spawn()
-            .context(SBX_MISSING)?;
-        let mut kept = StderrTail::default();
-        if let Some(mut pipe) = child.stderr.take() {
-            // Through the screen: a loop child's goes to its log, masked (issue 667).
-            let mut screen = crate::screen::stderr();
-            let mut chunk = [0u8; 4096];
-            loop {
-                match pipe.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let _ = screen.write_all(&chunk[..n]);
-                        let _ = screen.flush();
-                        kept.push(&chunk[..n]);
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(_) => break,
-                }
-            }
-        }
-        let status = child.wait().context(SBX_MISSING)?;
-        if !status.success() {
-            bail!(
-                "{}",
-                create_failed(sandbox, &status.to_string(), &kept.kept)
-            );
-        }
-        Ok(())
-    }
-
     /// Refuses a call whose command line or output only the cloud has.
     fn cloud_only(&self, what: &str) -> Result<()> {
         if self.location == Location::Local {
@@ -161,6 +124,91 @@ impl SbxBackend {
     }
 }
 
+/// Runs `command` with its stdout and stderr piped and copied by [`copy_lines`] to the screen and
+/// `log` as they come (issue 114); its stdin is left as the caller set it. Returns how it exited
+/// and the end of its stderr, for the error.
+fn run_copying(
+    mut command: Command,
+    show_err: bool,
+    log: SbxLog,
+) -> std::io::Result<(std::process::ExitStatus, StderrTail)> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut kept = StderrTail::default();
+    if let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) {
+        // Through the screen: a loop child's goes to its log, masked (issue 667).
+        let (mut out, mut err) = (crate::screen::stdout(), crate::screen::stderr());
+        copy_lines(
+            stdout,
+            stderr,
+            show_err,
+            log,
+            (&mut out, &mut err),
+            &mut kept,
+        );
+    }
+    let status = child.wait()?;
+    Ok((status, kept))
+}
+
+/// Copies an `sbx` child's `stdout` and `stderr` line by line, in the order the lines come
+/// (issue 114): a stdout line to `screens.0` and `log`; a stderr line into `kept`, for the error,
+/// and, with `show_err`, to `screens.1` and `log` (nothing goes to the log that the screen did not
+/// show). A last line with no newline is still copied.
+fn copy_lines(
+    stdout: impl Read + Send,
+    stderr: impl Read + Send,
+    show_err: bool,
+    log: SbxLog,
+    screens: (&mut dyn Write, &mut dyn Write),
+    kept: &mut StderrTail,
+) {
+    let (screen_out, screen_err) = screens;
+    let (sent, lines) = std::sync::mpsc::channel::<(bool, Vec<u8>)>();
+    std::thread::scope(|scope| {
+        let pipes: [(bool, Box<dyn Read + Send>); 2] =
+            [(false, Box::new(stdout)), (true, Box::new(stderr))];
+        for (is_err, pipe) in pipes {
+            let sent = sent.clone();
+            scope.spawn(move || {
+                let mut pipe = std::io::BufReader::new(pipe);
+                loop {
+                    let mut line = Vec::new();
+                    match std::io::BufRead::read_until(&mut pipe, b'\n', &mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            if sent.send((is_err, line)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+        // Both readers' senders gone ends the lines: both pipes are closed.
+        drop(sent);
+        for (is_err, line) in lines {
+            if is_err {
+                kept.push(&line);
+                if !show_err {
+                    continue;
+                }
+            }
+            let screen: &mut dyn Write = if is_err { screen_err } else { screen_out };
+            let _ = screen.write_all(&line);
+            let _ = screen.flush();
+            if let Some(log) = log {
+                let text = String::from_utf8_lossy(&line);
+                log(text.trim_end_matches('\n').trim_end_matches('\r'));
+            }
+        }
+    });
+}
+
 /// Runs `command` with stdin closed and its output captured, whatever stdin it was set up with:
 /// `sbx` can't wait on a question (or a sign-in flow) the user never sees.
 fn unprompted_output(mut command: Command) -> std::io::Result<std::process::Output> {
@@ -172,8 +220,19 @@ impl SandboxBackend for SbxBackend {
         Self::at(location)
     }
 
-    fn create(&self, spec: &CreateSpec) -> Result<()> {
-        self.create_keeping_stderr(create_args(spec, self.location)?, &spec.name)
+    /// `sbx create`, with stdin attached and its output copied to the screen and `log` (issue
+    /// 114); a failure's error carries the end of what `sbx` said on stderr (issue 556).
+    fn create(&self, spec: &CreateSpec, log: SbxLog) -> Result<()> {
+        let mut command = self.command();
+        command.args(create_args(spec, self.location)?);
+        let (status, kept) = run_copying(command, true, log).context(SBX_MISSING)?;
+        if !status.success() {
+            bail!(
+                "{}",
+                create_failed(&spec.name, &status.to_string(), &kept.kept)
+            );
+        }
+        Ok(())
     }
 
     fn copy_in(&self, sandbox: &str, host: &Path, path: &str) -> Result<()> {
@@ -207,21 +266,16 @@ impl SandboxBackend for SbxBackend {
         self.run_sbx(stop_args(name), name)
     }
 
-    fn remove(&self, name: &str) -> Result<()> {
+    fn remove(&self, name: &str, log: SbxLog) -> Result<()> {
         // sbx's own "sandbox not found" is held back: callers check `list` and treat a sandbox
         // that is already gone as removed, so printing it would be alarming noise.
-        let output = self
-            .command()
-            .args(remove_args(name))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::inherit())
-            .output()
-            .context(SBX_MISSING)?;
-        if !output.status.success() {
+        let mut command = self.command();
+        command.args(remove_args(name)).stdin(Stdio::null());
+        let (status, kept) = run_copying(command, false, log).context(SBX_MISSING)?;
+        if !status.success() {
             bail!(
-                "`sbx rm` failed for sandbox {name} ({}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                "`sbx rm` failed for sandbox {name} ({status}): {}",
+                String::from_utf8_lossy(&kept.kept).trim()
             );
         }
         Ok(())
@@ -2117,6 +2171,121 @@ mod cloud_tests {
             b"error: sbxcloud: temporarily unavailable"
         ));
         assert!(!secret_gone(b"", b""));
+    }
+}
+
+// Issue 114: the output of `sbx create` and `sbx rm` is copied line by line to the screen and to
+// the calling task's own log.
+#[cfg(test)]
+mod output_log_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// What [`copy_lines`] printed on each screen stream, logged, and kept of stderr.
+    struct Copied {
+        out: String,
+        err: String,
+        logged: Option<Vec<String>>,
+        kept: String,
+    }
+
+    fn copy(stdout: &str, stderr: &str, show_err: bool, with_log: bool) -> Copied {
+        let logged = RefCell::new(Vec::new());
+        let log = |line: &str| logged.borrow_mut().push(line.to_owned());
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut kept = StderrTail::default();
+        copy_lines(
+            stdout.as_bytes(),
+            stderr.as_bytes(),
+            show_err,
+            if with_log { Some(&log) } else { None },
+            (&mut out, &mut err),
+            &mut kept,
+        );
+        Copied {
+            out: String::from_utf8(out).unwrap(),
+            err: String::from_utf8(err).unwrap(),
+            logged: with_log.then(|| logged.into_inner()),
+            kept: String::from_utf8(kept.kept).unwrap(),
+        }
+    }
+
+    /// Boundary cases 1 and 2: every line on the screen and in the log, in order.
+    #[test]
+    fn every_stdout_line_reaches_the_screen_and_the_log_in_order() {
+        let pull = "RESOLVE SETUP\nPREPARE IMAGE\nCONFIGURE AGENT\n";
+
+        let copied = copy(pull, "", true, true);
+
+        assert_eq!(copied.out, pull);
+        assert_eq!(
+            copied.logged.unwrap(),
+            ["RESOLVE SETUP", "PREPARE IMAGE", "CONFIGURE AGENT"]
+        );
+    }
+
+    #[test]
+    fn a_shown_stderr_line_reaches_the_screen_the_log_and_the_kept_tail() {
+        let copied = copy("", "pulling image\r\n", true, true);
+
+        assert_eq!(copied.err, "pulling image\r\n");
+        assert_eq!(copied.logged.unwrap(), ["pulling image"]);
+        assert_eq!(copied.kept, "pulling image\r\n");
+    }
+
+    /// `sbx rm`'s stderr is held back from the screen, so from the log too; its error keeps it.
+    #[test]
+    fn a_held_back_stderr_is_kept_for_the_error_and_neither_shown_nor_logged() {
+        let copied = copy("removed\n", "sandbox 'x' not found\n", false, true);
+
+        assert_eq!(copied.err, "");
+        assert_eq!(copied.logged.unwrap(), ["removed"]);
+        assert_eq!(copied.kept, "sandbox 'x' not found\n");
+    }
+
+    /// Boundary case 6: a last line with no newline is still shown and logged.
+    #[test]
+    fn a_last_line_with_no_newline_is_still_logged() {
+        let copied = copy("one\ntwo", "three", true, true);
+
+        assert_eq!(copied.out, "one\ntwo");
+        assert_eq!(copied.err, "three");
+        let mut logged = copied.logged.unwrap();
+        logged.sort();
+        assert_eq!(logged, ["one", "three", "two"]);
+    }
+
+    /// Boundary case 4: with no log, the lines are on the screen only.
+    #[test]
+    fn with_no_log_the_lines_are_on_the_screen_only() {
+        let copied = copy("a\n", "b\n", true, false);
+
+        assert_eq!(copied.out, "a\n");
+        assert_eq!(copied.err, "b\n");
+        assert!(copied.logged.is_none());
+    }
+}
+
+// Boundary case 5 of issue 114: a failing child's lines are copied before its status comes back.
+#[cfg(all(test, target_os = "linux"))]
+mod output_log_failure_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn the_lines_before_a_failure_are_logged_and_the_status_is_returned() {
+        let logged = RefCell::new(Vec::new());
+        let log = |line: &str| logged.borrow_mut().push(line.to_owned());
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo PREPARE IMAGE; echo boom >&2; exit 3"]);
+
+        let (status, kept) = run_copying(command, true, Some(&log)).unwrap();
+
+        assert_eq!(status.code(), Some(3));
+        let mut logged = logged.into_inner();
+        logged.sort();
+        assert_eq!(logged, ["PREPARE IMAGE", "boom"]);
+        assert_eq!(String::from_utf8(kept.kept).unwrap(), "boom\n");
     }
 }
 

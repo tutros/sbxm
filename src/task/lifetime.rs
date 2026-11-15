@@ -112,7 +112,7 @@ pub fn remove_sandbox(
 ) -> Removal {
     let mut waits = REMOVAL_WAITS.iter();
     loop {
-        let error = match backend.remove(name) {
+        let error = match backend.remove(name, None) {
             Ok(()) => return Removal::Removed,
             Err(e) => format!("{e:#}"),
         };

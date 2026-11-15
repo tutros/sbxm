@@ -587,7 +587,7 @@ pub fn check_kit_rules(
     // Every refusal removes the sandbox first and keeps its own reason even when that fails
     // (review PR 269 M-2, decision 232).
     let refuse = |reason: String, fix: &str| -> anyhow::Error {
-        match backend.remove(sandbox) {
+        match backend.remove(sandbox, None) {
             Ok(()) => anyhow::anyhow!("{reason}; sbxm removed the sandbox. {fix}"),
             Err(err) => anyhow::anyhow!(
                 "{reason}; removing it failed; remove it with `sbx rm {sandbox}` ({err:#}). {fix}"

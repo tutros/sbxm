@@ -355,7 +355,7 @@ impl SandboxBackend for Watched {
             Location::Local => &SbxBackend::LOCAL,
         }
     }
-    fn create(&self, spec: &CreateSpec) -> Result<()> {
+    fn create(&self, spec: &CreateSpec, log: sbxm::backend::SbxLog) -> Result<()> {
         self.note(&spec.name);
         self.creates
             .lock()
@@ -364,7 +364,7 @@ impl SandboxBackend for Watched {
         if spec.name == self.worker {
             CLOUD.set_scoped_secret(&spec.name, &self.secret)?;
         }
-        CLOUD.create(spec)
+        CLOUD.create(spec, log)
     }
     fn copy_in(&self, sandbox: &str, host: &Path, path: &str) -> Result<()> {
         CLOUD.copy_in(sandbox, host, path)
@@ -381,8 +381,8 @@ impl SandboxBackend for Watched {
     fn stop(&self, name: &str) -> Result<()> {
         CLOUD.stop(name)
     }
-    fn remove(&self, name: &str) -> Result<()> {
-        let result = CLOUD.remove(name);
+    fn remove(&self, name: &str, log: sbxm::backend::SbxLog) -> Result<()> {
+        let result = CLOUD.remove(name, log);
         if let Err(e) = &result {
             let error = format!("{e:#}");
             println!("removal of {name}: {error}");

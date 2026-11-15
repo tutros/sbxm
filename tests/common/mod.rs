@@ -346,8 +346,8 @@ impl SandboxBackend for SecretCheckBlocksRestore<'_> {
         self
     }
 
-    fn create(&self, spec: &CreateSpec) -> anyhow::Result<()> {
-        self.inner.create(spec)
+    fn create(&self, spec: &CreateSpec, log: sbxm::backend::SbxLog) -> anyhow::Result<()> {
+        self.inner.create(spec, log)
     }
 
     fn copy_in(&self, sandbox: &str, host: &Path, path: &str) -> anyhow::Result<()> {
@@ -371,8 +371,8 @@ impl SandboxBackend for SecretCheckBlocksRestore<'_> {
         self.inner.stop(name)
     }
 
-    fn remove(&self, name: &str) -> anyhow::Result<()> {
-        self.inner.remove(name)
+    fn remove(&self, name: &str, log: sbxm::backend::SbxLog) -> anyhow::Result<()> {
+        self.inner.remove(name, log)
     }
 
     fn attach(&self, name: &str) -> anyhow::Result<()> {
