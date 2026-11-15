@@ -58,6 +58,11 @@ fn task_writers(
     sbxm::backend::set_trailer_sink(move |note| {
         let _ = writeln!(notes, "warning: {note}");
     });
+    // So are the retries of a `gh` read after a network error (issue 639).
+    let mut retries = Local::new(Tee::new(std::io::stderr(), Arc::clone(&log)));
+    sbxm::github::gh::set_warning_sink(move |line| {
+        let _ = writeln!(retries, "warning: {line}");
+    });
     Ok((
         Local::new(Tee::new(std::io::stdout(), Arc::clone(&log))),
         Local::new(Tee::new(std::io::stderr(), log)),

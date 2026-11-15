@@ -45,6 +45,7 @@ mod github_gh;
 mod github_issue_comment;
 mod github_issues_labeled;
 mod github_pr_files;
+mod github_retry;
 mod github_trial;
 mod github_window;
 mod harness_antigravity;

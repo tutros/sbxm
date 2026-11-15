@@ -34,7 +34,9 @@ fn backend(out: &str, failure: Option<&'static str>) -> (GhBackend, &'static Scr
         out: out.to_owned(),
         failure,
     }));
-    (GhBackend::with_runner(Box::new(script)), script)
+    // No waits between the tries of a read after a network error (issue 639).
+    let gh = GhBackend::with_runner(Box::new(script)).retrying_with(|_| {}, |_| {});
+    (gh, script)
 }
 
 fn args(list: &[&str]) -> Vec<String> {

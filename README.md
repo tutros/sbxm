@@ -701,6 +701,10 @@ One-time setup:
   `.sbxm-task/`) at `high` here.
 - `gh auth status` must show you logged in, and git must be able to clone and push without a prompt: run
   `gh auth setup-git` once. `sbxm` never lets a credential prompt hang; it fails and names that command.
+- A `gh` call that only reads (issue and PR lists and views, checks, statuses) and fails with a network error (a TLS
+  handshake timeout, a connection reset, an HTTP 502, 503 or 504...) is tried again up to 3 times, after 5, 15 and
+  45 s, each retry a warning line; then it fails, saying it was a network error (issue 639). An auth error fails at
+  once, and a write (a push, a PR, a comment, a label, a status, a merge) is never tried again.
 
 ```powershell
 sbxm task start --workers 2     # pick up to 2 issues, one sandbox each, wait for the workers
