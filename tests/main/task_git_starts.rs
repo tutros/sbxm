@@ -233,14 +233,20 @@ fn revs_resolve_together_and_an_option_like_rev_is_only_a_name() {
     assert_eq!(found, vec![Some(main.clone()), Some(main), None, None]);
 }
 
-/// Runs `work` on its own thread and fails the test when it hasn't finished in `secs`.
+/// Runs `work` on its own thread and fails the test when it hasn't finished in `secs`: a bound on a
+/// hang only, so generous enough for a loaded machine (issue 662).
 fn within<T: Send + 'static>(secs: u64, work: impl FnOnce() -> T + Send + 'static) -> T {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(work());
     });
-    rx.recv_timeout(std::time::Duration::from_secs(secs))
-        .expect("timed out: the batch call is blocked on a full pipe")
+    match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+        Ok(found) => found,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("not finished in {secs} s: the batch call is likely blocked on a full pipe")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("the work panicked"),
+    }
 }
 
 #[test]
@@ -249,7 +255,7 @@ fn a_batch_larger_than_both_pipes_resolves_every_answer_in_order() {
     let main = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
     let repo_git = f.repo_git.clone();
 
-    let found = within(20, move || {
+    let found = within(60, move || {
         let revs = vec!["refs/heads/main"; 20_000];
         repo::resolve_commits(&repo_git, &revs).unwrap()
     });
