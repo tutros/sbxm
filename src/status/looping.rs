@@ -11,7 +11,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::config::Placement;
-use crate::github::GitHubBackend;
+use crate::github::{GitHubBackend, PrState};
 use crate::run::results::{format_timestamp, parse_timestamp};
 use crate::status::tasks::truncate;
 use crate::task::finish::check_own_folder;
@@ -21,6 +21,7 @@ use crate::task::loop_pause;
 use crate::task::merged;
 use crate::task::queue::{self, LOOP_HOOK, LockFile, Outcome, Progress};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status};
+use crate::task::risk::Level;
 
 /// The longest queue shown on a terminal; the rest is "… N more". Output that isn't a terminal
 /// shows every issue.
@@ -482,6 +483,48 @@ pub struct Snapshot {
     /// gives after `skip: `, or `unknown (<first line of the error>)` when the check fails. An
     /// issue it would take has no entry.
     pub blocked: std::collections::BTreeMap<u32, String>,
+    /// Every open PR a task record names (issue 671), by number, whoever finished it.
+    pub open_prs: Result<Vec<OpenPr>, String>,
+}
+
+/// An open PR a task record names (issue 671): what the user needs to know to merge it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenPr {
+    pub number: u32,
+    /// Its task's title (issue 246), or empty.
+    pub title: String,
+    /// The risk its task's last review recorded, the path-rule floor included (decision 176);
+    /// unknown for a task with no review.
+    pub risk: Level,
+    pub draft: bool,
+    /// Whether GitHub's auto-merge is armed on it: one not armed waits on the user's merge.
+    pub armed: bool,
+}
+
+/// Each PR the task records under `base` name for `repo`, with its last review's risk, read as
+/// [`queue::loop_prs`] reads the records: a folder that isn't sbxm's own or a record that can't be
+/// read is skipped. By PR number, each once.
+fn task_prs(base: &Path, repo: &str) -> anyhow::Result<Vec<(u32, Level)>> {
+    let mut found: Vec<(u32, Level)> = Vec::new();
+    for dir in record::task_folders(base)? {
+        if check_own_folder(base, &dir).is_err() {
+            continue;
+        }
+        let Ok(rec) = record::read(&dir.join("task.json")) else {
+            continue;
+        };
+        let Some(number) = rec.pr.as_deref().and_then(queue::pr_number) else {
+            continue;
+        };
+        if rec.repo == repo && !found.iter().any(|(n, _)| *n == number) {
+            found.push((
+                number,
+                rec.review.as_ref().map_or(Level::Unknown, |r| r.risk),
+            ));
+        }
+    }
+    found.sort_unstable();
+    Ok(found)
 }
 
 fn first_line(error: &anyhow::Error) -> String {
@@ -517,6 +560,7 @@ pub fn fetch_checking(
                 pr_titles: Default::default(),
                 issue_titles: Default::default(),
                 blocked: Default::default(),
+                open_prs: Err(why.clone()),
             };
         }
     };
@@ -560,11 +604,34 @@ pub fn fetch_checking(
             })
             .collect()
     });
+    // Each PR's state is asked once: the loop's PRs are task PRs too.
+    let mut states = std::collections::BTreeMap::new();
+    let open_prs = (|| -> anyhow::Result<Vec<OpenPr>> {
+        let mut open = Vec::new();
+        for (number, risk) in task_prs(base, repo)? {
+            let state = github.pr_merge_state(repo, number)?;
+            states.insert(number, state);
+            if state.state == PrState::Open {
+                open.push(OpenPr {
+                    number,
+                    title: crate::title::pr_title(base, repo, number).unwrap_or_default(),
+                    risk,
+                    draft: state.draft,
+                    armed: state.auto_merge,
+                });
+            }
+        }
+        Ok(open)
+    })();
     let awaiting = (|| -> anyhow::Result<Vec<u32>> {
         let mut awaiting = Vec::new();
         for pr in queue::loop_prs(base, repo)? {
             let Some(number) = pr.number else { continue };
-            if queue::awaits_user(github.pr_merge_state(repo, number)?) {
+            let state = match states.get(&number) {
+                Some(state) => *state,
+                None => github.pr_merge_state(repo, number)?,
+            };
+            if queue::awaits_user(state) {
                 awaiting.push(number);
             }
         }
@@ -583,6 +650,7 @@ pub fn fetch_checking(
         pr_titles,
         issue_titles,
         blocked,
+        open_prs: open_prs.map_err(|e| first_line(&e)),
     }
 }
 
@@ -864,6 +932,7 @@ pub fn render(view: &View, width: Option<usize>) -> String {
             }
             Err(why) => format!("  awaiting you: unreadable ({why})"),
         });
+        open_pr_lines(&snapshot.open_prs, &mut lines);
         // A loop over an `--issue` list doesn't take the labeled queue (issue 477), but the same
         // read gives its pending issues' titles, so its failure is still said (review M-1).
         let listed = view.work.as_ref().is_some_and(|w| w.listed.is_some());
@@ -995,6 +1064,31 @@ fn blocked(number: u32, snapshot: Option<&Snapshot>) -> String {
     snapshot
         .and_then(|s| s.blocked.get(&number))
         .map_or_else(String::new, |why| format!(" — blocked: {why}"))
+}
+
+/// The open task PRs (issue 671), each on its own line with its risk, whether it is a draft and
+/// whether auto-merge is armed; nothing when there is none, one line when GitHub can't say.
+fn open_pr_lines(open: &Result<Vec<OpenPr>, String>, lines: &mut Vec<String>) {
+    match open {
+        Err(why) => lines.push(format!("  open task PRs: unreadable ({why})")),
+        Ok(open) if open.is_empty() => {}
+        Ok(open) => {
+            lines.push(format!("  open task PRs: {}", open.len()));
+            for pr in open {
+                let draft = if pr.draft { ", draft" } else { "" };
+                let merge = if pr.armed {
+                    "auto-merge armed"
+                } else {
+                    "not armed: awaits your merge"
+                };
+                lines.push(format!(
+                    "    {} — {} risk{draft}, {merge}",
+                    crate::title::titled(&format!("#{}", pr.number), &pr.title),
+                    pr.risk.word()
+                ));
+            }
+        }
+    }
 }
 
 fn plural(n: usize, noun: &str) -> String {

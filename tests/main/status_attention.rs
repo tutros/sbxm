@@ -10,12 +10,17 @@ use std::path::Path;
 
 use common::Env as TestEnv;
 use sbxm::backend::Location;
+use sbxm::github::fake::FakeGitHub;
+use sbxm::github::{PrInfo, PrState};
+use sbxm::status::looping::{self, Jobs, Lock, View};
 use sbxm::status::tasks::{self, Parked, TaskRow, TaskTime};
+use sbxm::task::loop_pause;
 use sbxm::task::queue::LOOP_HOOK;
 use sbxm::task::record::{
     self, Kind, NewTask, Process, ProcessProbe, Record, ReviewResult, SandboxLife, SandboxRole,
     Stage, Status,
 };
+use sbxm::task::risk::Level;
 
 const REPO: &str = "o/r";
 const T0: u64 = 1_790_000_000;
@@ -354,4 +359,123 @@ fn a_parked_row_names_the_checkout_its_command_runs_in() {
         text.contains("issue-5 is parked; next: `sbxm task finish --issue 5` (in /work/repo)\n"),
         "{text}"
     );
+}
+
+// ---- 3. every open task PR, with its risk and auto-merge ---------------------------------------
+
+fn review(risk: Level) -> ReviewResult {
+    ReviewResult {
+        round: 1,
+        commit: None,
+        posted: None,
+        must_fix: 0,
+        full: true,
+        repeat: false,
+        risk,
+        risk_reasons: vec![],
+        not_run: None,
+    }
+}
+
+/// A finished task whose PR is `100 + number`, with the review's `risk` when given.
+fn with_pr(number: u32, risk: Option<Level>, marked: bool) -> Record {
+    let mut rec = task(number);
+    rec.stage = Stage::Finished;
+    rec.status = Status::Ok;
+    rec.pr = Some(format!("https://github.com/{REPO}/pull/{}", 100 + number));
+    rec.review = risk.map(review);
+    if marked {
+        rec.hooks = serde_json::json!({ LOOP_HOOK: true });
+    }
+    rec
+}
+
+fn pr(number: u32, state: PrState) -> PrInfo {
+    PrInfo {
+        number,
+        head_ref: format!("b{number}"),
+        head_oid: "abc".into(),
+        is_cross_repository: false,
+        head_repo: String::new(),
+        state,
+        title: "t".into(),
+        body: String::new(),
+        closing_issues: Vec::new(),
+        base_moved: false,
+    }
+}
+
+/// The Loop section with no loop, over GitHub's answers.
+fn section(base: &Path, gh: &FakeGitHub) -> String {
+    let view = View {
+        lock: Lock::Absent,
+        work: None,
+        snapshot: Some(looping::fetch(gh, &Ok(REPO.into()), base)),
+        pause: loop_pause::State::None,
+        jobs: Jobs::default(),
+        cloud_first: false,
+    };
+    looping::render(&view, None)
+}
+
+#[test]
+fn every_open_task_pr_shows_its_risk_and_whether_auto_merge_is_armed() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    save(&b, &with_pr(2, Some(Level::Medium), true));
+    save(&b, &with_pr(3, Some(Level::Low), true));
+    // Finished by hand, before its review recorded a risk.
+    save(&b, &with_pr(4, None, false));
+    save(&b, &with_pr(5, Some(Level::High), true));
+    let gh = FakeGitHub::default()
+        .with_pr(pr(102, PrState::Open))
+        .with_pr(pr(103, PrState::Open))
+        .with_auto_merge(103)
+        .with_pr(pr(104, PrState::Open))
+        .with_draft(104)
+        .with_pr(pr(105, PrState::Merged));
+
+    let text = section(&b, &gh);
+
+    assert!(
+        text.contains(
+            "  awaiting you: 1 of 5 PRs (#102: title 2)\n  open task PRs: 3\n    #102: title 2 \
+             — medium risk, not armed: awaits your merge\n    #103: title 3 — low risk, \
+             auto-merge armed\n    #104: title 4 — unknown risk, draft, not armed: awaits your \
+             merge\n"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("#105"), "{text}");
+}
+
+#[test]
+fn no_open_task_pr_leaves_the_list_out() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    save(&b, &with_pr(5, Some(Level::High), true));
+    let gh = FakeGitHub::default().with_pr(pr(105, PrState::Merged));
+
+    let text = section(&b, &gh);
+
+    assert!(text.contains("  awaiting you: 0 of 5 PRs\n"), "{text}");
+    assert!(!text.contains("open task PRs"), "{text}");
+}
+
+#[test]
+fn a_github_failure_is_one_line_and_the_rest_still_shows() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    save(&b, &with_pr(2, Some(Level::Medium), true));
+    let gh = FakeGitHub::default().failing("offline");
+
+    let text = section(&b, &gh);
+
+    assert!(
+        text.contains("  open task PRs: unreadable (offline)\n"),
+        "{text}"
+    );
+    assert_eq!(text.matches("open task PRs").count(), 1, "{text}");
+    assert!(text.contains("  queue: unreadable (offline)\n"), "{text}");
+    assert!(text.contains("  jobs: none\n"), "{text}");
 }

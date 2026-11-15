@@ -289,6 +289,10 @@ fn a_running_loop_shows_its_task_its_stage_the_tasks_done_and_the_prs_awaiting()
         .with_auto_merge(103)
         .with_pr(PrInfo {
             state: PrState::Merged,
+            ..pr(104)
+        })
+        .with_pr(PrInfo {
+            state: PrState::Merged,
             ..pr(105)
         });
     save(&b, &finished(3, T0 - 20, true));
@@ -303,7 +307,8 @@ fn a_running_loop_shows_its_task_its_stage_the_tasks_done_and_the_prs_awaiting()
         format!(
             "Loop: running (process 1, started {})\n  task: issue-7 (title 7) at reviewing, local\n  done: 2 \
              (issue-2 (title 2), issue-3 (title 3))\n  jobs: none\n  awaiting you: 1 of 5 PRs (#102: title 2)\n  \
-             queue: empty\n",
+             open task PRs: 2\n    #102: title 2 — unknown risk, not armed: awaits your merge\n    \
+             #103: title 3 — unknown risk, auto-merge armed\n  queue: empty\n",
             format_timestamp(LOOP_START)
         )
     );
@@ -772,6 +777,7 @@ fn the_cache_reuses_a_snapshot_under_a_minute_old_and_refetches_at_a_minute() {
             pr_titles: Default::default(),
             issue_titles: Default::default(),
             blocked: Default::default(),
+            open_prs: Ok(Vec::new()),
         }
     };
 
@@ -863,6 +869,7 @@ fn render_is_pure_over_its_view() {
             pr_titles: Default::default(),
             issue_titles: Default::default(),
             blocked: Default::default(),
+            open_prs: Ok(Vec::new()),
         }),
         pause: sbxm::task::loop_pause::State::None,
         jobs: Default::default(),

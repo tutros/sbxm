@@ -582,6 +582,7 @@ fn the_loop_section_titles_its_task_and_the_prs_awaiting_but_not_one_whose_recor
             pr_titles: [(9, "Earlier".to_owned())].into_iter().collect(),
             issue_titles: Default::default(),
             blocked: Default::default(),
+            open_prs: Ok(Vec::new()),
         }),
         pause: sbxm::task::loop_pause::State::None,
         jobs: Default::default(),
