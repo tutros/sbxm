@@ -294,7 +294,12 @@ impl<'a> Loop<'a> {
             Phase::Run(Some(t.slot))
         };
         let steps = self.steps;
-        let started = if t.label && phase == Phase::Run(Some(t.slot)) {
+        let ready = (phase == Phase::Resume)
+            .then(|| self.ready_already(issue))
+            .flatten();
+        let started = if let Some(ready) = ready {
+            Box::new(super::Ended(Some(ready)))
+        } else if t.label && phase == Phase::Run(Some(t.slot)) {
             let (started, removed) =
                 self.run_unlabeling(issue, || steps.start_task(issue, phase, out, warn));
             if self.unlabeled(issue, removed, warn)? {
@@ -340,12 +345,12 @@ impl<'a> Loop<'a> {
             t.interrupted = Some(why.clone());
             return Ok(Some(Err(Halt::Stopped)));
         }
-        // An adopted child that wrote no outcome (issue 643): cut off, under the rule a restart
-        // applies.
+        // An adopted child that wrote no outcome (issue 643), or failed at `ready` (issue 667):
+        // cut off, under the rule a restart applies.
         if let Some(process) = t.adopted.take()
-            && matches!(ended, super::PhaseEnd::Missing(_))
+            && self.adopted_was_cut_off(t.issue, &ended)
         {
-            return match self.adopted_cut_off(t.issue, &process, out)? {
+            return match self.adopted_cut_off(t.issue, &process, &ended, out)? {
                 CutOff::Owed => self.resume_cut_off(t, out, warn),
                 CutOff::Parked(outcome) => Ok(Some(Ok(End::Parked {
                     ready: None,

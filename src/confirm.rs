@@ -21,8 +21,8 @@ impl Confirm for Terminal {
     }
 
     fn confirm(&self, prompt: &str) -> Result<bool> {
-        eprint!("{prompt} [y/N] ");
-        io::stderr().flush()?;
+        crate::screen::eprint(&format!("{prompt} [y/N] "));
+        let _ = io::stderr().flush();
         let mut line = String::new();
         io::stdin().lock().read_line(&mut line)?;
         Ok(matches!(

@@ -1667,6 +1667,8 @@ impl Loop<'_> {
                 (ended, None)
             } else if should_fix {
                 (self.steps.should_fix_task(issue, out, warn), None)
+            } else if let Some(ready) = resuming.then(|| self.ready_already(issue)).flatten() {
+                (ready, None)
             } else if resuming {
                 (self.steps.resume_task(issue, out, warn), None)
             } else {
@@ -2037,13 +2039,38 @@ impl Loop<'_> {
         Ok(found)
     }
 
-    /// An adopted child that ended with no outcome (issue 643, answer 3): interrupted, under the
-    /// rule [`Self::cut_off`] applies at a restart. One whose resume a loop took already is
+    /// Whether the end `ended` of task `issue`'s adopted child cut the task off: no outcome
+    /// (issue 643, answer 3), or an outcome that says `failed` while its record is at `ready`
+    /// (issue 667, answer 3): a write to the dead loop's closed output pipe failed it after its
+    /// work was done.
+    fn adopted_was_cut_off(&self, issue: u32, ended: &PhaseEnd) -> bool {
+        match ended {
+            PhaseEnd::Missing(_) => true,
+            PhaseEnd::Outcome(o) => {
+                o.end == outcome::Kind::Failed
+                    && self.record(issue).is_some_and(|r| r.stage == Stage::Ready)
+            }
+            PhaseEnd::Unreadable { .. } => false,
+        }
+    }
+
+    /// The end of task `issue`'s resume when its record is at `ready` (issue 667, answer 3): the
+    /// resume finishes it, so the phase ends `ready` without a child, as a `task resume` that
+    /// can't continue a ready task would otherwise fail it.
+    fn ready_already(&self, issue: u32) -> Option<PhaseEnd> {
+        self.record(issue)
+            .filter(|r| r.stage == Stage::Ready)
+            .map(|_| PhaseEnd::Outcome(outcome::Outcome::new(outcome::Kind::Ready, None, "")))
+    }
+
+    /// An adopted child that cut its task off ([`Self::adopted_was_cut_off`]): interrupted, under
+    /// the rule [`Self::cut_off`] applies at a restart. One whose resume a loop took already is
     /// parked; otherwise its resume is marked as owed, for `process`, before anything else runs.
     fn adopted_cut_off(
         &mut self,
         issue: u32,
         process: &Process,
+        ended: &PhaseEnd,
         out: &mut dyn Write,
     ) -> Result<CutOff> {
         let named = self.issue_named(issue);
@@ -2072,9 +2099,13 @@ impl Loop<'_> {
                 in_use.describe()
             )));
         }
+        let how = match ended {
+            PhaseEnd::Missing(_) => "with no outcome".to_owned(),
+            _ => format!("but its outcome says {}", ended.summary()),
+        };
         writeln!(
             out,
-            "{named}: its adopted child ended at {stage} with no outcome; resuming it once"
+            "{named}: its adopted child ended at {stage} {how}; resuming it once"
         )?;
         Ok(CutOff::Owed)
     }
@@ -4433,8 +4464,8 @@ fn work(
                 (env.sleep)(parallel::TICK);
             };
             let mut stops = Vec::new();
-            let ended = if matches!(ended, PhaseEnd::Missing(_)) {
-                match lp.adopted_cut_off(a.issue, &a.process, out)? {
+            let ended = if lp.adopted_was_cut_off(a.issue, &ended) {
+                match lp.adopted_cut_off(a.issue, &a.process, &ended, out)? {
                     CutOff::Owed => {
                         note(lock, lp, warn, |p| {
                             if p.current == Some(a.issue) {
@@ -5184,6 +5215,7 @@ impl TaskSteps<'_> {
             args,
             dir: self.repo_root.clone(),
             env,
+            log: child::log_path(&base_dir, &id),
         };
         Ok(Prepared {
             dir,

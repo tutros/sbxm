@@ -788,10 +788,12 @@ fn a_child_is_done_when_it_exits_whatever_keeps_its_output_open() {
     let child = Child {
         args: vec![
             "-c".into(),
-            "echo 'Error: gone' >&2; sleep 30 >&2 & exit 3".into(),
+            "echo 'Error: gone' >> \"$SBXM_LOOP_CHILD_LOG\"; sleep 30 >> \"$SBXM_LOOP_CHILD_LOG\" & exit 3"
+                .into(),
         ],
         dir: tmp.path().to_owned(),
         env: Vec::new(),
+        log: tmp.path().join("child.log"),
     };
     let started = std::time::Instant::now();
 

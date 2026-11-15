@@ -230,6 +230,7 @@ mod started_child {
             args: vec!["-c".into(), script.into()],
             dir: dir.to_owned(),
             env: Vec::new(),
+            log: dir.join("child.log"),
         }
     }
 
@@ -239,7 +240,10 @@ mod started_child {
         let spawner = ChildSpawner::new(PathBuf::from("/bin/sh"));
 
         let mut running = spawner
-            .start(&sh("sleep 1; echo 'Error: late' >&2; exit 2", tmp.path()))
+            .start(&sh(
+                "sleep 1; echo 'Error: late' >> \"$SBXM_LOOP_CHILD_LOG\"; exit 2",
+                tmp.path(),
+            ))
             .unwrap();
 
         assert_eq!(running.poll().unwrap(), None, "still running");

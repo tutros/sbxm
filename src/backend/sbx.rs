@@ -105,7 +105,8 @@ impl SbxBackend {
             .context(SBX_MISSING)?;
         let mut kept = StderrTail::default();
         if let Some(mut pipe) = child.stderr.take() {
-            let mut screen = std::io::stderr();
+            // Through the screen: a loop child's goes to its log, masked (issue 667).
+            let mut screen = crate::screen::stderr();
             let mut chunk = [0u8; 4096];
             loop {
                 match pipe.read(&mut chunk) {
