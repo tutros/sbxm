@@ -270,6 +270,7 @@ fn row(title: &str) -> TaskRow {
         must_fix: None,
         pr: None,
         location: None,
+        parked: None,
         log_line: Some("[working] busy".to_owned()),
     }
 }

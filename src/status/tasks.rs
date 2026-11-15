@@ -10,6 +10,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::run::results::parse_timestamp;
 use crate::task::lock;
+use crate::task::next;
+use crate::task::queue::LOOP_HOOK;
 use crate::task::record::{self, ProcessProbe, Stage, Status};
 
 /// A missing value (no commits yet, no review yet, no PR, no `run.log`).
@@ -37,8 +39,40 @@ pub struct TaskRow {
     /// Where the task runs (issue 671): `local`, or `cloud` with its sandbox still there in
     /// brackets; `None` for an older record that has no location field.
     pub location: Option<String>,
+    /// Set when the task is parked (issue 671): what to run next, shown under the table.
+    pub parked: Option<Parked>,
     /// The last `run.log` line that isn't a header, without its timestamp.
     pub log_line: Option<String>,
+}
+
+/// A task the loop parked at `ready` (issue 671): it took the task to `ready` and claimed it
+/// for `task finish` (its marker, [`LOOP_HOOK`]), and the finish left no PR (the workflow-file
+/// guard refused it, say), so it waits on the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parked {
+    /// The command to run next, as `task run` names it for a task at `ready`.
+    pub next: String,
+    /// The checkout the task was started in, where that command reads its `sbxm-task.toml`;
+    /// `None` in an older record.
+    pub checkout: Option<String>,
+}
+
+/// `record`'s [`Parked`], or `None` when it isn't parked: a task at `ready` the loop claimed,
+/// with no PR, whose lock no live command holds (a finish running on it isn't parked).
+fn parked(record: &record::Record, dir: &Path, probe: &dyn ProcessProbe) -> Option<Parked> {
+    let claimed = record.hooks.get(LOOP_HOOK) == Some(&serde_json::Value::Bool(true));
+    if record.stage != Stage::Ready
+        || record.status != Status::Ok
+        || record.pr.is_some()
+        || !claimed
+        || lock::held_alive(dir, probe)
+    {
+        return None;
+    }
+    Some(Parked {
+        next: next::ready(record, &next::record_flag(record))?,
+        checkout: record.checkout.clone(),
+    })
 }
 
 /// The TIME column of one task (issue 484).
@@ -79,8 +113,11 @@ pub fn rows(base: &Path, probe: &dyn ProcessProbe) -> Result<Vec<TaskRow>> {
         .into_iter()
         .map(|record| {
             let dir = record::task_dir(base, &record.id);
+            let parked = parked(&record, &dir, probe);
             let status = if record.is_interrupted(probe) && !lock::held_alive(&dir, probe) {
                 "interrupted".to_owned()
+            } else if parked.is_some() {
+                "parked".to_owned()
             } else {
                 record.status.name().to_owned()
             };
@@ -94,6 +131,7 @@ pub fn rows(base: &Path, probe: &dyn ProcessProbe) -> Result<Vec<TaskRow>> {
                 must_fix: record.review.as_ref().map(|r| r.must_fix),
                 pr: record.pr.clone(),
                 location: location(&dir, &record),
+                parked,
                 log_line: last_log_line(&dir.join("run.log")),
             })
         })
@@ -349,5 +387,34 @@ pub fn render(rows: &[TaskRow], now: u64, width: Option<usize>) -> String {
         };
         line(&mut out, cells, title, log, log_is_real);
     }
+    parked_lines(rows, &mut out);
     out
+}
+
+/// One line per parked task after the table (issue 671): the command to run next, in backticks
+/// so the run hints name the executable, and the checkout it reads. The first checkout also goes
+/// to the block that says where to run the frame's commands, with `SBXM_CONFIG_DIR`.
+fn parked_lines(rows: &[TaskRow], out: &mut String) {
+    let mut named = false;
+    for row in rows {
+        let Some(parked) = &row.parked else { continue };
+        let next = match parked.next.find("sbxm ") {
+            Some(at) => format!("{}`{}`", &parked.next[..at], &parked.next[at..]),
+            None => parked.next.clone(),
+        };
+        let place = match parked.checkout.as_deref() {
+            Some(dir) => {
+                if !named {
+                    crate::hint::name_dir(Path::new(dir));
+                    named = true;
+                }
+                format!(" (in {dir})")
+            }
+            None => String::new(),
+        };
+        out.push_str(&crate::hint::named(&format!(
+            "{} is parked; next: {next}{place}\n",
+            row.id
+        )));
+    }
 }

@@ -69,6 +69,7 @@ fn row(id: &str, stage: &'static str, status: &str) -> TaskRow {
         must_fix: None,
         pr: None,
         location: None,
+        parked: None,
         log_line: None,
     }
 }
@@ -106,6 +107,7 @@ fn present_values_fill_every_column() {
         must_fix: Some(1),
         pr: Some("https://github.com/o/r/pull/9".to_owned()),
         location: None,
+        parked: None,
         log_line: Some("[reviewing] checking the diff".to_owned()),
     };
     let text = tasks::render(&[r], 100, None);
@@ -195,6 +197,7 @@ fn a_full_row_at_terminal_width_still_shows_an_ellipsis_instead_of_losing_the_lo
         must_fix: Some(1),
         pr: Some("https://github.com/tutros/sbxm/pull/999".to_owned()),
         location: None,
+        parked: None,
         log_line: Some("still working".to_owned()),
     };
     // 85: the fixed cells with no gap between them (84 columns, the WHERE column of issue 671
