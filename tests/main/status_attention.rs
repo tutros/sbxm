@@ -17,9 +17,10 @@ use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState};
 use sbxm::run::results::format_timestamp;
 use sbxm::status::looping::{self, Jobs, Lock, View};
-use sbxm::status::tasks::{self, Parked, TaskRow, TaskTime};
+use sbxm::status::tasks::{self, Parked, TaskRow, TaskTime, Workflow};
 use sbxm::task::loop_pause;
 use sbxm::task::outcome::{self, Outcome};
+use sbxm::task::pipeline::Prepared;
 use sbxm::task::queue::{LOOP_HOOK, LockFile, lock_path};
 use sbxm::task::record::{
     self, Kind, NewTask, Process, ProcessProbe, Record, ReviewResult, SandboxLife, SandboxRole,
@@ -201,6 +202,7 @@ fn a_ready_task_the_loop_claimed_without_a_pr_is_parked_with_its_finish_next() {
         Some(Parked {
             next: "sbxm task finish --issue 5".to_owned(),
             checkout: None,
+            workflow: None,
         })
     );
 }
@@ -231,6 +233,7 @@ fn a_parked_task_with_must_fix_findings_names_their_next_step() {
         Some(Parked {
             next: "fix them by hand, or file them: sbxm task file-findings --issue 6".to_owned(),
             checkout: Some("/work/repo".to_owned()),
+            workflow: None,
         })
     );
 }
@@ -275,6 +278,106 @@ fn a_claimed_task_with_a_pr_is_not_parked() {
     assert_eq!(rows[0].parked, None);
 }
 
+/// Issue 41 worked into a commit of `files` in its repo.git, gated, reviewed at its tip with no
+/// must-fix finding and `ready`, then claimed by the loop for `task finish` (review M-3).
+fn claimed_ready_with(f: &common::task_fixture::Fixture, files: &[&str]) -> Prepared {
+    use common::task_fixture::{CLAUDE_DONE, Play, backend, ok, play, worked_task};
+    let b = backend()
+        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+        .with_exec_hook(play(
+            &f.env.base_dir().join("tasks").join("issue-41"),
+            "main",
+            "issue-41",
+            Play {
+                commits: files.iter().map(|s| (*s).to_owned()).collect(),
+                result_md: Some(b"done\n".to_vec()),
+                bundle_bytes: None,
+            },
+        ));
+    let mut prepared = worked_task(f, &b);
+    let p = || Process::new(1, 0);
+    let r = &mut prepared.record;
+    r.begin_gating(1, p()).unwrap();
+    r.finish(Status::Passed).unwrap();
+    r.begin_review(2, p()).unwrap();
+    r.finish(Status::Completed).unwrap();
+    r.advance(Stage::Ready, 3, p()).unwrap();
+    let repo_git = prepared.meta.join("repo.git");
+    let tip = common::git(&repo_git, &["rev-parse", "issue-41"]);
+    r.review = Some(ReviewResult {
+        commit: Some(tip.clone()),
+        ..review(Level::Low)
+    });
+    r.hooks = serde_json::json!({ LOOP_HOOK: true });
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let base = common::git(&repo_git, &["rev-parse", "main"]);
+    fs::write(
+        prepared.meta.join("review.md"),
+        format!(
+            "Reviewer: codex (default)\n\nMust-fix findings: 0\n\nScope: `{base}..{tip}`\n\n\
+             Nothing found.\n"
+        ),
+    )
+    .unwrap();
+    prepared
+}
+
+const WORKFLOW: &str = ".github/workflows/ci.yml";
+
+#[test]
+fn a_task_parked_by_the_workflow_guard_names_the_files_and_the_push_by_hand_before_finish() {
+    let f = common::task_fixture::fixture();
+    let b = f.env.base_dir();
+    let prepared = claimed_ready_with(&f, &["a.txt", WORKFLOW]);
+    let repo_git = prepared.meta.join("repo.git");
+    let github = FakeGitHub::default();
+    // The guard refuses the finish, so the task stays parked.
+    let refused = sbxm::task::finish::finish(&b, "issue-41", &github, &common::task_fixture::Probe);
+    assert!(format!("{:#}", refused.unwrap_err()).contains(WORKFLOW));
+
+    let rows = tasks::rows(&b, &Probe(None)).unwrap();
+
+    assert_eq!(rows[0].status, "parked");
+    let parked = rows[0].parked.clone().unwrap();
+    assert_eq!(
+        parked.workflow,
+        Some(Workflow {
+            files: vec![WORKFLOW.to_owned()],
+            repo_git: repo_git.to_string_lossy().into_owned(),
+            branch: "issue-41".to_owned(),
+        })
+    );
+    assert_eq!(parked.next, "sbxm task finish --issue 41");
+    let text = tasks::render(&rows, 0, None);
+    let shell = sbxm::hint::Shell::HOST;
+    let line = format!(
+        "issue-41 is parked; next: read {WORKFLOW} in {}; if the change is meant, push the \
+         branch yourself (`git -C {} push origin issue-41`), then `sbxm task finish --issue 41`",
+        repo_git.display(),
+        shell.quote(&repo_git.to_string_lossy())
+    );
+    assert!(text.contains(&line), "{text}");
+
+    // Doing what the line says: the push by hand, then the finish, which now opens the PR.
+    common::git(&repo_git, &["push", "--quiet", "origin", "issue-41"]);
+    let done =
+        sbxm::task::finish::finish(&b, "issue-41", &github, &common::task_fixture::Probe).unwrap();
+    assert!(done.branch_adopted.is_some(), "{done:?}");
+}
+
+#[test]
+fn a_parked_task_without_a_workflow_change_is_told_to_finish() {
+    let f = common::task_fixture::fixture();
+    let b = f.env.base_dir();
+    claimed_ready_with(&f, &["a.txt"]);
+
+    let rows = tasks::rows(&b, &Probe(None)).unwrap();
+
+    let parked = rows[0].parked.clone().unwrap();
+    assert_eq!(parked.workflow, None);
+    assert_eq!(parked.next, "sbxm task finish --issue 41");
+}
+
 #[test]
 fn a_parked_row_is_followed_by_its_next_command() {
     let mut r = row("issue-5", Some("local"));
@@ -283,6 +386,7 @@ fn a_parked_row_is_followed_by_its_next_command() {
     r.parked = Some(Parked {
         next: "sbxm task finish --issue 5".to_owned(),
         checkout: None,
+        workflow: None,
     });
 
     let text = tasks::render(&[r, row("issue-6", Some("local"))], 0, None);
@@ -300,6 +404,7 @@ fn a_parked_row_puts_the_command_of_a_longer_next_step_in_backticks() {
     r.parked = Some(Parked {
         next: "fix them by hand, or file them: sbxm task file-findings --issue 6".to_owned(),
         checkout: None,
+        workflow: None,
     });
 
     let text = tasks::render(&[r], 0, None);
@@ -356,6 +461,7 @@ fn a_parked_row_names_the_checkout_its_command_runs_in() {
     r.parked = Some(Parked {
         next: "sbxm task finish --issue 5".to_owned(),
         checkout: Some("/work/repo".to_owned()),
+        workflow: None,
     });
 
     let text = tasks::render(&[r], 0, None);

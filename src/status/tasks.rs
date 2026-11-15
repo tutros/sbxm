@@ -55,6 +55,21 @@ pub struct Parked {
     /// The checkout the task was started in, where that command reads its `sbxm-task.toml`;
     /// `None` in an older record.
     pub checkout: Option<String>,
+    /// Set when the task's commits change CI files, which `task finish` refuses to push
+    /// (decision 127): what the user reads and pushes by hand before that command (review M-3).
+    pub workflow: Option<Workflow>,
+}
+
+/// What a task parked by the workflow-file guard needs before its finish (review M-3 of issue
+/// 671): the user reads the CI files its commits change and, if the change is meant, pushes its
+/// branch from its repo.git; `task finish` then adopts the branch at its reviewed tip (issue 598).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Workflow {
+    /// The CI files the task's commits change, as the guard names them.
+    pub files: Vec<String>,
+    /// The task's own repository, where the files and the branch are.
+    pub repo_git: String,
+    pub branch: String,
 }
 
 /// `record`'s [`Parked`], or `None` when it isn't parked: a task at `ready` the loop claimed,
@@ -69,9 +84,24 @@ fn parked(record: &record::Record, dir: &Path, probe: &dyn ProcessProbe) -> Opti
     {
         return None;
     }
+    let next = next::ready(record, &next::record_flag(record))?;
+    // Only a finish is held back by the guard; its condition is read as `finish` reads it. A
+    // repo.git that can't be read leaves the plain finish, whose own error then says why.
+    let repo_git = dir.join("repo.git");
+    let workflow = next
+        .starts_with("sbxm task finish ")
+        .then(|| crate::task::finish::ci_changes(record, &repo_git).ok())
+        .flatten()
+        .filter(|files| !files.is_empty())
+        .map(|files| Workflow {
+            files,
+            repo_git: repo_git.to_string_lossy().into_owned(),
+            branch: record.branch.clone(),
+        });
     Some(Parked {
-        next: next::ready(record, &next::record_flag(record))?,
+        next,
         checkout: record.checkout.clone(),
+        workflow,
     })
 }
 
@@ -398,10 +428,20 @@ fn parked_lines(rows: &[TaskRow], out: &mut String) {
     let mut named = false;
     for row in rows {
         let Some(parked) = &row.parked else { continue };
-        let next = match parked.next.find("sbxm ") {
+        let mut next = match parked.next.find("sbxm ") {
             Some(at) => format!("{}`{}`", &parked.next[..at], &parked.next[at..]),
             None => parked.next.clone(),
         };
+        if let Some(w) = &parked.workflow {
+            next = format!(
+                "read {} in {}; if the change is meant, push the branch yourself (`git -C {} \
+                 push origin {}`), then {next}",
+                w.files.join(", "),
+                w.repo_git,
+                crate::hint::Shell::HOST.quote(&w.repo_git),
+                w.branch
+            );
+        }
         let place = match parked.checkout.as_deref() {
             Some(dir) => {
                 if !named {
