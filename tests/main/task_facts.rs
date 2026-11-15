@@ -86,9 +86,12 @@ fn opts(since: &str, until: Option<&str>, json: bool) -> Options {
 }
 
 /// Runs the command: its result, what it printed and what it warned.
+/// The time the tests run "now": a window without `--until` ends here.
+const NOW: &str = "2026-11-15T12:00:00Z";
+
 fn facts(env: &Env, opts: &Options) -> (anyhow::Result<()>, String, String) {
     let (mut out, mut warn) = (Vec::new(), Vec::new());
-    let result = task_facts::run(&env.config_dir(), opts, &mut out, &mut warn);
+    let result = task_facts::run(&env.config_dir(), opts, at(NOW), &mut out, &mut warn);
     (
         result,
         String::from_utf8(out).unwrap(),
@@ -154,15 +157,34 @@ fn task_facts_includes_a_task_started_on_until_and_not_one_the_day_after() {
 
 // 3 of 8
 #[test]
-fn task_facts_without_until_lists_everything_from_since_in_start_order() {
+fn task_facts_without_until_lists_everything_from_since_to_now_in_start_order() {
     let env = Env::new();
-    save_live(&env, &issue_task(3, "2026-12-31T10:00:00Z"));
+    save_live(&env, &issue_task(3, NOW));
     save_live(&env, &issue_task(1, "2026-11-10T08:00:00Z"));
-    save_archived(&env, "issue-2", &issue_task(2, "2027-06-01T00:00:00Z"));
+    save_archived(&env, "issue-2", &issue_task(2, "2026-11-12T00:00:00Z"));
+    // Started after now: one second over, later the same day, and next year.
+    save_live(&env, &issue_task(4, "2026-11-15T12:00:01Z"));
+    save_live(&env, &issue_task(5, "2026-11-15T23:59:59Z"));
+    save_archived(&env, "issue-6", &issue_task(6, "2027-06-01T00:00:00Z"));
 
     let rows = json_rows(&env, "2026-11-10", None);
+    assert_eq!(ids(&rows), ["issue-1", "issue-2", "issue-3"]);
 
-    assert_eq!(ids(&rows), ["issue-1", "issue-3", "issue-2"]);
+    let (result, out, _) = facts(&env, &opts("2026-11-10", None, false));
+    result.unwrap();
+    let tasks: Vec<&str> = out
+        .lines()
+        .skip(2)
+        .map(|l| l.split(" | ").next().unwrap().trim_start_matches("| "))
+        .collect();
+    assert_eq!(tasks, ["issue-1", "issue-2", "issue-3"]);
+
+    // An explicit --until is a whole day, whatever the time now.
+    let rows = json_rows(&env, "2026-11-10", Some("2026-11-15"));
+    assert_eq!(
+        ids(&rows),
+        ["issue-1", "issue-2", "issue-3", "issue-4", "issue-5"]
+    );
 }
 
 // 4 of 8

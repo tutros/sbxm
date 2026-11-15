@@ -1182,6 +1182,7 @@ fn run() -> anyhow::Result<()> {
             commands::task_facts::run(
                 &config::config_dir()?,
                 &commands::task_facts::Options { since, until, json },
+                sbxm::run::results::now(),
                 &mut screen::stdout(),
                 &mut std::io::stderr(),
             )

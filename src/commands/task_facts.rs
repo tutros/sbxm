@@ -4,8 +4,9 @@
 //! Read-only: it never writes, locks or changes a record, and never follows a link out of the
 //! base dir. A fact the records don't hold prints `-` (Markdown) or `null` (JSON).
 //!
-//! A task is placed in the window by the date of its first stamp (UTC, both ends inclusive). One
-//! task is its id and that start: an archive that copies a live task is the same task (the live
+//! A task is placed in the window by its first stamp: from the whole `--since` day to the whole
+//! `--until` day (UTC, both inclusive), or to now without `--until`. One task is its id and that
+//! start: an archive that copies a live task is the same task (the live
 //! record wins), while an archive of an earlier task of the same issue is a row of its own.
 
 use std::collections::BTreeSet;
@@ -71,10 +72,12 @@ const COLUMNS: [&str; 13] = [
 ];
 
 /// Prints the facts of every task started in the window to `out`, one warning line per record
-/// that can't be read to `warn`. The dates are checked before anything is read.
+/// that can't be read to `warn`. `now`, in seconds since the epoch, ends a window without
+/// `--until`. The dates are checked before anything is read.
 pub fn run(
     config_dir: &Path,
     opts: &Options,
+    now: u64,
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
@@ -117,12 +120,7 @@ pub fn run(
                 continue;
             }
         };
-        let Some(started) = task
-            .stages
-            .first()
-            .and_then(|s| parse_timestamp(&s.at))
-            .map(format_timestamp)
-        else {
+        let Some(start) = task.stages.first().and_then(|s| parse_timestamp(&s.at)) else {
             writeln!(
                 warn,
                 "warning: {} skipped: it has no start time",
@@ -130,8 +128,14 @@ pub fn run(
             )?;
             continue;
         };
+        let started = format_timestamp(start);
         let day = &started[..10];
-        if day < since || until.is_some_and(|u| day > u) {
+        // The window ends with the whole of an explicit --until day, else at `now`.
+        let before_end = match until {
+            Some(until) => day <= until,
+            None => start <= now,
+        };
+        if day < since || !before_end {
             continue;
         }
         // Live folders come first, so a live record wins over its archived copy.
