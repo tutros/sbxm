@@ -88,8 +88,8 @@ fn a_closed_dependency_does_not_block() {
 }
 
 #[test]
-fn every_issue_number_on_the_field_line_counts_and_only_that_line() {
-    let body = "intro mentioning #9\n**Depends on:** #5, #3 and #5\nlater #7";
+fn every_issue_number_in_the_field_counts_and_only_the_field() {
+    let body = "intro mentioning #9\n**Depends on:** #5, #3 and #5\n\nlater #7";
     let open = [plain(3), plain(5), plain(7), plain(9), issue(8, &[], body)];
     let selection = pick(&open, &[], None, 9);
     assert!(selection.skips.contains(&(8, Reason::Blocked(vec![3, 5]))));
