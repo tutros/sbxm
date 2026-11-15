@@ -4553,19 +4553,7 @@ fn work(
                     lp.next(&open, &opts.issues, &mut tried, &mut refused, out)?;
                 let Some(issue) = next else {
                     if opts.wait {
-                        // Said once per idle spell: the next task, or the next stop, ends it.
-                        if !idle {
-                            writeln!(
-                                out,
-                                "the queue is empty; checking again every {} for a job file or a \
-                             labelled issue",
-                                queue::span(PAUSE_POLL.as_secs())
-                            )?;
-                            idle = true;
-                        }
-                        idle_note(lock, lp, warn, Some(lp.now()))?;
-                        (env.sleep)(PAUSE_POLL);
-                        idle_note(lock, lp, warn, None)?;
+                        wait_idle(lock, lp, &mut idle, out, warn)?;
                         continue;
                     }
                     let skipped: Vec<Skipped> = refused.iter().chain(&waiting).cloned().collect();
@@ -4824,6 +4812,30 @@ fn note(
         )?;
     }
     Ok(())
+}
+
+/// The wait of a `--wait` loop on an empty queue, in either scheduler: says so once per idle
+/// spell (`said`; the next task, or the next stop, ends it), records in the lock when the wait
+/// began for `sbxm status` (issue 671), sleeps a [`PAUSE_POLL`], and clears the record on waking,
+/// before the loop looks for work again.
+fn wait_idle(
+    lock: &mut LoopLock,
+    lp: &mut Loop,
+    said: &mut bool,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    if !*said {
+        writeln!(
+            out,
+            "the queue is empty; checking again every {} for a job file or a labelled issue",
+            queue::span(PAUSE_POLL.as_secs())
+        )?;
+        *said = true;
+    }
+    idle_note(lock, lp, warn, Some(lp.now()))?;
+    (lp.env.sleep)(PAUSE_POLL);
+    idle_note(lock, lp, warn, None)
 }
 
 /// [`LoopLock::idle`], a lock that can't be written being a warning, as for [`note`].

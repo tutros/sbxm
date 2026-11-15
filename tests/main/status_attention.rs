@@ -902,7 +902,22 @@ fn idle_check(base: &Path) -> Option<String> {
 
 #[test]
 fn a_waiting_loop_writes_when_it_began_each_idle_wait_and_clears_it_to_work() {
+    idle_waits_are_written(None);
+}
+
+/// The same with `cloud_slots` set, which runs the loop's other scheduler (review M-1).
+#[test]
+fn a_waiting_loop_with_cloud_slots_writes_its_idle_wait_too() {
+    idle_waits_are_written(Some(2));
+}
+
+/// A `task loop --wait` on an empty queue, with `cloud_slots` as given: at each idle sleep its
+/// lock says when the wait began, and while it runs the job queued meanwhile it says none.
+fn idle_waits_are_written(cloud_slots: Option<u32>) {
     let env = TestEnv::new();
+    if let Some(n) = cloud_slots {
+        common::cloud_slot::set_cloud_slots(&env, n);
+    }
     let b = env.base_dir();
     let repo_root = env.tmp.path().join("repo");
     fs::create_dir_all(&repo_root).unwrap();

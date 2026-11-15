@@ -31,6 +31,7 @@ use anyhow::{Result, anyhow};
 use super::{
     Adopted, Cause, CutOff, End, Halt, Held, Loop, LoopLock, Options, PAUSE_POLL, PR_CAP, Phase,
     RESUMED_HOOK, Retry, Started, first_line, jobs as queued, needs_user, note, sign_in_stop,
+    wait_idle,
 };
 use crate::backend::Location;
 use crate::config::Placement;
@@ -849,16 +850,7 @@ fn steps_and_starts<'a>(
                 break;
             }
             if opts.wait {
-                if !pass.idle {
-                    writeln!(
-                        out,
-                        "the queue is empty; checking again every {} for a job file or a \
-                         labelled issue",
-                        queue::span(PAUSE_POLL.as_secs())
-                    )?;
-                    pass.idle = true;
-                }
-                (lp.env.sleep)(PAUSE_POLL);
+                wait_idle(lock, lp, &mut pass.idle, out, warn)?;
                 return Ok(None);
             }
             let skipped: Vec<Skipped> = pass.refused.iter().chain(&waiting).cloned().collect();
