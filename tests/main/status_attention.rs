@@ -6,11 +6,13 @@
 use crate::common;
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use common::Env as TestEnv;
 use sbxm::backend::{FakeBackend, Location};
 use sbxm::commands::status::{self, Env, LoopSource};
+use sbxm::commands::task_loop;
 use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState};
 use sbxm::run::results::format_timestamp;
@@ -418,6 +420,7 @@ fn section(base: &Path, gh: &FakeGitHub) -> String {
         jobs: Jobs::default(),
         cloud_first: false,
         dead: None,
+        next_check: None,
     };
     looping::render(&view, None)
 }
@@ -517,6 +520,7 @@ fn write_loop_lock(base: &Path) {
         cap: None,
         progress: None,
         adopted: Vec::new(),
+        idle_check: None,
     };
     fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
 }
@@ -667,6 +671,71 @@ fn a_dead_loop_says_when_it_was_last_seen_and_lists_the_tasks_it_left() {
     assert!(!text.contains("issue-14"), "{text}");
 }
 
+/// Sets `path`'s modified time to `secs`.
+fn touch(path: &Path, secs: u64) {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+        .unwrap();
+}
+
+#[test]
+fn a_dead_loop_was_last_seen_at_its_logs_last_write_when_that_is_later() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    write_loop_lock(&b);
+    touch(&lock_path(&b), LOOP_START + 10);
+    let log = sbxm::task::loop_log::path(&b, LOOP_START);
+    fs::create_dir_all(log.parent().unwrap()).unwrap();
+    fs::write(&log, "| row |\n").unwrap();
+    touch(&log, LOOP_START + 500);
+
+    let text = loop_section(&b, &Alive(Vec::new()), T0);
+
+    assert!(
+        text.contains(&format!(
+            "is gone; last seen {})",
+            format_timestamp(LOOP_START + 500)
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_child_the_dead_loop_had_adopted_is_left_too() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    let earlier = Process::new(7, LOOP_START - 50);
+    let path = lock_path(&b);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let file = LockFile {
+        process: loop_process(),
+        issues: Vec::new(),
+        cap: None,
+        progress: None,
+        adopted: vec![sbxm::task::queue::AdoptedChild {
+            issue: 15,
+            owner: earlier.clone(),
+        }],
+        idle_check: None,
+    };
+    fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
+    let mut adopted = loops_child(15, Stage::Reviewing, Status::Running);
+    adopted.loop_owner = Some(earlier);
+    save(&b, &adopted);
+
+    let text = loop_section(&b, &Alive(vec![(2, T0)]), T0);
+
+    assert!(
+        text.contains(
+            "  left: issue-15 (title 15) at reviewing, local: still running (process 2)\n"
+        ),
+        "{text}"
+    );
+}
+
 #[test]
 fn a_dead_loops_child_that_died_too_is_not_a_live_child() {
     let base = TestEnv::new();
@@ -678,4 +747,231 @@ fn a_dead_loops_child_that_died_too_is_not_a_live_child() {
 
     assert!(text.starts_with("Loop: not running (stale lock"), "{text}");
     assert!(!text.contains("left:"), "{text}");
+}
+
+// ---- 5. when an idle loop next looks for work -------------------------------------------------
+
+/// The loop's lock, its process alive, saying it began an idle wait at `began`.
+fn write_idle_lock(base: &Path, began: Option<u64>) {
+    let path = lock_path(base);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let file = LockFile {
+        process: loop_process(),
+        issues: Vec::new(),
+        cap: None,
+        progress: None,
+        adopted: Vec::new(),
+        idle_check: began.map(format_timestamp),
+    };
+    fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
+}
+
+const POLL: u64 = sbxm::commands::task_loop::PAUSE_POLL.as_secs();
+
+#[test]
+fn an_idle_loop_says_when_it_next_looks_for_work() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    write_idle_lock(&b, Some(T0 - 60));
+
+    let text = loop_section(&b, &Alive(vec![(1, LOOP_START)]), T0);
+
+    assert!(
+        text.contains(&format!(
+            "\n  idle: next check for work in 4m (at {})\n",
+            format_timestamp(T0 - 60 + POLL)
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_idle_loop_at_its_poll_time_checks_now() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    write_idle_lock(&b, Some(T0 - POLL));
+
+    let text = loop_section(&b, &Alive(vec![(1, LOOP_START)]), T0);
+
+    assert!(
+        text.contains("\n  idle: next check for work now\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_idle_loop_one_second_before_its_poll_time_checks_in_1s() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    write_idle_lock(&b, Some(T0 - POLL + 1));
+
+    let text = loop_section(&b, &Alive(vec![(1, LOOP_START)]), T0);
+
+    assert!(
+        text.contains("  idle: next check for work in 1s (at "),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_idle_loop_past_its_poll_time_checks_now() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    write_idle_lock(&b, Some(T0 - POLL - 30));
+
+    let text = loop_section(&b, &Alive(vec![(1, LOOP_START)]), T0);
+
+    assert!(
+        text.contains("\n  idle: next check for work now\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_working_loop_or_a_dead_one_shows_no_next_check() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    write_idle_lock(&b, None);
+    let working = loop_section(&b, &Alive(vec![(1, LOOP_START)]), T0);
+    write_idle_lock(&b, Some(T0 - 60));
+    let dead = loop_section(&b, &Alive(Vec::new()), T0);
+
+    assert!(!working.contains("idle:"), "{working}");
+    assert!(!dead.contains("idle:"), "{dead}");
+}
+
+/// The loop's steps, none expected but the queued `rm-merged` job's, which notes what the lock
+/// says while it runs.
+struct IdleSteps {
+    base: std::path::PathBuf,
+    during_job: std::cell::RefCell<Vec<Option<String>>>,
+}
+
+fn unexpected(what: &str) -> anyhow::Result<()> {
+    Err(anyhow::anyhow!("unexpected {what}"))
+}
+
+impl task_loop::Steps for IdleSteps {
+    fn run(&self, _: u32, _: &mut dyn Write, _: &mut dyn Write) -> anyhow::Result<()> {
+        unexpected("run")
+    }
+
+    fn resume(&self, _: u32, _: &mut dyn Write, _: &mut dyn Write) -> anyhow::Result<()> {
+        unexpected("resume")
+    }
+
+    fn finish(&self, _: u32, _: &mut dyn Write, _: &mut dyn Write) -> anyhow::Result<()> {
+        unexpected("finish")
+    }
+
+    fn file_findings(&self, _: u32, _: &mut dyn Write, _: &mut dyn Write) -> anyhow::Result<()> {
+        unexpected("file-findings")
+    }
+
+    fn fix_pr(&self, _: u32, _: &mut dyn Write, _: &mut dyn Write) -> anyhow::Result<()> {
+        unexpected("resolve")
+    }
+
+    fn fix_check(
+        &self,
+        _: u32,
+        _: u64,
+        _: &mut dyn Write,
+        _: &mut dyn Write,
+    ) -> anyhow::Result<()> {
+        unexpected("log-fix")
+    }
+
+    fn rm_merged(&self, _: &mut dyn Write, _: &mut dyn Write) -> anyhow::Result<()> {
+        let running = sbxm::task::jobs::running_dir(&self.base);
+        if fs::read_dir(&running).is_ok_and(|mut entries| entries.next().is_some()) {
+            self.during_job.borrow_mut().push(idle_check(&self.base));
+        }
+        Ok(())
+    }
+
+    fn room(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+fn idle_check(base: &Path) -> Option<String> {
+    let text = fs::read_to_string(lock_path(base)).unwrap();
+    serde_json::from_str::<LockFile>(&text).unwrap().idle_check
+}
+
+#[test]
+fn a_waiting_loop_writes_when_it_began_each_idle_wait_and_clears_it_to_work() {
+    let env = TestEnv::new();
+    let b = env.base_dir();
+    let repo_root = env.tmp.path().join("repo");
+    fs::create_dir_all(&repo_root).unwrap();
+    fs::write(
+        repo_root.join("sbxm-task.toml"),
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = []\n",
+    )
+    .unwrap();
+    let gh = FakeGitHub::default()
+        .with_user("me")
+        .with_default_branch("main")
+        .with_open_issues(Vec::new());
+    let steps = IdleSteps {
+        base: b.clone(),
+        during_job: Default::default(),
+    };
+    let clock = std::cell::Cell::new(T0);
+    let seen = std::cell::RefCell::new(Vec::new());
+    let stop = std::cell::Cell::new(false);
+    let now = || clock.get();
+    let sleep = |d: std::time::Duration| {
+        // What the lock says while the loop sleeps, and when it began the wait.
+        seen.borrow_mut().push((idle_check(&b), clock.get()));
+        clock.set(clock.get() + d.as_secs());
+        match seen.borrow().len() {
+            1 => {
+                let queue = sbxm::task::jobs::queue_dir(&b);
+                fs::create_dir_all(&queue).unwrap();
+                fs::write(queue.join("a.json"), r#"{"kind": "rm-merged"}"#).unwrap();
+            }
+            _ => stop.set(true),
+        }
+    };
+    let stop_requested = || stop.get();
+    let loop_env = task_loop::Env {
+        now: &now,
+        sleep: &sleep,
+        stop_requested: &stop_requested,
+    };
+    let opts = task_loop::Options {
+        repo_root,
+        issues: Vec::new(),
+        cap: None,
+        repo: Some(REPO.into()),
+        wait: true,
+    };
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+
+    task_loop::run(
+        &env.config_dir(),
+        &opts,
+        &steps,
+        &gh,
+        &common::task_fixture::Probe,
+        &loop_env,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
+
+    let out = String::from_utf8(out).unwrap() + &String::from_utf8(warn).unwrap();
+    let seen = seen.into_inner();
+    assert_eq!(seen.len(), 2, "{out}");
+    for (said, began) in &seen {
+        assert_eq!(
+            said.as_deref(),
+            Some(format_timestamp(*began).as_str()),
+            "{out}"
+        );
+    }
+    assert_eq!(steps.during_job.into_inner(), [None], "{out}");
 }

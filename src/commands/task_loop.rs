@@ -517,6 +517,17 @@ impl LoopLock {
         self.rewrite()
     }
 
+    /// Records in the lock when the loop began an idle wait (`Some`), or that it no longer waits
+    /// (`None`), for `sbxm status` (issue 671); the lock is written only when this changes it.
+    fn idle(&mut self, at: Option<u64>) -> Result<()> {
+        let at = at.map(format_timestamp);
+        if self.file.idle_check == at {
+            return Ok(());
+        }
+        self.file.idle_check = at;
+        self.rewrite()
+    }
+
     /// Writes the lock again, through a temporary file renamed over it, since `sbxm status` reads
     /// it meanwhile; one no longer this process's (removed by hand) is not written again.
     fn rewrite(&mut self) -> Result<()> {
@@ -567,6 +578,7 @@ fn take_lock(
         cap: opts.cap.filter(|_| listed),
         progress: listed.then(queue::Progress::default),
         adopted: Vec::new(),
+        idle_check: None,
     };
     let me = serde_json::to_string(&contents)?;
     let mut dead = None;
@@ -4551,7 +4563,9 @@ fn work(
                             )?;
                             idle = true;
                         }
+                        idle_note(lock, lp, warn, Some(lp.now()))?;
                         (env.sleep)(PAUSE_POLL);
+                        idle_note(lock, lp, warn, None)?;
                         continue;
                     }
                     let skipped: Vec<Skipped> = refused.iter().chain(&waiting).cloned().collect();
@@ -4805,6 +4819,25 @@ fn note(
             warn,
             format!(
                 "the loop's progress could not be written into its lock ({e:#}); `sbxm status` \
+                 may show it behind"
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+/// [`LoopLock::idle`], a lock that can't be written being a warning, as for [`note`].
+fn idle_note(
+    lock: &mut LoopLock,
+    lp: &mut Loop,
+    warn: &mut dyn Write,
+    at: Option<u64>,
+) -> Result<()> {
+    if let Err(e) = lock.idle(at) {
+        lp.warn_once(
+            warn,
+            format!(
+                "the loop's idle wait could not be written into its lock ({e:#}); `sbxm status` \
                  may show it behind"
             ),
         )?;

@@ -247,6 +247,7 @@ pub fn work(base: &Path, lock: &Process, probe: &dyn ProcessProbe) -> anyhow::Re
             cap: None,
             progress: None,
             adopted: Vec::new(),
+            idle_check: None,
         },
         probe,
     )
@@ -765,6 +766,31 @@ pub struct View {
     pub cloud_first: bool,
     /// For a lock whose process is gone: what that loop left (issue 671).
     pub dead: Option<Dead>,
+    /// For a running loop waiting on an empty queue: when it next looks for work (issue 671).
+    pub next_check: Option<NextCheck>,
+}
+
+/// When an idle loop next looks for work (issue 671).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NextCheck {
+    /// The time it looks, in seconds since the epoch.
+    pub at: u64,
+    /// How long until then at the frame's time; 0 at it or past it.
+    pub left: u64,
+}
+
+impl NextCheck {
+    /// The next check of a loop whose lock `file` says it began an idle wait, at `now`: a
+    /// [`PAUSE_POLL`](crate::commands::task_loop::PAUSE_POLL) after that. `None` when it isn't
+    /// waiting, or the time doesn't parse.
+    pub fn of(file: &LockFile, now: u64) -> Option<Self> {
+        let began = parse_timestamp(file.idle_check.as_deref()?)?;
+        let at = began + crate::commands::task_loop::PAUSE_POLL.as_secs();
+        Some(Self {
+            at,
+            left: at.saturating_sub(now),
+        })
+    }
 }
 
 /// What the loop's job queue holds (issue 528, decision 309), read from its files alone.
@@ -934,6 +960,15 @@ pub fn render(view: &View, width: Option<usize>) -> String {
         }
         Lock::Unreadable(why) => lines.push(format!("Loop: lock unreadable ({why})")),
         Lock::Running(p) => lines.push(format!("Loop: running ({})", process(p))),
+    }
+    match view.next_check {
+        Some(NextCheck { left: 0, .. }) => lines.push("  idle: next check for work now".to_owned()),
+        Some(NextCheck { at, left }) => lines.push(format!(
+            "  idle: next check for work in {} (at {})",
+            crate::status::tasks::format_duration(left),
+            format_timestamp(at)
+        )),
+        None => {}
     }
     if view.cloud_first {
         lines.push(format!("  placement: {}", Placement::CloudFirst.as_str()));

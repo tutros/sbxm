@@ -50,6 +50,11 @@ pub struct LockFile {
     /// them in turn (review M-1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub adopted: Vec<AdoptedChild>,
+    /// When a `task loop --wait` last found no work and began its wait (issue 671): it looks
+    /// again a `PAUSE_POLL` later, which `sbxm status` shows. Absent while it works, and in a
+    /// lock an older binary wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_check: Option<String>,
 }
 
 /// A child a loop adopted (issue 643): its issue's task, and the owner its record names, the dead
