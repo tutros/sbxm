@@ -456,6 +456,75 @@ fn every_open_task_pr_shows_its_risk_and_whether_auto_merge_is_armed() {
     assert!(!text.contains("#105"), "{text}");
 }
 
+/// A fix task pushed onto PR `100 + number` (a resolve or a log-fix), with its review's `risk`;
+/// `finished` or still at `ready`.
+fn fix_of(number: u32, head: char, risk: Level, finished: bool) -> Record {
+    let id = record::fix_id(100 + number, &head.to_string().repeat(40)).unwrap();
+    let mut rec = Record::new(
+        &NewTask {
+            kind: Kind::Fix,
+            number: 100 + number,
+            repo: REPO,
+            title: "",
+            base: "main",
+            branch: "b",
+            config_hash: "h",
+            id: Some(&id),
+        },
+        T0,
+        Process::new(1, T0),
+    );
+    rec.stage = if finished {
+        Stage::Finished
+    } else {
+        Stage::Ready
+    };
+    rec.status = Status::Ok;
+    rec.pr = Some(format!("https://github.com/{REPO}/pull/{}", 100 + number));
+    rec.review = Some(review(risk));
+    rec
+}
+
+/// The risk the open-PR list shows for PR 102, given its opener's risk and its fixes.
+fn shown_risk(opener: Level, fixes: &[Record]) -> String {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    save(&b, &with_pr(2, Some(opener), true));
+    for fix in fixes {
+        save(&b, fix);
+    }
+    let gh = FakeGitHub::default().with_pr(pr(102, PrState::Open));
+    let text = section(&b, &gh);
+    assert!(text.contains("  open task PRs: 1\n"), "{text}");
+    text.lines()
+        .find(|l| l.starts_with("    #102"))
+        .unwrap_or_else(|| panic!("{text}"))
+        .to_owned()
+}
+
+#[test]
+fn a_finished_high_risk_fix_raises_a_low_risk_openers_pr() {
+    // Fix ids before and after the opener's in name order, so neither read order decides.
+    for head in ['0', 'f'] {
+        let line = shown_risk(Level::Low, &[fix_of(2, head, Level::High, true)]);
+        assert!(line.contains("— high risk"), "{line}");
+    }
+}
+
+#[test]
+fn a_later_low_risk_fix_does_not_clear_a_high_risk_openers_pr() {
+    for head in ['0', 'f'] {
+        let line = shown_risk(Level::High, &[fix_of(2, head, Level::Low, true)]);
+        assert!(line.contains("— high risk"), "{line}");
+    }
+}
+
+#[test]
+fn a_fix_not_finished_yet_does_not_count_toward_its_prs_risk() {
+    let line = shown_risk(Level::Low, &[fix_of(2, 'a', Level::High, false)]);
+    assert!(line.contains("— low risk"), "{line}");
+}
+
 #[test]
 fn no_open_task_pr_leaves_the_list_out() {
     let base = TestEnv::new();

@@ -580,11 +580,13 @@ pub struct OpenPr {
     pub armed: bool,
 }
 
-/// Each PR the task records under `base` name for `repo`, with its last review's risk, read as
-/// [`queue::loop_prs`] reads the records: a folder that isn't sbxm's own or a record that can't be
-/// read is skipped. By PR number, each once.
+/// Each PR the task records under `base` name for `repo`, read as [`queue::loop_prs`] reads the
+/// records: a folder that isn't sbxm's own or a record that can't be read is skipped. By PR
+/// number, each once, with the risk of its whole review history ([`queue::history_risk`], the
+/// rule the loop arms by): the tasks that opened it and every finished fix pushed onto it, so the
+/// order the records are read in never decides it (review M-2); unknown with no review.
 fn task_prs(base: &Path, repo: &str) -> anyhow::Result<Vec<(u32, Level)>> {
-    let mut found: Vec<(u32, Level)> = Vec::new();
+    let mut records: Vec<(u32, Record)> = Vec::new();
     for dir in record::task_folders(base)? {
         if check_own_folder(base, &dir).is_err() {
             continue;
@@ -592,18 +594,30 @@ fn task_prs(base: &Path, repo: &str) -> anyhow::Result<Vec<(u32, Level)>> {
         let Ok(rec) = record::read(&dir.join("task.json")) else {
             continue;
         };
-        let Some(number) = rec.pr.as_deref().and_then(queue::pr_number) else {
+        if rec.repo != repo {
             continue;
-        };
-        if rec.repo == repo && !found.iter().any(|(n, _)| *n == number) {
-            found.push((
-                number,
-                rec.review.as_ref().map_or(Level::Unknown, |r| r.risk),
-            ));
+        }
+        if let Some(number) = rec.pr.as_deref().and_then(queue::pr_number) {
+            records.push((number, rec));
         }
     }
-    found.sort_unstable();
-    Ok(found)
+    let mut numbers: Vec<u32> = records.iter().map(|(n, _)| *n).collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    Ok(numbers
+        .into_iter()
+        .map(|number| {
+            // The tasks that opened it: an issue's or a spec's, not one continuing a PR.
+            let openers = records.iter().filter_map(|(n, rec)| {
+                (*n == number
+                    && matches!(rec.kind, Kind::Issue | Kind::Spec)
+                    && rec.continues.is_none())
+                .then_some(rec)
+            });
+            let risk = queue::history_risk(base, repo, number, openers).unwrap_or(Level::Unknown);
+            (number, risk)
+        })
+        .collect())
 }
 
 fn first_line(error: &anyhow::Error) -> String {

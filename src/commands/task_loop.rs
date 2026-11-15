@@ -50,6 +50,7 @@ use crate::task::finish::check_own_folder;
 use crate::task::gates::HostRunner;
 use crate::task::loop_pause::{self, Pause};
 use crate::task::outcome;
+use crate::task::queue::awaiting_rank;
 use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
@@ -1198,33 +1199,15 @@ impl Loop<'_> {
     }
 
     /// The highest risk of PR `number`'s review history after the path rules: its own task's
-    /// review (`own`) and every finished fix pushed onto it (decision 298(3)); `None` with no
-    /// review. A later narrow review doesn't clear the risk an earlier one left.
+    /// review (`own`) and every finished fix pushed onto it ([`queue::history_risk`], decision
+    /// 298(3), the rule `sbxm status` shows too); `None` with no review.
     fn history_risk(&self, number: u32, own: Option<&Record>) -> Option<Level> {
-        self.fixes_of(number)
-            .iter()
-            .filter(|fix| fix.stage == Stage::Finished)
-            .chain(own)
-            .filter_map(|rec| rec.review.as_ref().map(|r| r.risk))
-            .max_by_key(|&risk| awaiting_rank(risk))
+        queue::history_risk(&self.base_dir, &self.repo, number, own)
     }
 
-    /// The fix tasks of PR `number` (resolves and log-fixes, `fix-<n>-<head>`) of this repo, in
-    /// task folders that are sbxm's own; a record that can't be read is left out.
+    /// The fix tasks of PR `number` of this repo ([`queue::fixes_of`]).
     fn fixes_of(&self, number: u32) -> Vec<Record> {
-        let prefix = format!("fix-{number}-");
-        record::task_folders(&self.base_dir)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|dir| {
-                dir.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|id| id.starts_with(&prefix))
-                    && check_own_folder(&self.base_dir, dir).is_ok()
-            })
-            .filter_map(|dir| record::read(&dir.join("task.json")).ok())
-            .filter(|rec| rec.kind == Kind::Fix && rec.repo == self.repo)
-            .collect()
+        queue::fixes_of(&self.base_dir, &self.repo, number)
     }
 
     /// (e) of issue 530: a notification for each question task `id` hands the user, once per
@@ -3895,18 +3878,6 @@ fn not_armed(reason: &str, also: Option<&str>) -> String {
 
 /// Why a PR isn't armed while the loop is paused on a red `main` (decision 299).
 const PAUSED_REASON: &str = "paused on a red main";
-
-/// How far `risk` keeps a PR from the loop's arming, for the highest of its review history: an
-/// unknown risk fails [`passes_arm_checks`] as medium does, so it outranks low (where
-/// [`Level`]'s own order puts it below).
-fn awaiting_rank(risk: Level) -> u8 {
-    match risk {
-        Level::Low => 0,
-        Level::Unknown => 1,
-        Level::Medium => 2,
-        Level::High => 3,
-    }
-}
 
 /// Why the log-fix task in `dir`, recorded as `rec`, didn't end clean (decision 300), in words
 /// that follow "its log-fix"; `None` when it did: finished, no stop, a review with 0 must-fix and
