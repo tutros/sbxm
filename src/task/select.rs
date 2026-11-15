@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::github::{Issue, PrState};
-use crate::task::findings::pr_of;
+use crate::task::findings::{field_lines, pr_of};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
@@ -65,13 +65,18 @@ pub struct Selection {
     pub labeled: Vec<u32>,
 }
 
-/// The `#<digits>` numbers on the first line of `body` that starts with `**<field>:**`.
-pub(crate) fn field_numbers(body: &str, field: &str) -> Vec<u32> {
-    let prefix = format!("**{field}:**");
-    let Some(line) = body.lines().find_map(|line| line.strip_prefix(&prefix)) else {
-        return Vec::new();
-    };
-    line.split('#')
+/// The `#<digits>` numbers in the first `**<field>:**` field of `body`, over every line it spans
+/// (`field_lines`, issue 514).
+pub fn field_numbers(body: &str, field: &str) -> Vec<u32> {
+    let fields = [field];
+    let text = field_lines(body, &fields)
+        .skip_while(|line| !line.starts)
+        .enumerate()
+        .take_while(|(i, line)| line.field.is_some() && (*i == 0 || !line.starts))
+        .map(|(_, line)| line.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    text.split('#')
         .skip(1)
         .filter_map(|rest| {
             let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
