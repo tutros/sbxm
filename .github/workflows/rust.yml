@@ -39,18 +39,18 @@ jobs:
     - name: Run doc tests
       run: cargo test --doc
 
-  # The Windows tests split over 3 runners (issue 656): the tests are CPU-bound on a runner's 4 cores, so only more
-  # runners make them faster. Each shard compiles everything and runs a third of the tests; together they run each
-  # test once. The required check is the summary job below, not these.
+  # The Windows tests split over 4 runners (issues 656, 663): the tests are CPU-bound on a runner's 4 cores, so only
+  # more runners make them faster. Each shard compiles everything and runs a quarter of the tests; together they run
+  # each test once. The required check is the summary job below, not these.
   windows-shard:
 
-    name: windows shard ${{ matrix.shard }} of 3
+    name: windows shard ${{ matrix.shard }} of 4
 
     strategy:
       # One red shard doesn't cancel the others: their times are part of the measure.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
 
     runs-on: windows-latest
 
@@ -98,10 +98,10 @@ jobs:
       if: steps.changes.outputs.build == 'true'
       with:
         tool: cargo-nextest
-    # `count:K/3` gives each test to exactly one of the 3 shards.
+    # `count:K/4` gives each test to exactly one of the 4 shards.
     - name: Run tests
       if: steps.changes.outputs.build == 'true'
-      run: cargo nextest run --partition count:${{ matrix.shard }}/3
+      run: cargo nextest run --partition count:${{ matrix.shard }}/4
     # nextest doesn't run doc tests; shard 1 runs them all.
     - name: Run doc tests
       if: steps.changes.outputs.build == 'true' && matrix.shard == 1
