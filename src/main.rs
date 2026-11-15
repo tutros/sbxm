@@ -154,12 +154,29 @@ fn exit(code: i32) -> ! {
     std::process::exit(code)
 }
 
+/// A child of `task loop` prints to the log the loop named, masked (issue 667); with none that
+/// opens, its screen stays the null one the loop gave it. The setting is this process's alone
+/// (review M-2): it is taken out of the environment, so a command this one runs (a host gate,
+/// `sbx`, a nested `sbxm`) keeps its own stdout and stderr.
+fn take_screen_log() {
+    let Some(log) = std::env::var_os(screen::LOG_ENV) else {
+        return;
+    };
+    // SAFETY: called first in `main`, before this process starts any thread, so nothing else
+    // reads or writes the environment at the same time.
+    unsafe { std::env::remove_var(screen::LOG_ENV) };
+    if !log.is_empty() {
+        let _ = screen::log_to(std::path::Path::new(&log));
+    }
+}
+
 /// The stack the CLI runs on. clap's derive builds every argument of `sbxm task` in one stack
 /// frame, which in a debug build outgrew the 1 MiB main-thread stack Windows gives (PR 515), so
 /// the CLI runs on a thread of its own with a stack that doesn't depend on the platform.
 const CLI_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 fn main() -> anyhow::Result<()> {
+    take_screen_log();
     let cli = std::thread::Builder::new()
         .name("main".into())
         .stack_size(CLI_STACK_SIZE)
@@ -193,11 +210,6 @@ fn say(text: &str) {
 
 fn run() -> anyhow::Result<()> {
     hint::enable();
-    // A child of `task loop` prints to the log the loop named, masked (issue 667); with none
-    // that opens, its screen stays the null one the loop gave it.
-    if let Some(log) = std::env::var_os(screen::LOG_ENV).filter(|l| !l.is_empty()) {
-        let _ = screen::log_to(std::path::Path::new(&log));
-    }
     // A child of `task loop` records the loop in the tasks it takes (decision 322).
     if let Some(owner) = std::env::var(task::record::LOOP_ENV)
         .ok()

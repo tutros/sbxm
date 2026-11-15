@@ -184,6 +184,7 @@ mod task_loop_check;
 mod task_loop_check_fix;
 mod task_loop_checks;
 mod task_loop_child;
+mod task_loop_child_env;
 mod task_loop_child_output;
 mod task_loop_job_children;
 mod task_loop_jobs;
