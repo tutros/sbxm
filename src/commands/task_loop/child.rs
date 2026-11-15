@@ -3,8 +3,10 @@
 //! in the loop's checkout and with its config dir, waits for it, then reads the `outcome.json`
 //! it wrote. The child's output goes to the task's `run.log` (the child tees it there as any
 //! `task` command does); the loop's window shows one line per event, `[<task> <slot>] <event>`.
-//! The child's own stdout and stderr are a log of its own, never the loop's (issue 667): a child
-//! of a killed loop writes on, and holds no pipe of the loop's (or of what started the loop) open.
+//! The child's screen is a log of its own, never the loop's (issue 667): its stdout and stderr are
+//! null, and it writes what it prints to the log the loop names in [`screen::LOG_ENV`], masked as
+//! `run.log` is (review M-1). A child of a killed loop writes on, and holds no pipe of the loop's
+//! (or of what started the loop) open.
 //!
 //! The child runs in a process group of its own, so the loop's first Ctrl-C doesn't reach it and
 //! it finishes its phase; the second ends the loop and, through [`Spawner::stop`], the child. A
@@ -22,6 +24,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::disk;
+use crate::screen;
 use crate::task::outcome;
 use crate::task::record::{Process, ProcessProbe};
 
@@ -44,7 +47,7 @@ pub struct Child {
     /// Its environment on top of the loop's: `SBXM_CONFIG_DIR`, and [`STOP_FILE_ENV`] for a phase
     /// whose slot wait obeys the loop's stop.
     pub env: Vec<(String, String)>,
-    /// The file its stdout and stderr go to, added to (issue 667):
+    /// The log its screen goes to, added to and masked (issue 667):
     /// `<base>/.sbxm/loop-logs/children/<task>.log`.
     pub log: PathBuf,
 }
@@ -135,18 +138,16 @@ impl Spawner for ChildSpawner {
     }
 
     fn start(&self, child: &Child) -> Result<Box<dyn Running + '_>> {
-        let (log, from) = open_log(child)?;
-        let stdout = log
-            .try_clone()
-            .with_context(|| format!("cannot open {}", child.log.display()))?;
+        let from = open_log(child)?;
         let mut command = Command::new(&self.exe);
         command
             .args(&child.args)
             .current_dir(&child.dir)
             .envs(child.env.iter().map(|(k, v)| (k, v)))
+            .env(screen::LOG_ENV, &child.log)
             .stdin(Stdio::null())
-            .stdout(stdout)
-            .stderr(log);
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         own_group(&mut command);
         let process = command
             .spawn()
@@ -316,23 +317,22 @@ fn own_group(command: &mut Command) {
 #[cfg(not(any(unix, windows)))]
 fn own_group(_command: &mut Command) {}
 
-/// `child`'s log, opened to add to, its folder made, with a header line naming the child's
-/// command; and where the child's own output in it starts.
-fn open_log(child: &Child) -> Result<(File, u64)> {
+/// `child`'s log, its folder made, given a header line naming the child's command, masked as
+/// `run.log` masks it; where the child's own output in it starts.
+fn open_log(child: &Child) -> Result<u64> {
     let path = &child.log;
-    let opened = || -> std::io::Result<(File, u64)> {
+    let opened = || -> std::io::Result<u64> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let mut log = OpenOptions::new().create(true).append(true).open(path)?;
-        writeln!(
-            log,
+        let header = format!(
             "# {} sbxm {}",
             crate::run::results::format_timestamp(crate::run::results::now()),
             child.args.join(" ")
-        )?;
-        let from = log.metadata()?.len();
-        Ok((log, from))
+        );
+        writeln!(log, "{}", crate::task::runlog::redact(&header))?;
+        log.metadata().map(|m| m.len())
     };
     opened().with_context(|| format!("cannot open the child's log {}", path.display()))
 }

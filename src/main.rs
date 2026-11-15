@@ -144,7 +144,14 @@ fn finish_task_with(
     }
     drop(out);
     drop(warn);
-    std::process::exit(code);
+    exit(code);
+}
+
+/// Ends the process with `code`, the screen's log (a child of `task loop`'s) written out first:
+/// `std::process::exit` skips every `Drop`.
+fn exit(code: i32) -> ! {
+    screen::finish();
+    std::process::exit(code)
 }
 
 /// The stack the CLI runs on. clap's derive builds every argument of `sbxm task` in one stack
@@ -158,7 +165,7 @@ fn main() -> anyhow::Result<()> {
         .stack_size(CLI_STACK_SIZE)
         .spawn(run)?;
     // A panic has already printed its message on the thread; exit as a panicking main would.
-    let result = cli.join().unwrap_or_else(|_| std::process::exit(101));
+    let result = cli.join().unwrap_or_else(|_| exit(101));
     // The error as `main`'s own return would print it, with its commands named by the running
     // executable, then the block saying where to run them (issue 574).
     let _ = screen::stdout().flush();
@@ -169,8 +176,9 @@ fn main() -> anyhow::Result<()> {
         screen::eprint(&block);
     }
     if result.is_err() {
-        std::process::exit(1);
+        exit(1);
     }
+    screen::finish();
     Ok(())
 }
 
@@ -185,6 +193,11 @@ fn say(text: &str) {
 
 fn run() -> anyhow::Result<()> {
     hint::enable();
+    // A child of `task loop` prints to the log the loop named, masked (issue 667); with none
+    // that opens, its screen stays the null one the loop gave it.
+    if let Some(log) = std::env::var_os(screen::LOG_ENV).filter(|l| !l.is_empty()) {
+        let _ = screen::log_to(std::path::Path::new(&log));
+    }
     // A child of `task loop` records the loop in the tasks it takes (decision 322).
     if let Some(owner) = std::env::var(task::record::LOOP_ENV)
         .ok()
@@ -278,7 +291,7 @@ fn run() -> anyhow::Result<()> {
                 if let Some(block) = hint::take_block() {
                     screen::eprint(&block);
                 }
-                std::process::exit(1);
+                exit(1);
             }
             Ok(())
         }
@@ -1038,7 +1051,7 @@ fn run() -> anyhow::Result<()> {
             if let Ok(false) = result {
                 drop(out);
                 drop(warn);
-                std::process::exit(1);
+                exit(1);
             }
             finish_task(result.map(drop), out, warn)
         }
@@ -1085,7 +1098,7 @@ fn run() -> anyhow::Result<()> {
                         child.stop();
                         // The task's sandbox slot (or its place in line) goes with it (decision 304).
                         sbxm::slot::release_all();
-                        std::process::exit(130)
+                        exit(130)
                     }
                 }) {
                     writeln!(

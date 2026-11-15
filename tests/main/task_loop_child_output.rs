@@ -1,7 +1,8 @@
 //! Issue 667, answer 1: a child `sbxm` the loop starts no longer inherits the loop's output. Its
-//! stdout and stderr go to a log of its own under `<base>/.sbxm/loop-logs/children/`, so nothing
-//! of the loop's (or of the trigger that started the loop) is held open by a child, and a child
-//! of a killed loop writes on and ends with its true outcome.
+//! screen is a log of its own under `<base>/.sbxm/loop-logs/children/`, so nothing of the loop's
+//! (or of the trigger that started the loop) is held open by a child, and a child of a killed
+//! loop writes on and ends with its true outcome. The log is masked as `run.log` is (review M-1):
+//! the child's stdout and stderr are null, and the child writes what it prints there itself.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use sbxm::backend::FakeBackend;
 use sbxm::commands::task_loop::child::{Child, ChildSpawner, Exit, Spawner};
 use sbxm::commands::task_loop::{PhaseEnd, Steps, TaskSteps};
 use sbxm::github::fake::FakeGitHub;
+use sbxm::screen::{LOG_ENV, MaskedLog, Stream};
 use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::outcome::Kind;
 use sbxm::task::record::{self, NewTask, Process, Record, Stage, Status};
@@ -156,11 +158,11 @@ fn sh(script: &str, dir: &Path, log: &Path) -> Child {
     }
 }
 
-/// The child's stdout and stderr are its log, never the loop's: a test on the spawner's
-/// settings, read from the child's own file descriptors.
+/// The child's stdout and stderr are null, never the loop's, and it is told its log: a test on
+/// the spawner's settings, read from the child's own file descriptors and environment.
 #[cfg(target_os = "linux")]
 #[test]
-fn task_loop_child_output_its_stdout_and_stderr_are_its_log_not_the_loops() {
+fn task_loop_child_output_its_stdout_and_stderr_are_not_the_loops_and_it_is_told_its_log() {
     let tmp = tempfile::tempdir().unwrap();
     let log = tmp.path().join("logs").join("issue-3.log");
     let spawner = ChildSpawner::new(PathBuf::from("/bin/sh"));
@@ -168,7 +170,10 @@ fn task_loop_child_output_its_stdout_and_stderr_are_its_log_not_the_loops() {
     let exit = spawner
         .run(
             &sh(
-                "readlink /proc/self/fd/1; readlink /proc/self/fd/2 >&2",
+                &format!(
+                    "o=$(readlink /proc/$$/fd/1); e=$(readlink /proc/$$/fd/2); \
+                     printf '%s\\n%s\\n' \"$o\" \"$e\" >> \"${LOG_ENV}\""
+                ),
                 tmp.path(),
                 &log,
             ),
@@ -178,12 +183,8 @@ fn task_loop_child_output_its_stdout_and_stderr_are_its_log_not_the_loops() {
 
     assert!(exit.success, "{exit:?}");
     let text = fs::read_to_string(&log).unwrap();
-    let canonical = fs::canonicalize(&log).unwrap();
     let fds: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
-    assert_eq!(fds.len(), 2, "{text}");
-    for fd in fds {
-        assert_eq!(Path::new(fd), canonical, "{text}");
-    }
+    assert_eq!(fds, ["/dev/null", "/dev/null"], "{text}");
 }
 
 /// A log kept from an earlier child is added to, and only this child's output is quoted.
@@ -198,7 +199,9 @@ fn task_loop_child_output_is_added_to_its_log_and_only_this_childs_error_is_quot
     let exit = spawner
         .run(
             &sh(
-                "echo progress; echo 'Error: gone' >&2; exit 3",
+                &format!(
+                    "{{ echo progress; echo 'Error: gone'; }} >> \"${LOG_ENV}\"; echo raw; exit 3"
+                ),
                 tmp.path(),
                 &log,
             ),
@@ -213,6 +216,8 @@ fn task_loop_child_output_is_added_to_its_log_and_only_this_childs_error_is_quot
     assert!(text.starts_with("Error: an earlier child's\n"), "{text}");
     assert!(text.contains("progress\n"), "{text}");
     assert!(text.contains("Error: gone\n"), "{text}");
+    let said: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
+    assert!(!said.contains(&"raw"), "its raw stdout is null: {text}");
 }
 
 /// A log that can't be opened is the child's start failing, said, never output dropped silently.
@@ -230,4 +235,82 @@ fn task_loop_child_output_a_log_that_cannot_be_opened_fails_the_start() {
         .unwrap_err();
 
     assert!(format!("{err:#}").contains("issue-3.log"), "{err:#}");
+}
+
+// --- review M-1: the child log is masked as `run.log` is ---
+
+/// Fake values shaped like a GitHub token and an API key: no real credential.
+const TOKEN: &str = "ghp_FAKEnotAREALtoken0";
+const KEY: &str = "sk-ant-FAKE-NOT-A-REAL-KEY";
+
+#[test]
+fn task_loop_child_output_a_masked_log_masks_each_stream_and_a_value_split_across_writes() {
+    let mut log = MaskedLog::new(Vec::new());
+
+    log.push(Stream::Out, b"token ghp_FAKEnot");
+    log.push(Stream::Err, format!("key {KEY}\n").as_bytes());
+    log.push(Stream::Out, b"AREALtoken0 done\npartial sk-ant-FAKE-");
+    log.push(Stream::Out, b"NOT-A-REAL-KEY");
+    let text = String::from_utf8(log.into_inner()).unwrap();
+
+    assert!(!text.contains("FAKE"), "{text}");
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        [
+            "key [redacted]",
+            "token [redacted] done",
+            "partial [redacted]"
+        ],
+        "{text}"
+    );
+}
+
+#[test]
+fn task_loop_child_output_the_header_of_a_childs_log_is_masked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let log = tmp.path().join("issue-3.log");
+    let spawner = ChildSpawner::new(PathBuf::from(env!("CARGO_BIN_EXE_sbxm")));
+    let child = Child {
+        args: vec!["--version".into(), TOKEN.into()],
+        dir: tmp.path().to_owned(),
+        env: Vec::new(),
+        log: log.clone(),
+    };
+
+    spawner.run(&child, &|| {}).unwrap();
+
+    let text = fs::read_to_string(&log).unwrap();
+    assert!(!text.contains(TOKEN), "{text}");
+    assert!(text.contains("--version [redacted]"), "{text}");
+}
+
+#[test]
+fn task_loop_child_output_what_the_real_binary_prints_reaches_its_log_masked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config");
+    fs::create_dir_all(&config).unwrap();
+    // A config the child can't read, whose error quotes the line with the value.
+    fs::write(config.join("config.toml"), format!("base_dir = {TOKEN}\n")).unwrap();
+    let log = tmp.path().join("issue-3.log");
+    let spawner = ChildSpawner::new(PathBuf::from(env!("CARGO_BIN_EXE_sbxm")));
+    let child = Child {
+        args: ["task", "run", "--issue", "3", "--repo", "o/r"]
+            .map(String::from)
+            .to_vec(),
+        dir: tmp.path().to_owned(),
+        env: vec![("SBXM_CONFIG_DIR".into(), config.display().to_string())],
+        log: log.clone(),
+    };
+
+    let exit = spawner.run(&child, &|| {}).unwrap();
+
+    assert!(!exit.success, "{exit:?}");
+    let text = fs::read_to_string(&log).unwrap();
+    assert!(
+        text.contains("Error: "),
+        "its error reaches its log: {text}"
+    );
+    assert!(text.contains("[redacted]"), "{text}");
+    assert!(!text.contains(TOKEN), "{text}");
+    assert!(!exit.errors.contains(TOKEN), "{exit:?}");
 }
