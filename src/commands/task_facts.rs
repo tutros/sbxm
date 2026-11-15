@@ -93,18 +93,22 @@ pub fn run(
 
     let mut seen = BTreeSet::new();
     let mut rows = Vec::new();
-    let folders = folders(&base_dir, &record::tasks_root(&base_dir))
+    let live = folders(&base_dir, &record::tasks_root(&base_dir), warn)?;
+    let archived = folders(&base_dir, &merged::archive_root(&base_dir), warn)?;
+    let folders = live
         .into_iter()
         .map(|dir| (dir, true))
-        .chain(
-            folders(&base_dir, &merged::archive_root(&base_dir))
-                .into_iter()
-                .map(|dir| (dir, false)),
-        );
+        .chain(archived.into_iter().map(|dir| (dir, false)));
     for (dir, live) in folders {
         let path = dir.join("task.json");
-        if !plain_file(&path) {
-            continue;
+        match fs::symlink_metadata(&path) {
+            Ok(m) if m.file_type().is_file() => {}
+            Ok(_) => {
+                writeln!(warn, "warning: {} skipped: it is a link", path.display())?;
+                continue;
+            }
+            // A folder without a record (a task that never got written) holds no task.
+            Err(_) => continue,
         }
         let task = match read(&path) {
             Ok(task) => task,
@@ -158,25 +162,48 @@ fn check_date<'a>(flag: &str, value: &'a str) -> Result<&'a str> {
 }
 
 /// The folders under `root` in name order, each checked as `sbxm status` checks the archive:
-/// `root` and the folder are plain folders really under `base_dir`, never links. Anything else
-/// is passed over.
-fn folders(base_dir: &Path, root: &Path) -> Vec<PathBuf> {
-    if fs::symlink_metadata(root).is_err() || check_own_folder(base_dir, root).is_err() {
-        return Vec::new();
+/// `root` and the folder are plain folders really under `base_dir`, never links. A link, or a
+/// folder whose real place is elsewhere, is passed over with a warning; a plain file is no task.
+fn folders(base_dir: &Path, root: &Path, warn: &mut dyn Write) -> Result<Vec<PathBuf>> {
+    if fs::symlink_metadata(root).is_err() {
+        return Ok(Vec::new());
     }
-    let Ok(entries) = fs::read_dir(root) else {
-        return Vec::new();
+    if let Some(why) = not_own(base_dir, root) {
+        writeln!(warn, "warning: {} skipped: {why}", root.display())?;
+        return Ok(Vec::new());
+    }
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) => {
+            writeln!(warn, "warning: {} skipped: {e}", root.display())?;
+            return Ok(Vec::new());
+        }
     };
-    let mut dirs: Vec<PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|dir| {
-            fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
-                && check_own_folder(base_dir, dir).is_ok()
-        })
-        .collect();
+    let mut dirs = Vec::new();
+    for dir in entries.flatten().map(|entry| entry.path()) {
+        let Ok(meta) = fs::symlink_metadata(&dir) else {
+            continue;
+        };
+        if !meta.is_dir() && !meta.file_type().is_symlink() {
+            continue;
+        }
+        match not_own(base_dir, &dir) {
+            None => dirs.push(dir),
+            Some(why) => writeln!(warn, "warning: {} skipped: {why}", dir.display())?,
+        }
+    }
     dirs.sort();
-    dirs
+    Ok(dirs)
+}
+
+/// Why `dir` isn't read as a folder of `base_dir`: a link, or a real place elsewhere.
+fn not_own(base_dir: &Path, dir: &Path) -> Option<String> {
+    if fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Some("it is a link".to_owned());
+    }
+    check_own_folder(base_dir, dir)
+        .err()
+        .map(|_| format!("it isn't really under {}", base_dir.display()))
 }
 
 /// Whether `path` is a file, not a link to one.

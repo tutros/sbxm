@@ -464,9 +464,43 @@ fn task_facts_skips_an_archive_entry_that_is_a_link() {
         return; // no right to make a link here (Windows without developer mode)
     }
 
-    let rows = json_rows(&env, "2026-11-10", None);
+    let (result, out, warn) = facts(&env, &opts("2026-11-10", None, true));
 
-    assert_eq!(rows, Vec::<Value>::new());
+    result.unwrap();
+    assert_eq!(out, "[]\n");
+    let named = root.join("issue-8").display().to_string();
+    assert_eq!(warn.lines().count(), 1, "{warn}");
+    assert!(
+        warn.starts_with("warning: ") && warn.contains(&named) && warn.contains("link"),
+        "{warn}"
+    );
+}
+
+#[test]
+fn task_facts_warns_about_a_task_json_that_is_a_link() {
+    let env = Env::new();
+    let elsewhere = env.tmp.path().join("elsewhere");
+    let target = save(&elsewhere, &issue_task(10, "2026-11-10T08:00:00Z")).join("task.json");
+    let dir = record::task_dir(&env.base_dir(), "issue-10");
+    fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&target, dir.join("task.json")).is_ok();
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&target, dir.join("task.json")).is_ok();
+    if !linked {
+        return; // no right to make a link here (Windows without developer mode)
+    }
+
+    let (result, out, warn) = facts(&env, &opts("2026-11-10", None, true));
+
+    result.unwrap();
+    assert_eq!(out, "[]\n");
+    let named = dir.join("task.json").display().to_string();
+    assert_eq!(warn.lines().count(), 1, "{warn}");
+    assert!(
+        warn.starts_with("warning: ") && warn.contains(&named) && warn.contains("link"),
+        "{warn}"
+    );
 }
 
 #[test]
