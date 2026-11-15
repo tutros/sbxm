@@ -134,6 +134,12 @@ Rules:
 - `hooks` is a free-form object, untouched by M2b; later stages (plan, release, learn) attach there [139].
 - `schema` is checked on read; a newer schema is refused with a hint to upgrade sbxm.
 - The record never contains secret values; usage and transcripts follow the run-results rules (decision 128).
+- `runs` (issue 419) keeps every worker, fix-round and reviewer run in order, as `{"role": "worker" | "fix" |
+  "reviewer", "round": n, "model": "...", "status": "...", "usage": {...}, "duration_s": n}`: `round` is the fix or
+  review round (0 for the worker's own run), and `model` is the one the harness's output names (Claude's and
+  Antigravity's `init` event), or `unknown` (Codex's output names none). A fix round whose session resume the CLI
+  could not find has two entries. `worker.run` and `reviewer.run` still hold each agent's latest run. Absent in older
+  records.
 - `review.commit` (decision 187) is the branch commit the last review covered, kept even when that review is clean
   (`last_reviewed_commit` is then cleared, since it only narrows the next review). Absent in older records, and in a
   PR task's review recorded before decision 190. For a PR task it is also what `task review --pr` on a `ready` task

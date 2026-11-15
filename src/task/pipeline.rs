@@ -3311,6 +3311,34 @@ pub struct Worked {
     pub agent: String,
 }
 
+/// A run's usage as `task.json` keeps it.
+fn usage_json(usage: &headless::Usage) -> serde_json::Value {
+    serde_json::json!({
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cost_usd": usage.cost_usd,
+    })
+}
+
+/// Appends a worker, fix-round or reviewer run that `started` then to the task's `runs` (issue
+/// 419), with the model its harness reported, or `unknown`.
+fn record_run(
+    prepared: &mut Prepared,
+    role: SandboxRole,
+    round: u32,
+    result: &headless::HeadlessResult,
+    started: Instant,
+) {
+    prepared.record.runs.push(record::RunEntry {
+        role,
+        round,
+        model: result.model.clone().unwrap_or_else(|| "unknown".to_owned()),
+        status: run_label(&result.status),
+        usage: usage_json(&result.usage),
+        duration_s: started.elapsed().as_secs(),
+    });
+}
+
 fn run_label(status: &RunStatus) -> String {
     match status {
         RunStatus::Completed => "completed".to_owned(),
@@ -3439,14 +3467,11 @@ pub(super) fn work(env: &TaskEnv, prepared: &mut Prepared) -> Result<Worked> {
     if let Some(agent) = prepared.record.worker.as_mut() {
         agent.run = Some(RunInfo {
             status: run_label(&result.status),
-            usage: serde_json::json!({
-                "input_tokens": result.usage.input_tokens,
-                "output_tokens": result.usage.output_tokens,
-                "cost_usd": result.usage.cost_usd,
-            }),
+            usage: usage_json(&result.usage),
             duration_s: started.elapsed().as_secs(),
         });
     }
+    record_run(prepared, SandboxRole::Worker, 0, &result, started);
     let mut status = result.status;
     prepared.record.finish(match &status {
         RunStatus::Completed => Status::Completed,
@@ -4762,6 +4787,9 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     // The worker's own session, with `[fix] resume` (issue 418); fresh when there is none.
     let resume = session::restore(env, prepared, &sandbox);
     let mut resumed = resume.is_some();
+    // `round` counts the rounds before this one.
+    let round = prepared.record.round + 1;
+    let mut started = Instant::now();
     let mut ran = run(resume.clone());
     if let (Some(id), Ok(result)) = (&resume, &ran)
         && session::not_found(result)
@@ -4771,13 +4799,16 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
              the fix round runs fresh",
             prepared.record.id
         ));
+        // The resume that failed was a run too, and may have cost something (issue 419).
+        record_run(prepared, SandboxRole::Fix, round, result, started);
+        started = Instant::now();
         ran = run(None);
         resumed = false;
     }
-    if ran.is_ok() {
-        // Issue 430: `task finish` says on the issue how each fix round ran. `round` counts the
-        // rounds before this one; a round run again by `task resume` replaces its entry.
-        let round = prepared.record.round + 1;
+    if let Ok(result) = &ran {
+        record_run(prepared, SandboxRole::Fix, round, result, started);
+        // Issue 430: `task finish` says on the issue how each fix round ran. A round run again
+        // by `task resume` replaces its entry.
         prepared.record.fix_runs.retain(|r| r.round != round);
         prepared
             .record
@@ -5763,14 +5794,11 @@ fn run_review_agent(
     if let Some(agent) = prepared.record.reviewer.as_mut() {
         agent.run = Some(RunInfo {
             status: run_label(&result.status),
-            usage: serde_json::json!({
-                "input_tokens": result.usage.input_tokens,
-                "output_tokens": result.usage.output_tokens,
-                "cost_usd": result.usage.cost_usd,
-            }),
+            usage: usage_json(&result.usage),
             duration_s: started.elapsed().as_secs(),
         });
     }
+    record_run(prepared, SandboxRole::Reviewer, round, &result, started);
     match &result.status {
         RunStatus::Completed => {}
         RunStatus::TimedOut => bail!(

@@ -452,6 +452,33 @@ fn a_fix_round_with_the_switch_off_is_recorded_as_fresh() {
     );
 }
 
+// --- Issue 419: a resume the CLI could not find is a run of its own in `runs` -----------------
+
+#[test]
+fn a_fix_round_whose_session_the_cli_cannot_find_keeps_both_runs_in_the_tasks_runs() {
+    let f = config(true);
+    let not_found = ExecOutput {
+        stdout: String::new(),
+        stderr: format!("No conversation found with session ID: {SESSION}\n"),
+        exit_code: Some(1),
+    };
+    let backend = backend(&f, &[ONE, CLEAN, CLEAN], bytes(10), not_found);
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    let runs = record::read(&meta(&f).join("task.json")).unwrap().runs;
+    let fixes: Vec<(u32, &str)> = runs
+        .iter()
+        .filter(|r| r.role == record::SandboxRole::Fix)
+        .map(|r| (r.round, r.status.as_str()))
+        .collect();
+    assert_eq!(fixes.len(), 2, "{runs:?}");
+    assert_eq!(fixes[0].0, 1);
+    assert!(fixes[0].1.starts_with("failed: "), "{}", fixes[0].1);
+    assert_eq!(fixes[1], (1, "completed"));
+}
+
 /// A Codex worker with a Claude reviewer: the reviewer writes `review.md` in its clone.
 fn codex_worker_backend(f: &Fixture, reviews: Vec<&'static str>) -> FakeBackend {
     let worker = play_tasks(

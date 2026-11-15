@@ -262,6 +262,7 @@ mod task_run_list;
 mod task_run_log_phases;
 mod task_run_spec;
 mod task_runlog;
+mod task_runs;
 mod task_select;
 mod task_select_fields;
 mod task_sign_in;
