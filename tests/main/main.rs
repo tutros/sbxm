@@ -256,6 +256,7 @@ mod task_rm_cmd;
 mod task_rm_delete_retry;
 mod task_rm_fix_pr;
 mod task_rm_merged_cmd;
+mod task_rm_sbx_output;
 mod task_rm_spec_cmd;
 mod task_run;
 mod task_run_cli;
