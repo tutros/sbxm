@@ -72,6 +72,8 @@ fn row(time: TaskTime) -> TaskRow {
         commits_ahead: None,
         must_fix: None,
         pr: None,
+        location: None,
+        parked: None,
         log_line: None,
     }
 }

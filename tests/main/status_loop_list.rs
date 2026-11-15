@@ -212,6 +212,7 @@ fn an_older_binary_reads_the_new_lock_as_its_process() {
         cap: Some(1),
         progress: None,
         adopted: Vec::new(),
+        idle_check: None,
     };
     let text = serde_json::to_string(&file).unwrap();
 
@@ -231,6 +232,7 @@ fn write_lock(base: &Path, issues: &[u32], cap: Option<u32>) {
         cap,
         progress: None,
         adopted: Vec::new(),
+        idle_check: None,
     };
     fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
 }

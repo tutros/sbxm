@@ -257,8 +257,8 @@ fn an_unreadable_unrelated_record_keeps_the_prs_title() {
 
 // ---- `sbxm status`'s title column ------------------------------------------
 
-/// A row whose fixed columns (everything but the title and the log) are 54 columns wide with
-/// their gaps: `issue-1`, `working`, `running` and four dashes under headers of 4, 5, 8 and 2.
+/// A row whose fixed columns (everything but the title and the log) are 61 columns wide with
+/// their gaps: `issue-1`, `working`, `running` and five dashes under headers of 4, 5, 8, 2 and 5.
 fn row(title: &str) -> TaskRow {
     TaskRow {
         id: "issue-1".to_owned(),
@@ -269,20 +269,22 @@ fn row(title: &str) -> TaskRow {
         commits_ahead: None,
         must_fix: None,
         pr: None,
+        location: None,
+        parked: None,
         log_line: Some("[working] busy".to_owned()),
     }
 }
 
 /// The fixed columns, the title's own 2-column gap and the log's 1 column for its `…`.
-const AROUND_TITLE: usize = 54 + 2 + 1;
+const AROUND_TITLE: usize = 61 + 2 + 1;
 
 #[test]
 fn status_shows_a_title_column_after_the_id() {
     let text = tasks::render(&[row("Add titles")], 0, None);
 
     insta::assert_snapshot!(text, @r"
-    ID       TITLE       STAGE    STATUS   TIME  AHEAD  FINDINGS  PR  LOG
-    issue-1  Add titles  working  running  -     -      -         -   [working] busy
+    ID       TITLE       STAGE    STATUS   TIME  AHEAD  FINDINGS  PR  WHERE  LOG
+    issue-1  Add titles  working  running  -     -      -         -   -      [working] busy
     ");
 }
 
@@ -572,6 +574,8 @@ fn the_loop_section_titles_its_task_and_the_prs_awaiting_but_not_one_whose_recor
         .insert("issue-40".to_owned(), "Earlier".to_owned());
     let view = View {
         cloud_first: false,
+        dead: None,
+        next_check: None,
         lock: Lock::Running(Process::new(1, T0)),
         work: Some(work),
         snapshot: Some(Snapshot {
@@ -580,6 +584,7 @@ fn the_loop_section_titles_its_task_and_the_prs_awaiting_but_not_one_whose_recor
             pr_titles: [(9, "Earlier".to_owned())].into_iter().collect(),
             issue_titles: Default::default(),
             blocked: Default::default(),
+            open_prs: Ok(Vec::new()),
         }),
         pause: sbxm::task::loop_pause::State::None,
         jobs: Default::default(),

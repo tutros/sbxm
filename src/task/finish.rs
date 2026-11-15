@@ -1954,12 +1954,13 @@ fn is_ci_path(path: &str) -> bool {
     lower.starts_with(".github/workflows/") || lower.starts_with(".github/actions/")
 }
 
-/// The CI files ([`is_ci_path`]) the task's own commits change. For a task that continues a PR,
+/// The CI files ([`is_ci_path`]) the task's own commits change: what `finish` refuses to push
+/// ([`refuse_workflow_changes`]), and what `sbxm status` names for a task parked by it (issue 671). For a task that continues a PR,
 /// those commits can include a merge of the base branch (a resolve), which brings the base's own
 /// CI changes along; a file identical to the base branch's tip in `repo_git` already runs there,
 /// so only one that differs from it counts (issue #569). A task's own edit, addition or deletion
 /// still differs.
-fn ci_changes(task: &Record, repo_git: &Path) -> Result<Vec<String>> {
+pub fn ci_changes(task: &Record, repo_git: &Path) -> Result<Vec<String>> {
     let ci: Vec<String> = task
         .changed_paths(repo_git)?
         .into_iter()

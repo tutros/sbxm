@@ -11,16 +11,19 @@ use std::fs;
 use std::path::Path;
 
 use crate::config::Placement;
-use crate::github::GitHubBackend;
+use crate::github::{GitHubBackend, PrState};
 use crate::run::results::{format_timestamp, parse_timestamp};
 use crate::status::tasks::truncate;
 use crate::task::finish::check_own_folder;
 use crate::task::jobs::{self, Job, Running};
 use crate::task::lock;
+use crate::task::loop_log;
 use crate::task::loop_pause;
 use crate::task::merged;
+use crate::task::outcome;
 use crate::task::queue::{self, LOOP_HOOK, LockFile, Outcome, Progress};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status};
+use crate::task::risk::Level;
 
 /// The longest queue shown on a terminal; the rest is "… N more". Output that isn't a terminal
 /// shows every issue.
@@ -69,6 +72,82 @@ pub fn read_lock_file(base: &Path, probe: &dyn ProcessProbe) -> (Lock, Option<Lo
             None,
         ),
     }
+}
+
+/// What a loop whose process is gone left behind (issue 671).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Dead {
+    /// When it was last seen: the latest write of its lock or of its log
+    /// ([`loop_log::path`]), whichever is later; `None` when neither can be read.
+    pub last_seen: Option<u64>,
+    /// The tasks it left, in the order the records list them.
+    pub left: Vec<Left>,
+}
+
+/// A task a dead loop left: a child still running, or a task at `ready` whose last command
+/// failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Left {
+    pub id: String,
+    pub title: String,
+    pub stage: &'static str,
+    pub slot: &'static str,
+    pub why: LeftWhy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeftWhy {
+    /// Its child is still running: the process id.
+    Running(u32),
+    /// The first line of what its `outcome.json` says.
+    Failed(String),
+}
+
+/// What the dead loop of the lock `file` left (issue 671): when it was last seen, and each task it
+/// owns (the loop its child recorded, else its process, or a child it had adopted, as
+/// `task loop` decides it when it takes the lock over) that is either still running under a live
+/// process or at `ready` with an `outcome.json` that says its last command didn't end well (any
+/// end but `ready`, and `held`, which wrote nothing). Reads only.
+pub fn dead(base: &Path, file: &LockFile, probe: &dyn ProcessProbe) -> Dead {
+    let modified = |path: &Path| {
+        fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+    };
+    let log = parse_timestamp(&file.process.started_at)
+        .and_then(|started| modified(&loop_log::path(base, started)));
+    let last_seen = modified(&queue::lock_path(base)).max(log);
+    let mut left = Vec::new();
+    for rec in record::load_all(base).unwrap_or_default() {
+        let owned = rec.owner() == Some(&file.process) || file.adopted.iter().any(|a| a.is(&rec));
+        if !owned {
+            continue;
+        }
+        let dir = record::task_dir(base, &rec.id);
+        let live = rec.process.as_ref().filter(|p| p.alive(probe));
+        let why = match (rec.status, rec.stage, live) {
+            (Status::Running, _, Some(process)) => LeftWhy::Running(process.pid),
+            (_, Stage::Ready, _) => match outcome::read(&dir) {
+                outcome::Read::Outcome(o)
+                    if !matches!(o.end, outcome::Kind::Ready | outcome::Kind::Held) =>
+                {
+                    LeftWhy::Failed(o.detail.lines().next().unwrap_or(o.end.name()).to_owned())
+                }
+                _ => continue,
+            },
+            _ => continue,
+        };
+        left.push(Left {
+            id: rec.id.clone(),
+            title: rec.title.clone(),
+            stage: rec.stage.name(),
+            slot: rec.location.as_str(),
+            why,
+        });
+    }
+    Dead { last_seen, left }
 }
 
 /// The task a running loop is on.
@@ -168,6 +247,7 @@ pub fn work(base: &Path, lock: &Process, probe: &dyn ProcessProbe) -> anyhow::Re
             cap: None,
             progress: None,
             adopted: Vec::new(),
+            idle_check: None,
         },
         probe,
     )
@@ -482,6 +562,65 @@ pub struct Snapshot {
     /// gives after `skip: `, or `unknown (<first line of the error>)` when the check fails. An
     /// issue it would take has no entry.
     pub blocked: std::collections::BTreeMap<u32, String>,
+    /// Every open PR a task record names (issue 671), by number, whoever finished it.
+    pub open_prs: Result<Vec<OpenPr>, String>,
+}
+
+/// An open PR a task record names (issue 671): what the user needs to know to merge it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenPr {
+    pub number: u32,
+    /// Its task's title (issue 246), or empty.
+    pub title: String,
+    /// The risk its task's last review recorded, the path-rule floor included (decision 176);
+    /// unknown for a task with no review.
+    pub risk: Level,
+    pub draft: bool,
+    /// Whether GitHub's auto-merge is armed on it: one not armed waits on the user's merge.
+    pub armed: bool,
+}
+
+/// Each PR the task records under `base` name for `repo`, read as [`queue::loop_prs`] reads the
+/// records: a folder that isn't sbxm's own or a record that can't be read is skipped. A record
+/// names a PR by its `pr` or, for a task continuing one (decision 169), by its `continues`. By PR
+/// number, each once, with the risk of its whole review history, so the order the records are
+/// read in never decides it (review M-2): [`queue::history_risk`] over the issue or spec tasks
+/// that opened it, the issue or spec tasks that continued it and finished (review M-1 of the
+/// second round), and its finished fixes; unknown with no review.
+fn task_prs(base: &Path, repo: &str) -> anyhow::Result<Vec<(u32, Level)>> {
+    let mut records: Vec<Record> = Vec::new();
+    let mut numbers: Vec<u32> = Vec::new();
+    for dir in record::task_folders(base)? {
+        if check_own_folder(base, &dir).is_err() {
+            continue;
+        }
+        let Ok(rec) = record::read(&dir.join("task.json")) else {
+            continue;
+        };
+        if rec.repo != repo {
+            continue;
+        }
+        let named = rec.pr.as_deref().and_then(queue::pr_number);
+        let continued = rec.continues.as_ref().map(|c| c.pr);
+        numbers.extend(named.into_iter().chain(continued));
+        records.push(rec);
+    }
+    numbers.sort_unstable();
+    numbers.dedup();
+    Ok(numbers
+        .into_iter()
+        .map(|number| {
+            let reviewed = records.iter().filter(|rec| {
+                let own = matches!(rec.kind, Kind::Issue | Kind::Spec);
+                match &rec.continues {
+                    None => own && rec.pr.as_deref().and_then(queue::pr_number) == Some(number),
+                    Some(c) => own && c.pr == number && rec.stage == Stage::Finished,
+                }
+            });
+            let risk = queue::history_risk(base, repo, number, reviewed).unwrap_or(Level::Unknown);
+            (number, risk)
+        })
+        .collect())
 }
 
 fn first_line(error: &anyhow::Error) -> String {
@@ -517,6 +656,7 @@ pub fn fetch_checking(
                 pr_titles: Default::default(),
                 issue_titles: Default::default(),
                 blocked: Default::default(),
+                open_prs: Err(why.clone()),
             };
         }
     };
@@ -560,11 +700,34 @@ pub fn fetch_checking(
             })
             .collect()
     });
+    // Each PR's state is asked once: the loop's PRs are task PRs too.
+    let mut states = std::collections::BTreeMap::new();
+    let open_prs = (|| -> anyhow::Result<Vec<OpenPr>> {
+        let mut open = Vec::new();
+        for (number, risk) in task_prs(base, repo)? {
+            let state = github.pr_merge_state(repo, number)?;
+            states.insert(number, state);
+            if state.state == PrState::Open {
+                open.push(OpenPr {
+                    number,
+                    title: crate::title::pr_title(base, repo, number).unwrap_or_default(),
+                    risk,
+                    draft: state.draft,
+                    armed: state.auto_merge,
+                });
+            }
+        }
+        Ok(open)
+    })();
     let awaiting = (|| -> anyhow::Result<Vec<u32>> {
         let mut awaiting = Vec::new();
         for pr in queue::loop_prs(base, repo)? {
             let Some(number) = pr.number else { continue };
-            if queue::awaits_user(github.pr_merge_state(repo, number)?) {
+            let state = match states.get(&number) {
+                Some(state) => *state,
+                None => github.pr_merge_state(repo, number)?,
+            };
+            if queue::awaits_user(state) {
                 awaiting.push(number);
             }
         }
@@ -583,6 +746,7 @@ pub fn fetch_checking(
         pr_titles,
         issue_titles,
         blocked,
+        open_prs: open_prs.map_err(|e| first_line(&e)),
     }
 }
 
@@ -617,6 +781,33 @@ pub struct View {
     pub jobs: Jobs,
     /// Whether the loop routes with `[resources] placement = "cloud-first"` (issue 648).
     pub cloud_first: bool,
+    /// For a lock whose process is gone: what that loop left (issue 671).
+    pub dead: Option<Dead>,
+    /// For a running loop waiting on an empty queue: when it next looks for work (issue 671).
+    pub next_check: Option<NextCheck>,
+}
+
+/// When an idle loop next looks for work (issue 671).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NextCheck {
+    /// The time it looks, in seconds since the epoch.
+    pub at: u64,
+    /// How long until then at the frame's time; 0 at it or past it.
+    pub left: u64,
+}
+
+impl NextCheck {
+    /// The next check of a loop whose lock `file` says it began an idle wait, at `now`: a
+    /// [`PAUSE_POLL`](crate::commands::task_loop::PAUSE_POLL) after that. `None` when it isn't
+    /// waiting, or the time doesn't parse.
+    pub fn of(file: &LockFile, now: u64) -> Option<Self> {
+        let began = parse_timestamp(file.idle_check.as_deref()?)?;
+        let at = began + crate::commands::task_loop::PAUSE_POLL.as_secs();
+        Some(Self {
+            at,
+            left: at.saturating_sub(now),
+        })
+    }
 }
 
 /// What the loop's job queue holds (issue 528, decision 309), read from its files alone.
@@ -759,12 +950,42 @@ pub fn render(view: &View, width: Option<usize>) -> String {
     let mut lines = Vec::new();
     match &view.lock {
         Lock::Absent => lines.push("Loop: not running".to_owned()),
-        Lock::Stale(p) => lines.push(format!(
-            "Loop: not running (stale lock: {} is gone)",
-            process(p)
-        )),
+        Lock::Stale(p) => {
+            let seen = view
+                .dead
+                .as_ref()
+                .and_then(|d| d.last_seen)
+                .map_or_else(String::new, |at| {
+                    format!("; last seen {}", format_timestamp(at))
+                });
+            lines.push(format!(
+                "Loop: not running (stale lock: {} is gone{seen})",
+                process(p)
+            ));
+            for left in view.dead.iter().flat_map(|d| &d.left) {
+                let why = match &left.why {
+                    LeftWhy::Running(pid) => format!("still running (process {pid})"),
+                    LeftWhy::Failed(detail) => format!("its last command failed ({detail})"),
+                };
+                lines.push(format!(
+                    "  left: {} at {}, {}: {why}",
+                    crate::title::named(&left.id, &left.title),
+                    left.stage,
+                    left.slot
+                ));
+            }
+        }
         Lock::Unreadable(why) => lines.push(format!("Loop: lock unreadable ({why})")),
         Lock::Running(p) => lines.push(format!("Loop: running ({})", process(p))),
+    }
+    match view.next_check {
+        Some(NextCheck { left: 0, .. }) => lines.push("  idle: next check for work now".to_owned()),
+        Some(NextCheck { at, left }) => lines.push(format!(
+            "  idle: next check for work in {} (at {})",
+            crate::status::tasks::format_duration(left),
+            format_timestamp(at)
+        )),
+        None => {}
     }
     if view.cloud_first {
         lines.push(format!("  placement: {}", Placement::CloudFirst.as_str()));
@@ -864,6 +1085,7 @@ pub fn render(view: &View, width: Option<usize>) -> String {
             }
             Err(why) => format!("  awaiting you: unreadable ({why})"),
         });
+        open_pr_lines(&snapshot.open_prs, &mut lines);
         // A loop over an `--issue` list doesn't take the labeled queue (issue 477), but the same
         // read gives its pending issues' titles, so its failure is still said (review M-1).
         let listed = view.work.as_ref().is_some_and(|w| w.listed.is_some());
@@ -995,6 +1217,31 @@ fn blocked(number: u32, snapshot: Option<&Snapshot>) -> String {
     snapshot
         .and_then(|s| s.blocked.get(&number))
         .map_or_else(String::new, |why| format!(" — blocked: {why}"))
+}
+
+/// The open task PRs (issue 671), each on its own line with its risk, whether it is a draft and
+/// whether auto-merge is armed; nothing when there is none, one line when GitHub can't say.
+fn open_pr_lines(open: &Result<Vec<OpenPr>, String>, lines: &mut Vec<String>) {
+    match open {
+        Err(why) => lines.push(format!("  open task PRs: unreadable ({why})")),
+        Ok(open) if open.is_empty() => {}
+        Ok(open) => {
+            lines.push(format!("  open task PRs: {}", open.len()));
+            for pr in open {
+                let draft = if pr.draft { ", draft" } else { "" };
+                let merge = if pr.armed {
+                    "auto-merge armed"
+                } else {
+                    "not armed: awaits your merge"
+                };
+                lines.push(format!(
+                    "    {} — {} risk{draft}, {merge}",
+                    crate::title::titled(&format!("#{}", pr.number), &pr.title),
+                    pr.risk.word()
+                ));
+            }
+        }
+    }
 }
 
 fn plural(n: usize, noun: &str) -> String {

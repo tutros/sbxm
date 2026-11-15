@@ -50,6 +50,11 @@ pub struct LockFile {
     /// them in turn (review M-1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub adopted: Vec<AdoptedChild>,
+    /// When a `task loop --wait` last found no work and began its wait (issue 671): it looks
+    /// again a `PAUSE_POLL` later, which `sbxm status` shows. Absent while it works, and in a
+    /// lock an older binary wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_check: Option<String>,
 }
 
 /// A child a loop adopted (issue 643): its issue's task, and the owner its record names, the dead
@@ -184,6 +189,57 @@ fn prs_where(base_dir: &Path, repo: &str, keep: fn(&Record) -> bool) -> Result<V
         });
     }
     Ok(found)
+}
+
+/// The fix tasks of PR `number` (resolves and log-fixes, `fix-<n>-<head>`) of `repo` under
+/// `base_dir`, in task folders that are sbxm's own; a record that can't be read is left out.
+pub fn fixes_of(base_dir: &Path, repo: &str, number: u32) -> Vec<Record> {
+    let prefix = format!("fix-{number}-");
+    record::task_folders(base_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|dir| {
+            dir.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|id| id.starts_with(&prefix))
+                && check_own_folder(base_dir, dir).is_ok()
+        })
+        .filter_map(|dir| record::read(&dir.join("task.json")).ok())
+        .filter(|rec| rec.kind == Kind::Fix && rec.repo == repo)
+        .collect()
+}
+
+/// The highest risk of PR `number`'s review history after the path rules (decision 298(3)): the
+/// reviews of `own` (the task or tasks that opened it) and of every finished fix pushed onto it
+/// ([`fixes_of`]), ranked by [`awaiting_rank`]; `None` with no review. A later narrow review
+/// doesn't clear the risk an earlier one left, and the order the records are read in doesn't
+/// matter. The one rule the loop arms by and `sbxm status` shows (issue 671, review M-2).
+pub fn history_risk<'a>(
+    base_dir: &Path,
+    repo: &str,
+    number: u32,
+    own: impl IntoIterator<Item = &'a Record>,
+) -> Option<crate::task::risk::Level> {
+    let risk = |rec: &Record| rec.review.as_ref().map(|r| r.risk);
+    fixes_of(base_dir, repo, number)
+        .iter()
+        .filter(|fix| fix.stage == record::Stage::Finished)
+        .filter_map(risk)
+        .chain(own.into_iter().filter_map(risk))
+        .max_by_key(|&risk| awaiting_rank(risk))
+}
+
+/// How far `risk` keeps a PR from the loop's arming, for the highest of its review history: an
+/// unknown risk fails the loop's arm checks as medium does, so it outranks low (where
+/// [`Level`](crate::task::risk::Level)'s own order puts it below).
+pub fn awaiting_rank(risk: crate::task::risk::Level) -> u8 {
+    use crate::task::risk::Level;
+    match risk {
+        Level::Low => 0,
+        Level::Unknown => 1,
+        Level::Medium => 2,
+        Level::High => 3,
+    }
 }
 
 /// Whether a PR awaits the user (decision 3, 293): it is open and has no auto-merge armed. The

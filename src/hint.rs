@@ -261,6 +261,15 @@ pub fn set_dir(dir: &Path) {
     OWED.store(true, Ordering::Relaxed);
 }
 
+/// [`set_dir`] for a command that shows stored content among its own lines (the dashboard, issue
+/// 671): only when [`enable`]d, as [`named`] rewrites only then, so a library caller (a test)
+/// never owes a block.
+pub fn name_dir(dir: &Path) {
+    if ENABLED.load(Ordering::Relaxed) {
+        set_dir(dir);
+    }
+}
+
 /// [`rewrite`] for the executable `exe` in `shell`'s syntax; `None` when `text` holds no command,
 /// and when there is no executable to name (`current_exe` failed), so the bare `sbxm` stays.
 pub fn rewrite_for(text: &str, exe: Option<&Path>, shell: Shell) -> Option<String> {

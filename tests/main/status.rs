@@ -68,6 +68,8 @@ fn row(id: &str, stage: &'static str, status: &str) -> TaskRow {
         commits_ahead: None,
         must_fix: None,
         pr: None,
+        location: None,
+        parked: None,
         log_line: None,
     }
 }
@@ -88,8 +90,8 @@ fn every_missing_value_shows_a_dash() {
     let text = tasks::render(&[r], 100, None);
 
     insta::assert_snapshot!(text, @r"
-    ID       STAGE    STATUS   TIME  AHEAD  FINDINGS  PR  LOG
-    issue-7  working  running  -     -      -         -   -
+    ID       STAGE    STATUS   TIME  AHEAD  FINDINGS  PR  WHERE  LOG
+    issue-7  working  running  -     -      -         -   -      -
     ");
 }
 
@@ -104,13 +106,15 @@ fn present_values_fill_every_column() {
         commits_ahead: Some(2),
         must_fix: Some(1),
         pr: Some("https://github.com/o/r/pull/9".to_owned()),
+        location: None,
+        parked: None,
         log_line: Some("[reviewing] checking the diff".to_owned()),
     };
     let text = tasks::render(&[r], 100, None);
 
     insta::assert_snapshot!(text, @r"
-    ID       STAGE      STATUS   TIME  AHEAD  FINDINGS  PR                             LOG
-    issue-7  reviewing  running  1m    2      1         https://github.com/o/r/pull/9  [reviewing] checking the diff
+    ID       STAGE      STATUS   TIME  AHEAD  FINDINGS  PR                             WHERE  LOG
+    issue-7  reviewing  running  1m    2      1         https://github.com/o/r/pull/9  -      [reviewing] checking the diff
     ");
 }
 
@@ -192,13 +196,17 @@ fn a_full_row_at_terminal_width_still_shows_an_ellipsis_instead_of_losing_the_lo
         commits_ahead: Some(2),
         must_fix: Some(1),
         pr: Some("https://github.com/tutros/sbxm/pull/999".to_owned()),
+        location: None,
+        parked: None,
         log_line: Some("still working".to_owned()),
     };
-    let text = tasks::render(&[r], 120, Some(80));
+    // 85: the fixed cells with no gap between them (84 columns, the WHERE column of issue 671
+    // included) and the log's `…`.
+    let text = tasks::render(&[r], 120, Some(85));
     let line = text.lines().nth(1).unwrap();
 
     assert!(
-        line.chars().count() <= 80,
+        line.chars().count() <= 85,
         "{line:?} is {} columns wide",
         line.chars().count()
     );

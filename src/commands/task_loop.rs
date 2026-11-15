@@ -50,6 +50,7 @@ use crate::task::finish::check_own_folder;
 use crate::task::gates::HostRunner;
 use crate::task::loop_pause::{self, Pause};
 use crate::task::outcome;
+use crate::task::queue::awaiting_rank;
 use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
@@ -517,6 +518,17 @@ impl LoopLock {
         self.rewrite()
     }
 
+    /// Records in the lock when the loop began an idle wait (`Some`), or that it no longer waits
+    /// (`None`), for `sbxm status` (issue 671); the lock is written only when this changes it.
+    fn idle(&mut self, at: Option<u64>) -> Result<()> {
+        let at = at.map(format_timestamp);
+        if self.file.idle_check == at {
+            return Ok(());
+        }
+        self.file.idle_check = at;
+        self.rewrite()
+    }
+
     /// Writes the lock again, through a temporary file renamed over it, since `sbxm status` reads
     /// it meanwhile; one no longer this process's (removed by hand) is not written again.
     fn rewrite(&mut self) -> Result<()> {
@@ -567,6 +579,7 @@ fn take_lock(
         cap: opts.cap.filter(|_| listed),
         progress: listed.then(queue::Progress::default),
         adopted: Vec::new(),
+        idle_check: None,
     };
     let me = serde_json::to_string(&contents)?;
     let mut dead = None;
@@ -1186,33 +1199,15 @@ impl Loop<'_> {
     }
 
     /// The highest risk of PR `number`'s review history after the path rules: its own task's
-    /// review (`own`) and every finished fix pushed onto it (decision 298(3)); `None` with no
-    /// review. A later narrow review doesn't clear the risk an earlier one left.
+    /// review (`own`) and every finished fix pushed onto it ([`queue::history_risk`], decision
+    /// 298(3), the rule `sbxm status` shows too); `None` with no review.
     fn history_risk(&self, number: u32, own: Option<&Record>) -> Option<Level> {
-        self.fixes_of(number)
-            .iter()
-            .filter(|fix| fix.stage == Stage::Finished)
-            .chain(own)
-            .filter_map(|rec| rec.review.as_ref().map(|r| r.risk))
-            .max_by_key(|&risk| awaiting_rank(risk))
+        queue::history_risk(&self.base_dir, &self.repo, number, own)
     }
 
-    /// The fix tasks of PR `number` (resolves and log-fixes, `fix-<n>-<head>`) of this repo, in
-    /// task folders that are sbxm's own; a record that can't be read is left out.
+    /// The fix tasks of PR `number` of this repo ([`queue::fixes_of`]).
     fn fixes_of(&self, number: u32) -> Vec<Record> {
-        let prefix = format!("fix-{number}-");
-        record::task_folders(&self.base_dir)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|dir| {
-                dir.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|id| id.starts_with(&prefix))
-                    && check_own_folder(&self.base_dir, dir).is_ok()
-            })
-            .filter_map(|dir| record::read(&dir.join("task.json")).ok())
-            .filter(|rec| rec.kind == Kind::Fix && rec.repo == self.repo)
-            .collect()
+        queue::fixes_of(&self.base_dir, &self.repo, number)
     }
 
     /// (e) of issue 530: a notification for each question task `id` hands the user, once per
@@ -3915,18 +3910,6 @@ fn not_armed(reason: &str, also: Option<&str>) -> String {
 /// Why a PR isn't armed while the loop is paused on a red `main` (decision 299).
 const PAUSED_REASON: &str = "paused on a red main";
 
-/// How far `risk` keeps a PR from the loop's arming, for the highest of its review history: an
-/// unknown risk fails [`passes_arm_checks`] as medium does, so it outranks low (where
-/// [`Level`]'s own order puts it below).
-fn awaiting_rank(risk: Level) -> u8 {
-    match risk {
-        Level::Low => 0,
-        Level::Unknown => 1,
-        Level::Medium => 2,
-        Level::High => 3,
-    }
-}
-
 /// Why the log-fix task in `dir`, recorded as `rec`, didn't end clean (decision 300), in words
 /// that follow "its log-fix"; `None` when it did: finished, no stop, a review with 0 must-fix and
 /// no question handed back in its `result.md`. The one rule for the log-fix's own outcome and for
@@ -4572,17 +4555,7 @@ fn work(
                     lp.next(&open, &opts.issues, &mut tried, &mut refused, out)?;
                 let Some(issue) = next else {
                     if opts.wait {
-                        // Said once per idle spell: the next task, or the next stop, ends it.
-                        if !idle {
-                            writeln!(
-                                out,
-                                "the queue is empty; checking again every {} for a job file or a \
-                             labelled issue",
-                                queue::span(PAUSE_POLL.as_secs())
-                            )?;
-                            idle = true;
-                        }
-                        (env.sleep)(PAUSE_POLL);
+                        wait_idle(lock, lp, &mut idle, out, warn)?;
                         continue;
                     }
                     let skipped: Vec<Skipped> = refused.iter().chain(&waiting).cloned().collect();
@@ -4836,6 +4809,49 @@ fn note(
             warn,
             format!(
                 "the loop's progress could not be written into its lock ({e:#}); `sbxm status` \
+                 may show it behind"
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+/// The wait of a `--wait` loop on an empty queue, in either scheduler: says so once per idle
+/// spell (`said`; the next task, or the next stop, ends it), records in the lock when the wait
+/// began for `sbxm status` (issue 671), sleeps a [`PAUSE_POLL`], and clears the record on waking,
+/// before the loop looks for work again.
+fn wait_idle(
+    lock: &mut LoopLock,
+    lp: &mut Loop,
+    said: &mut bool,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    if !*said {
+        writeln!(
+            out,
+            "the queue is empty; checking again every {} for a job file or a labelled issue",
+            queue::span(PAUSE_POLL.as_secs())
+        )?;
+        *said = true;
+    }
+    idle_note(lock, lp, warn, Some(lp.now()))?;
+    (lp.env.sleep)(PAUSE_POLL);
+    idle_note(lock, lp, warn, None)
+}
+
+/// [`LoopLock::idle`], a lock that can't be written being a warning, as for [`note`].
+fn idle_note(
+    lock: &mut LoopLock,
+    lp: &mut Loop,
+    warn: &mut dyn Write,
+    at: Option<u64>,
+) -> Result<()> {
+    if let Err(e) = lock.idle(at) {
+        lp.warn_once(
+            warn,
+            format!(
+                "the loop's idle wait could not be written into its lock ({e:#}); `sbxm status` \
                  may show it behind"
             ),
         )?;
