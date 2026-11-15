@@ -230,6 +230,7 @@ mod started_child {
             args: vec!["-c".into(), script.into()],
             dir: dir.to_owned(),
             env: Vec::new(),
+            log: dir.join("child.log"),
         }
     }
 

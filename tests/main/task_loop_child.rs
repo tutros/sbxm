@@ -792,6 +792,7 @@ fn a_child_is_done_when_it_exits_whatever_keeps_its_output_open() {
         ],
         dir: tmp.path().to_owned(),
         env: Vec::new(),
+        log: tmp.path().join("child.log"),
     };
     let started = std::time::Instant::now();
 

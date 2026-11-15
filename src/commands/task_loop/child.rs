@@ -3,6 +3,8 @@
 //! in the loop's checkout and with its config dir, waits for it, then reads the `outcome.json`
 //! it wrote. The child's output goes to the task's `run.log` (the child tees it there as any
 //! `task` command does); the loop's window shows one line per event, `[<task> <slot>] <event>`.
+//! The child's own stdout and stderr are a log of its own, never the loop's (issue 667): a child
+//! of a killed loop writes on, and holds no pipe of the loop's (or of what started the loop) open.
 //!
 //! The child runs in a process group of its own, so the loop's first Ctrl-C doesn't reach it and
 //! it finishes its phase; the second ends the loop and, through [`Spawner::stop`], the child. A
@@ -10,7 +12,8 @@
 //! stop file ([`STOP_FILE_ENV`]), which the loop writes on its first Ctrl-C, so a stop then
 //! ends the wait creating nothing (issue 570).
 
-use std::io::Read;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -28,10 +31,7 @@ pub const STOP_FILE_ENV: &str = "SBXM_LOOP_STOP_FILE";
 /// How often a running child is looked at.
 const POLL: Duration = Duration::from_millis(200);
 
-/// How many polls the end of a child's error output is waited for once it exited.
-const READER_GRACE_POLLS: u32 = 10;
-
-/// How much of a child's error output is kept, for a child that wrote no outcome.
+/// How much of a child's output is quoted, for a child that wrote no outcome.
 const KEPT: usize = 16 * 1024;
 
 /// One child `sbxm` command for a task's phase.
@@ -44,6 +44,9 @@ pub struct Child {
     /// Its environment on top of the loop's: `SBXM_CONFIG_DIR`, and [`STOP_FILE_ENV`] for a phase
     /// whose slot wait obeys the loop's stop.
     pub env: Vec<(String, String)>,
+    /// The file its stdout and stderr go to, added to (issue 667):
+    /// `<base>/.sbxm/loop-logs/children/<task>.log`.
+    pub log: PathBuf,
 }
 
 /// How a child exited.
@@ -53,7 +56,7 @@ pub struct Exit {
     pub success: bool,
     /// How, in words: `exited with code 1`, `was killed`.
     pub how: String,
-    /// The end of what it printed as errors, for one that wrote no outcome.
+    /// The end of what it printed, for one that wrote no outcome.
     pub errors: String,
 }
 
@@ -132,36 +135,32 @@ impl Spawner for ChildSpawner {
     }
 
     fn start(&self, child: &Child) -> Result<Box<dyn Running + '_>> {
+        let (log, from) = open_log(child)?;
+        let stdout = log
+            .try_clone()
+            .with_context(|| format!("cannot open {}", child.log.display()))?;
         let mut command = Command::new(&self.exe);
         command
             .args(&child.args)
             .current_dir(&child.dir)
             .envs(child.env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+            .stdout(stdout)
+            .stderr(log);
         own_group(&mut command);
-        let mut process = command
+        let process = command
             .spawn()
             .with_context(|| format!("cannot start {}", self.exe.display()))?;
-        let stderr = process.stderr.take();
         let slot: Slot = Arc::new(Mutex::new(Some(process)));
         {
             let mut all = self.running.lock().unwrap_or_else(|e| e.into_inner());
             all.retain(|s| s.lock().unwrap_or_else(|e| e.into_inner()).is_some());
             all.push(Arc::clone(&slot));
         }
-        // Read on a thread of its own: a process the child started may keep the pipe open after
-        // the child exits, so the child's end is never waited on through it.
-        let kept = Arc::new(Mutex::new(Vec::new()));
-        let reader = std::thread::spawn({
-            let kept = Arc::clone(&kept);
-            move || keep_tail(stderr, &kept)
-        });
         Ok(Box::new(Started {
             slot,
-            reader: Some(reader),
-            kept,
+            log: child.log.clone(),
+            from,
         }))
     }
 
@@ -212,8 +211,9 @@ fn end_adopted(process: &Process) {
 /// A child [`ChildSpawner`] started.
 struct Started {
     slot: Slot,
-    reader: Option<std::thread::JoinHandle<()>>,
-    kept: Arc<Mutex<Vec<u8>>>,
+    /// Its log, and where its output in it starts.
+    log: PathBuf,
+    from: u64,
 }
 
 impl Running for Started {
@@ -236,16 +236,8 @@ impl Running for Started {
         };
         // Reaped, or stopped: no longer the spawner's to stop.
         self.slot.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(reader) = self.reader.take() {
-            for _ in 0..READER_GRACE_POLLS {
-                if reader.is_finished() {
-                    break;
-                }
-                std::thread::sleep(POLL);
-            }
-        }
-        let errors = String::from_utf8_lossy(&self.kept.lock().unwrap_or_else(|e| e.into_inner()))
-            .into_owned();
+        // Only quoted, so a log that can't be read quotes nothing.
+        let errors = tail(&self.log, self.from).unwrap_or_default();
         Ok(Some(match status {
             Some(status) => Exit {
                 success: status.success(),
@@ -324,23 +316,35 @@ fn own_group(command: &mut Command) {
 #[cfg(not(any(unix, windows)))]
 fn own_group(_command: &mut Command) {}
 
-/// Keeps the last [`KEPT`] bytes read from `stream` in `kept`, as they come.
-fn keep_tail(stream: Option<impl Read>, kept: &Mutex<Vec<u8>>) {
-    let Some(mut stream) = stream else {
-        return;
+/// `child`'s log, opened to add to, its folder made, with a header line naming the child's
+/// command; and where the child's own output in it starts.
+fn open_log(child: &Child) -> Result<(File, u64)> {
+    let path = &child.log;
+    let opened = || -> std::io::Result<(File, u64)> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut log = OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(
+            log,
+            "# {} sbxm {}",
+            crate::run::results::format_timestamp(crate::run::results::now()),
+            child.args.join(" ")
+        )?;
+        let from = log.metadata()?.len();
+        Ok((log, from))
     };
-    let mut buf = [0u8; 4096];
-    while let Ok(n) = stream.read(&mut buf) {
-        if n == 0 {
-            break;
-        }
-        let mut kept = kept.lock().unwrap_or_else(|e| e.into_inner());
-        kept.extend_from_slice(&buf[..n]);
-        if kept.len() > KEPT {
-            let over = kept.len() - KEPT;
-            kept.drain(..over);
-        }
-    }
+    opened().with_context(|| format!("cannot open the child's log {}", path.display()))
+}
+
+/// The last [`KEPT`] bytes of `log` from `from` on: what the child printed.
+fn tail(log: &Path, from: u64) -> std::io::Result<String> {
+    let mut file = File::open(log)?;
+    let len = file.metadata()?.len();
+    file.seek(SeekFrom::Start(from.max(len.saturating_sub(KEPT as u64))))?;
+    let mut kept = Vec::new();
+    file.read_to_end(&mut kept)?;
+    Ok(String::from_utf8_lossy(&kept).into_owned())
 }
 
 /// The last error a child printed (`Error: …` to the end), on one line, for a child that wrote no
@@ -366,6 +370,16 @@ pub fn obeying_loop_stop(mut guard: disk::Guard, stop_file: Option<PathBuf>) -> 
         }));
     }
     guard
+}
+
+/// `<base>/.sbxm/loop-logs/children/<id>.log`: where the stdout and stderr of task `id`'s
+/// children go (issue 667), next to the loop's own logs and never in a checkout.
+pub fn log_path(base_dir: &Path, id: &str) -> PathBuf {
+    base_dir
+        .join(".sbxm")
+        .join("loop-logs")
+        .join("children")
+        .join(format!("{id}.log"))
 }
 
 /// The stop file a loop named to this process, if any.

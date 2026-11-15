@@ -5215,6 +5215,7 @@ impl TaskSteps<'_> {
             args,
             dir: self.repo_root.clone(),
             env,
+            log: child::log_path(&base_dir, &id),
         };
         Ok(Prepared {
             dir,
