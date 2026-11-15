@@ -514,7 +514,7 @@ log`, `git diff` and `git show` can write a file with `--output=<file>`, `git st
 a rule cannot exclude an option (Claude Code already runs the read-only forms of `git` in Bash without asking).
 Anything that publishes, deletes, writes or starts a sandbox still asks.
 
-The `sbxm` commands that only report (`status`, `task states`, `task logs`, `list`, `config show`,
+The `sbxm` commands that only report (`status`, `task states`, `task logs`, `task facts`, `list`, `config show`,
 `config profiles-dir`, `run show`) are not in that file (decision 192): a recorded build's file name changes with
 every build and each call sets `SBXM_CONFIG_DIR` first, so a rule would need a wildcard in the middle of the command. Allow them on your own
 machine instead: a small wrapper script at a fixed path that sets the config dir and calls the current recorded
