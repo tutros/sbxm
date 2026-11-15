@@ -357,7 +357,7 @@ fn remove_sandboxes(
     let backend = backend.located(plan.location);
     if plan.location == Location::Local {
         for sandbox in &plan.sandboxes {
-            match crate::commands::rm::remove_sandbox(backend, sandbox) {
+            match crate::commands::rm::remove_sandbox(backend, sandbox, None) {
                 Ok(()) => report.removed.push(format!("sandbox {sandbox}")),
                 Err(e) => report
                     .stayed
@@ -369,7 +369,7 @@ fn remove_sandboxes(
     let cloud = backend;
     let mut all_gone = true;
     for sandbox in &plan.sandboxes {
-        match lifetime::remove_sandbox(cloud, sandbox, sleep) {
+        match lifetime::remove_sandbox(cloud, sandbox, None, sleep) {
             Removal::Removed => report.removed.push(format!("cloud sandbox {sandbox}")),
             Removal::AlreadyGone => report
                 .removed

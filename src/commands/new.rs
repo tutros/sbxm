@@ -180,6 +180,7 @@ pub fn run(
         &sandbox,
         backend,
         deny_network.as_deref(),
+        None,
     )?;
 
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();

@@ -505,6 +505,7 @@ impl Drop for Guard {
             let removal = sbxm::task::lifetime::remove_sandbox(
                 self.watched.as_ref(),
                 name,
+                None,
                 &std::thread::sleep,
             );
             println!("cleanup: {name}: {removal:?}");

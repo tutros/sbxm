@@ -291,6 +291,7 @@ pub fn judge_repeat(
             &sandbox,
             backend,
             harness_kits.deny_network.as_deref(),
+            None,
         ) {
             // A refused sandbox is already removed, unless removing it failed.
             created = backend

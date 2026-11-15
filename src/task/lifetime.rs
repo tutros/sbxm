@@ -9,8 +9,8 @@ use anyhow::{Context, Result, anyhow};
 
 use super::config::TaskConfig;
 use super::record::{self, Record, SandboxRole};
-use super::secrets;
-use crate::backend::{Location, SandboxBackend, ScopedSecret, ttl_arg, whole_minutes};
+use super::{runlog, secrets};
+use crate::backend::{Location, SandboxBackend, SbxLog, ScopedSecret, ttl_arg, whole_minutes};
 use crate::run::results::now;
 
 /// What every TTL adds to the time its sandbox is expected to need (decision 259).
@@ -104,15 +104,17 @@ pub enum Removal {
 
 /// Removes the sandbox `name` (`sbx rm <name> -f` on the backend's instance), retrying only an
 /// error that says it is temporarily unavailable, after 5, 10 and 20 seconds through `sleep`;
-/// any other error ends it at once. Never fails: the caller reports what it returns.
+/// any other error ends it at once. Never fails: the caller reports what it returns. `sbx`'s
+/// lines go to the screen and `log`.
 pub fn remove_sandbox(
     backend: &dyn SandboxBackend,
     name: &str,
+    log: SbxLog,
     sleep: &dyn Fn(Duration),
 ) -> Removal {
     let mut waits = REMOVAL_WAITS.iter();
     loop {
-        let error = match backend.remove(name, None) {
+        let error = match backend.remove(name, log) {
             Ok(()) => return Removal::Removed,
             Err(e) => format!("{e:#}"),
         };
@@ -271,7 +273,8 @@ pub fn release_local(
     if task.location != Location::Local || !task.has_open_sandbox(name) {
         return None;
     }
-    if let Err(e) = crate::commands::rm::remove_sandbox(backend, name) {
+    let log = |line: &str| runlog::task_line(meta, line);
+    if let Err(e) = crate::commands::rm::remove_sandbox(backend, name, Some(&log)) {
         return Some(Released::Warning(format!(
             "sandbox {name} could not be removed: {e:#}; remove it with `sbx rm {name}`"
         )));
@@ -293,7 +296,8 @@ fn remove_entry(
     name: &str,
     sleep: &dyn Fn(Duration),
 ) -> Released {
-    let how = match remove_sandbox(backend, name, sleep) {
+    let log = |line: &str| runlog::task_line(meta, line);
+    let how = match remove_sandbox(backend, name, Some(&log), sleep) {
         Removal::Removed => "removed",
         Removal::AlreadyGone => "already gone",
         Removal::Failed(error) => return Released::Warning(not_removed(name, &error)),

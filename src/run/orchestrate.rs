@@ -261,6 +261,7 @@ impl Pair<'_> {
             &self.sandbox,
             self.backend,
             harness_kits.deny_network.as_deref(),
+            None,
         ) {
             // A refused sandbox is already removed, unless removing it failed.
             let left = self

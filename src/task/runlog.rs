@@ -1,18 +1,20 @@
 //! `run.log` in a task's folder (decision 170, part 1): a copy of what a task command prints, one
 //! stamped line per line with the task's stage, and a header for each invocation. Nothing is
 //! logged that the screen did not show, and values that look like secrets are masked anyway.
-//! The `sbx` child processes write straight to the terminal, so their output is not here (#114).
+//! The lines of an `sbx create` or `sbx rm` go to the screen and, through [`task_line`], to the
+//! log of the task whose sandbox it is, and only that task's (issue 114).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use regex::Regex;
 
 use super::record::{self, is_valid_id};
-use crate::run::results::format_timestamp;
+use crate::run::results::{format_timestamp, now};
 
 /// The stage shown for a line printed before the task has a folder (or when its record can't be read).
 const NO_STAGE: &str = "-";
@@ -125,14 +127,41 @@ impl RunLog {
             .chain(self.found.iter())
             .cloned()
             .collect();
+        let newest = self.history.len() - 1;
+        let line = self.history[newest].clone();
         for id in ids {
-            if let Err(err) = self.write_to(&id)
+            if let Err(err) = self.write_to(&id, newest, &line)
                 && self.warned.insert(id.clone())
             {
                 let path = record::task_dir(&self.base, &id).join("run.log");
                 (self.warn)(&format!("warning: cannot write {}: {err}", path.display()));
             }
         }
+    }
+
+    /// Adds one line to the log of the task `id` only (issue 114: an `sbx` line of its sandbox),
+    /// after this invocation's header and the lines printed before, if they aren't there yet. The
+    /// line is not kept for catching up another task's log. Returns false, writing nothing, for a
+    /// task this command neither names nor owns.
+    pub fn line_for(&mut self, id: &str, text: &str) -> bool {
+        self.find_own_tasks();
+        if !self.named.iter().any(|n| n == id) && !self.found.contains(id) {
+            return false;
+        }
+        let line = ((self.clock)(), redact(text));
+        let upto = self.history.len();
+        if let Err(err) = self.write_to(id, upto, &line)
+            && self.warned.insert(id.to_owned())
+        {
+            let path = record::task_dir(&self.base, id).join("run.log");
+            (self.warn)(&format!("warning: cannot write {}: {err}", path.display()));
+        }
+        true
+    }
+
+    /// Whether `dir` is the folder of the task `id` under this log's base folder.
+    fn is_task_dir(&self, id: &str, dir: &Path) -> bool {
+        record::task_dir(&self.base, id) == dir
     }
 
     fn find_own_tasks(&mut self) {
@@ -158,27 +187,26 @@ impl RunLog {
         }
     }
 
-    /// Appends the newest line to the task's log. A log made now starts with the header and the
-    /// lines printed before it could be made; a folder that was removed is left removed. A
+    /// Appends `line` to the task's log. A log made now starts with the header and the lines of
+    /// `history` before `upto`, printed before it could be made; a folder that was removed is left removed. A
     /// `run.log` left over from an earlier invocation still gets this invocation's own header, on
     /// its first write here, so each invocation's errors stay traceable to their own header
     /// (issue 129 M-1) instead of trailing silently after a previous one's. `headered` is only
     /// marked once the write actually succeeds (issue 130): a failed first append must not make a
     /// later, successful one skip the header.
-    fn write_to(&mut self, id: &str) -> std::io::Result<()> {
+    fn write_to(&mut self, id: &str, upto: usize, line: &(u64, String)) -> std::io::Result<()> {
         let dir = record::task_dir(&self.base, id);
         if !dir.is_dir() {
             return Ok(());
         }
         let path = dir.join("run.log");
-        let newest = self.history.len() - 1;
         let first_write_this_invocation = !self.headered.contains(id);
         let mut text = String::new();
         if !path.exists() {
             text.push_str(&self.header);
             text.push('\n');
             let from = self.caught_up.get(id).copied().unwrap_or(0);
-            for (secs, line) in &self.history[from..newest] {
+            for (secs, line) in &self.history[from.min(upto)..upto] {
                 text.push_str(&format!(
                     "{} [{NO_STAGE}] {line}\n",
                     format_timestamp(*secs)
@@ -188,7 +216,7 @@ impl RunLog {
             text.push_str(&self.header);
             text.push('\n');
         }
-        let (secs, line) = &self.history[newest];
+        let (secs, line) = line;
         text.push_str(&format!(
             "{} [{}] {line}\n",
             format_timestamp(*secs),
@@ -199,6 +227,67 @@ impl RunLog {
         self.headered.insert(id.to_owned());
         self.caught_up.insert(id.to_owned(), self.history.len());
         Ok(())
+    }
+}
+
+/// The command logs that take the lines meant for one of their tasks only ([`route`]), each with
+/// the number its [`Route`] removes it by.
+static ROUTES: Mutex<Vec<(u64, Arc<Mutex<RunLog>>)>> = Mutex::new(Vec::new());
+
+/// The number of the next [`Route`].
+static NEXT_ROUTE: AtomicU64 = AtomicU64::new(0);
+
+/// A command log that [`task_line`] goes through, until this is dropped.
+pub struct Route(u64);
+
+impl Drop for Route {
+    fn drop(&mut self) {
+        routes().retain(|(n, _)| *n != self.0);
+    }
+}
+
+fn routes() -> std::sync::MutexGuard<'static, Vec<(u64, Arc<Mutex<RunLog>>)>> {
+    ROUTES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Makes [`task_line`] go through `log` for the tasks it names or owns, until the returned
+/// [`Route`] is dropped: their `run.log` then gets this invocation's header and earlier lines
+/// first, as for any line the command prints.
+pub fn route(log: &Arc<Mutex<RunLog>>) -> Route {
+    let n = NEXT_ROUTE.fetch_add(1, Ordering::SeqCst);
+    routes().push((n, Arc::clone(log)));
+    Route(n)
+}
+
+/// Adds `text`, a line of an `sbx create` or `sbx rm` the screen already shows, to the `run.log`
+/// in the task folder `dir` only (issue 114): through a routed command log that has the task
+/// ([`route`]), else appended as is, stamped and masked like a command's line. A folder that
+/// doesn't exist gets nothing, and a log that can't be written is skipped: the screen has the line.
+pub fn task_line(dir: &Path, text: &str) {
+    if let Some(id) = dir.file_name().and_then(|n| n.to_str()) {
+        let logs: Vec<Arc<Mutex<RunLog>>> = routes().iter().map(|(_, l)| Arc::clone(l)).collect();
+        for log in logs {
+            let mut log = log.lock().unwrap_or_else(|e| e.into_inner());
+            if log.is_task_dir(id, dir) && log.line_for(id, text) {
+                return;
+            }
+        }
+    }
+    if !dir.is_dir() {
+        return;
+    }
+    let line = format!(
+        "{} [{}] {}\n",
+        format_timestamp(now()),
+        recorded_stage(dir),
+        redact(text)
+    );
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("run.log"))
+    {
+        let _ = file.write_all(line.as_bytes());
     }
 }
 

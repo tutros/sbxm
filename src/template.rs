@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::backend::SandboxBackend;
+use crate::backend::{SandboxBackend, SbxLog};
 use crate::config::Profile;
 use crate::harness::Harness;
 use crate::kit;
@@ -567,7 +567,8 @@ pub fn denied_hosts(
 /// allow rule scoped to the sandbox allows must be a provider host of the harness, in
 /// `[template].allow` or denied by a rule, or the sandbox is removed and refused, so a newer kit
 /// can't widen it silently (decisions 221, 323). It fails closed: no kit rule at all is refused
-/// too, and global rules are the user's own (decision 232).
+/// too, and global rules are the user's own (decision 232). A removal's `sbx` lines go to the
+/// screen and `log`.
 pub fn check_kit_rules(
     profile_name: &str,
     merged: &Profile,
@@ -575,6 +576,7 @@ pub fn check_kit_rules(
     sandbox: &str,
     backend: &dyn SandboxBackend,
     denied: Option<&[String]>,
+    log: SbxLog,
 ) -> Result<()> {
     let (Some(_), Some((provider, _))) = (denied, strict_kit_hosts(harness)) else {
         return Ok(());
@@ -587,7 +589,7 @@ pub fn check_kit_rules(
     // Every refusal removes the sandbox first and keeps its own reason even when that fails
     // (review PR 269 M-2, decision 232).
     let refuse = |reason: String, fix: &str| -> anyhow::Error {
-        match backend.remove(sandbox, None) {
+        match backend.remove(sandbox, log) {
             Ok(()) => anyhow::anyhow!("{reason}; sbxm removed the sandbox. {fix}"),
             Err(err) => anyhow::anyhow!(
                 "{reason}; removing it failed; remove it with `sbx rm {sandbox}` ({err:#}). {fix}"
