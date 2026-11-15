@@ -240,9 +240,10 @@ impl sbxm::task::record::ProcessProbe for Gone {
 }
 
 /// A cloud task made before the key (recorded 8 / 16g) is resumed after `cloud_shape` says
-/// small: its gone worker sandbox is made again with the recorded values, not the key's.
+/// small: its gone worker sandbox is made again with the key's values, which the record then
+/// holds, and a warning names the change (issue 410).
 #[test]
-fn resume_rebuilds_a_cloud_worker_with_its_recorded_resources_not_the_key() {
+fn resume_rebuilds_a_cloud_worker_with_the_key_s_shape_and_records_it() {
     let f = fixture_with(NO_SHAPE_TOML);
     set_global_resources(&f, 8, "16g");
     let (spec, id) = spec(&f);
@@ -286,9 +287,15 @@ fn resume_rebuilds_a_cloud_worker_with_its_recorded_resources_not_the_key() {
 
     let out = String::from_utf8(out).unwrap();
     result.expect(&out);
-    assert_eq!(shapes(&gone)[0], (worker_sandbox(&id), 8, "16g".to_owned()));
+    assert_eq!(shapes(&gone)[0], (worker_sandbox(&id), 2, "4g".to_owned()));
     let worker = task_record(&f, &id).worker.unwrap();
-    assert_eq!((worker.cpus, worker.memory), (Some(8), Some("16g".into())));
+    assert_eq!((worker.cpus, worker.memory), (Some(2), Some("4g".into())));
+    let warn = String::from_utf8(warn).unwrap();
+    assert!(
+        warn.lines()
+            .any(|l| l.contains("cpus 8 -> 2") && l.contains("memory 16g -> 4g")),
+        "{warn}"
+    );
 }
 
 struct Yes;

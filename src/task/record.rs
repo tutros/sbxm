@@ -289,10 +289,10 @@ pub struct Agent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     /// The resolved CPU and memory the first `CreateSpec` actually used (M-2, PR 163 review round
-    /// 2), not the optional overrides `sbxm-task.toml` may have left unset: a task that inherited
-    /// the global defaults at `task start` keeps running under those, even after the globals
-    /// change. Together with the profile above, `task resume` hashes these again before rebuilding
-    /// the sandbox and refuses if the result no longer matches `config_hash`. `None` on the
+    /// 2), not the optional overrides `sbxm-task.toml` may have left unset. Together with the
+    /// profile above, `task resume` hashes these again before rebuilding the sandbox and refuses
+    /// if the result no longer matches `config_hash`; the rebuilt sandbox gets today's values,
+    /// which then replace these (issue 410). `None` on the
     /// reviewer's `Agent`, and on the worker's `Agent` only in a record written before issue 118's
     /// resume fix.
     #[serde(default, skip_serializing_if = "Option::is_none")]

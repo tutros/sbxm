@@ -229,6 +229,7 @@ mod task_repo;
 mod task_restart_undo;
 mod task_resume;
 mod task_resume_cmd;
+mod task_resume_drift;
 mod task_resume_fix_pr;
 mod task_resume_rounds_cap;
 mod task_resume_should_fix;
