@@ -150,8 +150,9 @@ struct Live<'a> {
     /// `interrupted`.
     interrupted: Option<String>,
     /// For an adopted child's task (issue 643), while that child runs: its process, whose end
-    /// with no outcome is a cut-off task's.
-    adopted: Option<Process>,
+    /// with no outcome is a cut-off task's; `Some(None)` for one that recorded none, which ended
+    /// normally (issue 680).
+    adopted: Option<Option<Process>>,
 }
 
 impl Live<'_> {
@@ -351,7 +352,7 @@ impl<'a> Loop<'a> {
         if let Some(process) = t.adopted.take()
             && self.adopted_was_cut_off(t.issue, &ended)
         {
-            return match self.adopted_cut_off(t.issue, &process, &ended, out)? {
+            return match self.adopted_cut_off(t.issue, process.as_ref(), &ended, out)? {
                 CutOff::Owed => self.resume_cut_off(t, out, warn),
                 CutOff::Parked(outcome) => Ok(Some(Ok(End::Parked {
                     ready: None,
