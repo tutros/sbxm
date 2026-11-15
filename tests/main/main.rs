@@ -102,6 +102,7 @@ mod sandbox_slot_cli;
 mod sandbox_slot_config;
 mod sandbox_slot_status;
 mod sandbox_slot_stop;
+mod screen_closed;
 mod secrets;
 mod setup_install;
 mod status;

@@ -12,6 +12,7 @@ use sbxm::commands;
 use sbxm::config;
 use sbxm::confirm::Terminal;
 use sbxm::hint::{self, Local};
+use sbxm::screen::{self, Screen};
 use sbxm::task;
 use sbxm::task::runlog::Tee;
 
@@ -29,9 +30,9 @@ fn task_id(kind: task::record::Kind, number: u32) -> String {
 
 /// A `sbxm task` command's screen writer: its hints name the commands they suggest with the
 /// running executable (issue 574), on the screen and in the `run.log`.
-type TaskOut = Local<Tee<std::io::Stdout>>;
+type TaskOut = Local<Tee<Screen<std::io::Stdout>>>;
 /// A `sbxm task` command's warning writer, rewritten like [`TaskOut`].
-type TaskWarn = Local<Tee<std::io::Stderr>>;
+type TaskWarn = Local<Tee<Screen<std::io::Stderr>>>;
 
 /// The screen and warning writers of a `sbxm task` command, each copying its lines to the
 /// `run.log` of the tasks `ids` (and, with `discover`, of every task this process's own identity
@@ -54,13 +55,13 @@ fn task_writers(
             })
     };
     // Notes about text after `sbx`'s JSON go through the same log as the other warnings.
-    let mut notes = Local::new(Tee::new(std::io::stderr(), Arc::clone(&log)));
+    let mut notes = Local::new(Tee::new(screen::stderr(), Arc::clone(&log)));
     sbxm::backend::set_trailer_sink(move |note| {
         let _ = writeln!(notes, "warning: {note}");
     });
     Ok((
-        Local::new(Tee::new(std::io::stdout(), Arc::clone(&log))),
-        Local::new(Tee::new(std::io::stderr(), log)),
+        Local::new(Tee::new(screen::stdout(), Arc::clone(&log))),
+        Local::new(Tee::new(screen::stderr(), log)),
     ))
 }
 
@@ -94,17 +95,19 @@ fn warn_log_open_failed(ids: &[String], err: &anyhow::Error) {
         })
         .filter(|paths| !paths.is_empty());
     match paths {
-        Some(paths) => eprintln!(
+        Some(paths) => screen::eprintln(&format!(
             "warning: cannot open the task log at {}: {err:#}",
             paths.join(", ")
-        ),
+        )),
         None => {
             let target = if ids.is_empty() {
                 "the discovered tasks".to_owned()
             } else {
                 ids.join(", ")
             };
-            eprintln!("warning: cannot open the task log for {target}: {err:#}");
+            screen::eprintln(&format!(
+                "warning: cannot open the task log for {target}: {err:#}"
+            ));
         }
     }
 }
@@ -158,12 +161,12 @@ fn main() -> anyhow::Result<()> {
     let result = cli.join().unwrap_or_else(|_| std::process::exit(101));
     // The error as `main`'s own return would print it, with its commands named by the running
     // executable, then the block saying where to run them (issue 574).
-    let _ = std::io::stdout().flush();
+    let _ = screen::stdout().flush();
     if let Err(err) = &result {
-        eprint!("{}", hint::local(&format!("Error: {err:?}\n")));
+        screen::eprint(&hint::local(&format!("Error: {err:?}\n")));
     }
     if let Some(block) = hint::take_block() {
-        eprint!("{block}");
+        screen::eprint(&block);
     }
     if result.is_err() {
         std::process::exit(1);
@@ -174,9 +177,9 @@ fn main() -> anyhow::Result<()> {
 /// `text` on stdout, its commands named by the running executable (issue 574), then the block
 /// that says where to run them, the first time one is named.
 fn say(text: &str) {
-    print!("{}", hint::local(text));
+    screen::print(&hint::local(text));
     if let Some(block) = hint::take_block() {
-        print!("{block}");
+        screen::print(&block);
     }
 }
 
@@ -190,7 +193,7 @@ fn run() -> anyhow::Result<()> {
         task::record::started_by_loop(owner);
     }
     sbxm::backend::set_trailer_sink(|note| {
-        eprint!("{}", hint::local(&format!("warning: {note}\n")))
+        screen::eprint(&hint::local(&format!("warning: {note}\n")))
     });
     // `Cli::parse()` sugars over this, but `task run`'s list needs the raw matches too: clap's
     // derive API has no field that carries the relative order of two different repeated flags
@@ -215,12 +218,12 @@ fn run() -> anyhow::Result<()> {
                 ..Default::default()
             },
             &SbxBackend::LOCAL,
-            &mut Local::new(std::io::stderr()),
+            &mut Local::new(screen::stderr()),
         ),
         Command::List { json } => {
             let entries = commands::list::entries(&config::config_dir()?, &SbxBackend::LOCAL)?;
             if json {
-                print!("{}", commands::list::render_json(&entries));
+                screen::print(&commands::list::render_json(&entries));
             } else {
                 say(&commands::list::render_table(&entries));
             }
@@ -240,7 +243,7 @@ fn run() -> anyhow::Result<()> {
                 disk: sbxm::disk::Guard::real(ignore_disk),
             },
             &SbxBackend::LOCAL,
-            &mut Local::new(std::io::stderr()),
+            &mut Local::new(screen::stderr()),
         ),
         Command::Stop { project, harness } => commands::stop::run(
             &config::config_dir()?,
@@ -273,7 +276,7 @@ fn run() -> anyhow::Result<()> {
             say(&report.render());
             if report.failed() {
                 if let Some(block) = hint::take_block() {
-                    eprint!("{block}");
+                    screen::eprint(&block);
                 }
                 std::process::exit(1);
             }
@@ -284,11 +287,11 @@ fn run() -> anyhow::Result<()> {
             ..
         }) => {
             let written = commands::run_init::run(path.as_deref())?;
-            println!("Wrote {}", written.display());
-            println!(
+            screen::println(&format!("Wrote {}", written.display()));
+            screen::println(&format!(
                 "Edit the task and contestants, then run: sbxm run {}",
                 written.display()
-            );
+            ));
             Ok(())
         }
         Command::Run(RunArgs {
@@ -303,8 +306,8 @@ fn run() -> anyhow::Result<()> {
                 &sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
                 &SbxBackend::LOCAL,
                 // The rankings and Jev's answers, shown as saved, like `run show`.
-                &mut std::io::stdout(),
-                &mut Local::new(std::io::stderr()),
+                &mut screen::stdout(),
+                &mut Local::new(screen::stderr()),
             )?;
             Ok(())
         }
@@ -318,7 +321,7 @@ fn run() -> anyhow::Result<()> {
                 &commands::run_show::Options { full_diff: diff },
             )?;
             // The saved run as it is: its answers and patches are the contestants' (review M-2).
-            print!("{text}");
+            screen::print(&text);
             Ok(())
         }
         Command::Run(RunArgs {
@@ -330,10 +333,10 @@ fn run() -> anyhow::Result<()> {
                 }),
             ..
         }) => {
-            print!(
-                "{}",
-                commands::run_review::submit(&config::config_dir()?, &run_id)?
-            );
+            screen::print(&commands::run_review::submit(
+                &config::config_dir()?,
+                &run_id,
+            )?);
             Ok(())
         }
         Command::Run(RunArgs {
@@ -344,18 +347,23 @@ fn run() -> anyhow::Result<()> {
         }) => {
             let dir =
                 commands::run_review::prepare(&config::config_dir()?, &run_id, restart, &Terminal)?;
-            println!("Wrote the review of run {run_id} to {}", dir.display());
-            println!(
+            screen::println(&format!(
+                "Wrote the review of run {run_id} to {}",
+                dir.display()
+            ));
+            screen::println(&format!(
                 "Fill in each repeat-<n>/scores.toml, then run: sbxm run review {run_id} --submit"
-            );
+            ));
             Ok(())
         }
         Command::Task {
             command: TaskCommand::Init { path },
         } => {
             let written = commands::task_init::run(path.as_deref())?;
-            println!("Wrote {}", written.display());
-            println!("Check the profile and gates, then run: sbxm task gates --issue N --dry-run");
+            screen::println(&format!("Wrote {}", written.display()));
+            screen::println(
+                "Check the profile and gates, then run: sbxm task gates --issue N --dry-run",
+            );
             Ok(())
         }
         Command::Task {
@@ -382,7 +390,7 @@ fn run() -> anyhow::Result<()> {
                 &task::record::SystemProbe,
             )?;
             // Printed as it is: its own hint is already named (`hint::named`), and titles stay.
-            print!("{text}");
+            screen::print(&text);
             Ok(())
         }
         Command::Task {
@@ -1068,11 +1076,9 @@ fn run() -> anyhow::Result<()> {
                 let pressed = std::sync::Arc::clone(&stop);
                 let child = std::sync::Arc::clone(&spawner);
                 if let Err(e) = ctrlc::set_handler(move || match pressed.press() {
-                    commands::task_loop::Press::First => {
-                        eprintln!(
-                            "stopping after the running tasks; press Ctrl-C again to stop now"
-                        )
-                    }
+                    commands::task_loop::Press::First => screen::eprintln(
+                        "stopping after the running tasks; press Ctrl-C again to stop now",
+                    ),
                     commands::task_loop::Press::Again => {
                         // Every running task's child goes with the loop (issues 612, 615).
                         use commands::task_loop::child::Spawner;
@@ -1136,7 +1142,7 @@ fn run() -> anyhow::Result<()> {
                 &commands::task_logs::Options { target, follow },
                 &commands::task_logs::Env::real(),
                 // The log as it was written, by whichever command and executable wrote it.
-                &mut std::io::stdout(),
+                &mut screen::stdout(),
             )
         }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
@@ -1153,8 +1159,8 @@ fn run() -> anyhow::Result<()> {
             let config_dir = config::config_dir()?;
             // A loop's child writes how it ended where the loop named (issue 633).
             task::outcome::recorded(
-                &mut Local::new(std::io::stdout()),
-                &mut Local::new(std::io::stderr()),
+                &mut Local::new(screen::stdout()),
+                &mut Local::new(screen::stderr()),
                 |_, out, warn| {
                     commands::template_build::run(
                         &config_dir,
@@ -1179,7 +1185,7 @@ fn run() -> anyhow::Result<()> {
             &config::config_dir()?,
             &commands::template_ls::Options::default(),
             &SbxBackend::LOCAL,
-            &mut Local::new(std::io::stdout()),
+            &mut Local::new(screen::stdout()),
         ),
         Command::Template {
             command: TemplateCommand::Rm { profile, harness },
@@ -1187,7 +1193,7 @@ fn run() -> anyhow::Result<()> {
             &config::config_dir()?,
             &commands::template_rm::Options { profile, harness },
             &SbxBackend::LOCAL,
-            &mut Local::new(std::io::stdout()),
+            &mut Local::new(screen::stdout()),
         ),
         Command::Config {
             command: ConfigCommand::Init,
@@ -1195,10 +1201,9 @@ fn run() -> anyhow::Result<()> {
         Command::Config {
             command: ConfigCommand::ProfilesDir,
         } => {
-            print!(
-                "{}",
-                commands::config_profiles_dir::render(&config::config_dir()?)?
-            );
+            screen::print(&commands::config_profiles_dir::render(
+                &config::config_dir()?,
+            )?);
             Ok(())
         }
         Command::Config {
@@ -1220,7 +1225,7 @@ fn run() -> anyhow::Result<()> {
                 project.as_deref(),
                 &options,
             )?;
-            print!("{output}");
+            screen::print(&output);
             Ok(())
         }
         Command::Status { watch, interval } => {
@@ -1241,7 +1246,7 @@ fn run() -> anyhow::Result<()> {
                 watch,
                 Some(&source),
                 // Its LOG column and titles are stored text; its own hints use `hint::named`.
-                &mut std::io::stdout(),
+                &mut screen::stdout(),
             )
         }
     }

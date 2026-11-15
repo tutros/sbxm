@@ -43,8 +43,8 @@ pub fn run() -> Result<()> {
         .with_context(|| format!("cannot write {}", config_path.display()))?;
     fs::write(&profile_path, STARTER_PROFILE)
         .with_context(|| format!("cannot write {}", profile_path.display()))?;
-    println!("Wrote {}", config_path.display());
-    println!("Wrote {}", profile_path.display());
+    crate::screen::println(&format!("Wrote {}", config_path.display()));
+    crate::screen::println(&format!("Wrote {}", profile_path.display()));
     Ok(())
 }
 

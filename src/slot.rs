@@ -670,7 +670,7 @@ fn catch_ctrl_c() {
         let _ = ctrlc::set_handler(|| {
             release_all();
             if WAITING.load(Ordering::SeqCst) > 0 {
-                eprintln!("stopped while waiting for a slot; nothing was created");
+                crate::screen::eprintln("stopped while waiting for a slot; nothing was created");
             }
             std::process::exit(130);
         });

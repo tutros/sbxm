@@ -32,7 +32,7 @@ pub fn open(
         identity,
         Box::new(now),
         Box::new(runlog::recorded_stage),
-        Box::new(|msg| eprint!("{}", crate::hint::local(&format!("{msg}\n")))),
+        Box::new(|msg| crate::screen::eprint(&crate::hint::local(&format!("{msg}\n")))),
     ))))
 }
 
