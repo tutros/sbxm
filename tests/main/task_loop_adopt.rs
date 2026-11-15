@@ -1418,6 +1418,71 @@ fn an_unreadable_log_is_a_warning_and_the_dead_loops_tasks_are_still_recovered()
     assert!(run.events.is_empty(), "{:?}\n{}", run.events, run.out);
 }
 
+// --- issue 667: a dead loop's task at `ready` whose `outcome.json` says `failed` ---
+
+/// Issue `issue`'s task as a child of [`DEAD_LOOP`] left it when a write to the dead loop's
+/// closed output pipe failed it after its record reached `ready` (the leftovers from before issue
+/// 667's fix).
+fn ready_but_failed(base: &Path, issue: u32) {
+    ended_under(
+        base,
+        issue,
+        Act::Ready,
+        Some(Outcome::new(
+            Kind::Failed,
+            None,
+            "The pipe is being closed. (os error 232)",
+        )),
+        Process::new(DEAD_LOOP, 0),
+    );
+}
+
+#[test]
+fn a_dead_loops_task_at_ready_whose_outcome_says_failed_is_resumed_once_which_finishes_it() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        ready_but_failed(&f.base(), 3);
+        let gh = github(&[]);
+
+        let run = run_loop(&f, &gh, &[], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        // Its resume finishes it: no `task resume` child, which can't continue a ready task.
+        assert_eq!(run.events, ["finish 3"], "{cloud_slots:?}\n{}", run.out);
+        assert!(run.out.contains("resuming it once"), "{}", run.out);
+        assert_eq!(
+            read(&f.base(), 3).hooks[RESUMED_HOOK],
+            serde_json::json!(true),
+            "its one resume is taken"
+        );
+        assert_eq!(read(&f.base(), 3).stage, Stage::Finished);
+        let rows = rows(&f, 3);
+        assert_eq!(rows.len(), 1, "{cloud_slots:?}\n{}", f.log_text());
+        assert!(rows[0].contains("PR #103, clean"), "{}", rows[0]);
+    }
+}
+
+#[test]
+fn a_dead_loops_task_at_ready_whose_outcome_says_failed_after_its_resume_is_parked() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        ready_but_failed(&f.base(), 3);
+        let mut rec = read(&f.base(), 3);
+        rec.hooks = serde_json::json!({ RESUMED_HOOK: true });
+        record::write(&record::task_dir(&f.base(), "issue-3"), &rec).unwrap();
+        let gh = github(&[]);
+
+        let run = run_loop(&f, &gh, &[], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert!(run.events.is_empty(), "{cloud_slots:?}\n{}", run.out);
+        let rows = rows(&f, 3);
+        assert_eq!(rows.len(), 1, "{cloud_slots:?}\n{}", f.log_text());
+        assert!(rows[0].contains("parked at ready"), "{}", rows[0]);
+        assert!(read(&f.base(), 3).pr.is_none());
+    }
+}
+
 // --- `sbxm status` lists an adopted child as the loop's ---
 
 /// A probe for which the pids in `.0` are gone.
