@@ -2345,37 +2345,122 @@ fn restart_hint(record: &Record) -> String {
     }
 }
 
+/// What a worker sandbox made again is made with (issue 410): today's resources, and the fields
+/// that changed since the task started, each as `<field> old -> new`, for the one warning line
+/// [`adopt_rebuild`] gives.
+struct Rebuild {
+    resources: Resources,
+    changes: Vec<String>,
+}
+
+/// The CPUs and memory a sandbox of `record` made now gets, resolved as `task start` resolves
+/// them ([`shape::overrides`]): locally `sbxm-task.toml`'s overrides, else the global
+/// `[resources]`; in the cloud, its shape.
+fn current_resources(env: &TaskEnv, record: &Record) -> Result<Resources> {
+    let global = GlobalConfig::load(env.config_dir)?;
+    let overrides = shape::overrides(&env.config.sandbox, &global.resources, record.location)?;
+    Ok(Resources {
+        cpus: overrides.cpus.unwrap_or(global.resources.cpus),
+        memory: overrides.memory.unwrap_or(global.resources.memory),
+        sandbox_slots: None,
+        cloud_slots: None,
+        placement: Default::default(),
+    })
+}
+
+/// `cpus` and `memory` where `now` differs from `recorded`, as `<field> old -> new`.
+fn resource_changes(recorded: &Resources, now: &Resources) -> Vec<String> {
+    let mut changes = Vec::new();
+    if recorded.cpus != now.cpus {
+        changes.push(format!("cpus {} -> {}", recorded.cpus, now.cpus));
+    }
+    if recorded.memory != now.memory {
+        changes.push(format!("memory {} -> {}", recorded.memory, now.memory));
+    }
+    changes
+}
+
 /// Refuses before `ensure_worker_sandbox` removes, rebuilds or records anything (M-2, PR 163
 /// review round 2): hashes the recorded profile's contents as they are on disk right now, together
 /// with the recorded resources and the worker's harness, the same way [`config::config_hash`]
 /// hashed them when the task started, and bails if the result no longer matches
-/// `Record::config_hash`. An edit to the profile (egress, instructions, setup, secrets, skills) or
-/// to the global defaults a task without explicit overrides resolved against must never silently
-/// run resumed work in a differently provisioned or differently restricted sandbox.
+/// `Record::config_hash`. An edit to the profile (egress, instructions, setup, secrets, skills)
+/// must never silently run resumed work in a differently provisioned or differently restricted
+/// sandbox. A change of resources alone is no such edit (issue 410): the sandbox is made with
+/// today's, returned with the change; the refusal names every field that changed.
 fn check_config_drift(
     env: &TaskEnv,
     record: &Record,
     profile_name: &str,
-    resources: &Resources,
-) -> Result<()> {
+    recorded: &Resources,
+) -> Result<Rebuild> {
     let global = GlobalConfig::load(env.config_dir)?;
     let profile = Profile::load(global.profiles_dir(), profile_name)?;
     let harness = env.config.worker.harness;
+    let resources = current_resources(env, record)?;
+    let mut changes = resource_changes(recorded, &resources);
     // The variant the worker was created with (decisions 208, 230).
     let from_template = record.worker.as_ref().is_some_and(|w| w.template.is_some());
     let hash = match from_template {
         true => config::template_config_hash,
         false => config::config_hash,
-    }(profile_name, &profile, resources, harness);
+    }(profile_name, &profile, recorded, harness);
     if hash != record.config_hash {
+        // The hash covers sbxm's version and the harness too; with neither changed, it is the
+        // profile's settings.
+        let version = env!("CARGO_PKG_VERSION");
+        if record.sbxm_version != version {
+            changes.push(format!("sbxm {} -> {version}", record.sbxm_version));
+        }
+        let recorded_harness = record.worker.as_ref().map(|w| w.harness.as_str());
+        if let Some(was) = recorded_harness.filter(|was| *was != harness.as_str()) {
+            changes.push(format!("harness {was} -> {}", harness.as_str()));
+        }
+        if record.sbxm_version == version && recorded_harness.is_none_or(|w| w == harness.as_str())
+        {
+            changes.push(format!("the settings of profile {profile_name:?}"));
+        }
         bail!(
-            "task {}'s sandbox config changed since it started; restart it with `{}`, or restore \
-             the profile {profile_name:?} to what it was",
+            "task {}'s sandbox config changed since it started ({}); restart it with `{}`, or \
+             restore the profile {profile_name:?} to what it was",
             record.id,
+            changes.join(", "),
             restart_hint(record)
         );
     }
-    Ok(())
+    Ok(Rebuild { resources, changes })
+}
+
+/// Records in `prepared` what its worker sandbox is made again with, before it is created (issue
+/// 410): the hash, template and resources of `plan`; and when any of them differs from what the
+/// task started with, one warning line naming each change.
+fn adopt_rebuild(prepared: &mut Prepared, rebuild: Rebuild, plan: &SandboxPlan) {
+    let Rebuild {
+        resources,
+        mut changes,
+    } = rebuild;
+    prepared.record.config_hash = plan.kits.config_hash.clone();
+    if let Some(worker) = prepared.record.worker.as_mut() {
+        if worker.template != plan.template {
+            let tag = |t: &Option<String>| t.clone().unwrap_or_else(|| "none".to_owned());
+            changes.push(format!(
+                "template {} -> {}",
+                tag(&worker.template),
+                tag(&plan.template)
+            ));
+        }
+        worker.template = plan.template.clone();
+        worker.cpus = Some(resources.cpus);
+        worker.memory = Some(resources.memory);
+    }
+    if !changes.is_empty() {
+        prepared.warnings.push(format!(
+            "task {}'s worker sandbox config changed since it started ({}); it is made again with \
+             the new values",
+            prepared.record.id,
+            changes.join(", ")
+        ));
+    }
 }
 
 /// Checks before `task resume` restores the worker's input, rebuilds its sandbox, or runs the
@@ -2906,8 +2991,12 @@ pub(super) fn ensure_worker_sandbox(
         return Ok(false);
     }
     let profile_name = worker_profile(&prepared.record, worker)?.to_owned();
-    let resources = worker_resources(&prepared.record, worker)?;
-    check_config_drift(env, &prepared.record, &profile_name, &resources)?;
+    let rebuild = check_config_drift(
+        env,
+        &prepared.record,
+        &profile_name,
+        &worker_resources(&prepared.record, worker)?,
+    )?;
     let harness = env.config.worker.harness;
     let repo_git = prepared.meta.join("repo.git");
     let tip = repo::branch_tip(&repo_git, &prepared.record.branch)?;
@@ -2927,8 +3016,8 @@ pub(super) fn ensure_worker_sandbox(
         harness,
         &sandbox,
         &Overrides {
-            cpus: Some(resources.cpus),
-            memory: Some(resources.memory.clone()),
+            cpus: Some(rebuild.resources.cpus),
+            memory: Some(rebuild.resources.memory.clone()),
         },
         &prepared.meta.join("kits"),
         Locks::Commit {
@@ -2940,10 +3029,7 @@ pub(super) fn ensure_worker_sandbox(
     if replace {
         let _ = env.backend.remove(&sandbox);
     }
-    prepared.record.config_hash = plan.kits.config_hash.clone();
-    if let Some(worker) = prepared.record.worker.as_mut() {
-        worker.template = plan.template.clone();
-    }
+    adopt_rebuild(prepared, rebuild, &plan);
     // One that vanished or was replaced is gone: its open entry, if any, is closed.
     prepared.record.sandbox_removed(&sandbox, now());
     // The record goes first, as in `prepare`: `template rm` reads it to see what the sandbox uses.
@@ -3108,8 +3194,12 @@ fn ensure_cloud_worker_as(
         return Ok(false);
     }
     let profile_name = worker_profile(&prepared.record, worker)?.to_owned();
-    let resources = worker_resources(&prepared.record, worker)?;
-    check_config_drift(env, &prepared.record, &profile_name, &resources)?;
+    let rebuild = check_config_drift(
+        env,
+        &prepared.record,
+        &profile_name,
+        &worker_resources(&prepared.record, worker)?,
+    )?;
     let identity = env
         .identity
         .context("no committer identity for the worker's new clone")?;
@@ -3122,8 +3212,8 @@ fn ensure_cloud_worker_as(
         env.config.worker.harness,
         &sandbox,
         &Overrides {
-            cpus: Some(resources.cpus),
-            memory: Some(resources.memory.clone()),
+            cpus: Some(rebuild.resources.cpus),
+            memory: Some(rebuild.resources.memory.clone()),
         },
         &prepared.meta.join("kits"),
         &mut prepared.warnings,
@@ -3142,6 +3232,8 @@ fn ensure_cloud_worker_as(
             "cloud sandbox {sandbox} is gone; it is made again for {purpose}"
         ));
     }
+    // Written with the create's start, before the create.
+    adopt_rebuild(prepared, rebuild, &plan);
     create_cloud_sandbox(env, prepared, &plan, &sandbox, role, ttl)?;
     let (meta, record) = (&prepared.meta, &prepared.record);
     let clone = seed_cloud_clone(
@@ -4927,8 +5019,12 @@ pub(super) fn check_cloud_rebuild(
 ) -> Result<()> {
     let worker = record.worker.as_ref().context("the task has no worker")?;
     let profile_name = worker_profile(record, worker)?;
-    let resources = worker_resources(record, worker)?;
-    check_config_drift(env, record, profile_name, &resources)?;
+    check_config_drift(
+        env,
+        record,
+        profile_name,
+        &worker_resources(record, worker)?,
+    )?;
     let global = GlobalConfig::load(env.config_dir)?;
     let profile = Profile::load(global.profiles_dir(), profile_name)?;
     cloud_preflight(

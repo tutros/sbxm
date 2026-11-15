@@ -303,9 +303,9 @@ fn the_worker_s_sandbox_is_kept_when_it_still_exists() {
     );
 }
 
-/// M-2 (PR 163 review): `task start --profile alternate` records the profile and resource
-/// overrides that built the worker's sandbox; `task resume` rebuilds it from those, not from
-/// whatever `sbxm-task.toml` says now.
+/// M-2 (PR 163 review): `task start --profile alternate` records the profile that built the
+/// worker's sandbox; `task resume` rebuilds it from that, not from whatever `sbxm-task.toml` says
+/// now. Its resources are today's (issue 410).
 #[test]
 fn the_worker_s_sandbox_is_remade_from_the_profile_recorded_at_start_not_the_current_file() {
     let f = fixture_with(
@@ -362,14 +362,10 @@ fn the_worker_s_sandbox_is_remade_from_the_profile_recorded_at_start_not_the_cur
         .into_iter()
         .find(|c| c.name == "sbxm-task-issue-41-claude")
         .expect("the worker's sandbox was made again");
-    assert_eq!(
-        create.cpus, 7,
-        "the recorded cpus, not the edited file's 99"
-    );
-    assert_eq!(
-        create.memory, "7g",
-        "the recorded memory, not the edited file's 99g"
-    );
+    assert_eq!(create.cpus, 99, "the edited file's cpus (issue 410)");
+    assert_eq!(create.memory, "99g", "the edited file's memory (issue 410)");
+    let worker = saved(&f).worker.unwrap();
+    assert_eq!(worker.profile, Some("alternate".to_owned()));
 }
 
 /// M-2 (PR 163 review): a record written before issue 118's resume fix saved no profile. Resume
@@ -413,11 +409,11 @@ fn an_older_record_without_saved_resources_refuses_instead_of_guessing() {
     assert!(backend.creates().is_empty(), "nothing was created");
 }
 
-/// M-2 round 2 (PR 163 review): a task without resource overrides records the values it resolved
-/// against the global defaults at `task start`. Resume rebuilds the gone sandbox from those
-/// recorded values, never from whatever the globals say now.
+/// A task without resource overrides records the values it resolved against the global defaults
+/// at `task start`. Resume rebuilds the gone sandbox with what the globals say now, and records
+/// those (issue 410: a change of resources alone doesn't change what the worker's work means).
 #[test]
-fn the_worker_s_sandbox_is_remade_with_the_resources_resolved_at_start_not_todays_globals() {
+fn the_worker_s_sandbox_is_remade_with_today_s_global_resources_and_records_them() {
     let f = config();
     let mut prepared = task_left_in(&f, Stage::Working, Status::Failed);
     let worker = prepared.record.worker.clone().unwrap();
@@ -442,13 +438,11 @@ fn the_worker_s_sandbox_is_remade_with_the_resources_resolved_at_start_not_today
         .into_iter()
         .find(|c| c.name == "sbxm-task-issue-41-claude")
         .expect("the worker's sandbox was made again");
+    assert_eq!((create.cpus, create.memory.as_str()), (99, "99g"));
+    let worker = saved(&f).worker.unwrap();
     assert_eq!(
-        create.cpus, 4,
-        "the value resolved at start, not today's global 99"
-    );
-    assert_eq!(
-        create.memory, "8g",
-        "the value resolved at start, not today's global 99g"
+        (worker.cpus, worker.memory),
+        (Some(99), Some("99g".to_owned()))
     );
 }
 
