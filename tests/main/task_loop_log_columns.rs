@@ -36,7 +36,7 @@ fn row(issue: u32) -> Row {
         worker_s: None,
         reviewer_s: None,
         rounds: None,
-        must_fix: None,
+        must_fix: Vec::new(),
         outcome: "PR #293, clean".into(),
         stops: Vec::new(),
         idle_before: Some(190),
