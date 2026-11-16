@@ -610,7 +610,7 @@ pub(super) fn work<'a>(
             issue: a.issue,
             phase: Some(lp.watch_adopted(&a)),
             title: a.title,
-            size: None,
+            size: a.size,
             started: a.started,
             stops: Vec::new(),
             slot: a.slot,

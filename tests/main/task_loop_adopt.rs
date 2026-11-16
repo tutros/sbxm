@@ -1091,6 +1091,143 @@ fn a_clean_start_adopts_nothing() {
     assert!(!run.out.contains("adopted"), "{}", run.out);
 }
 
+// --- issue 687: an adopted child's row gives its issue's size ---
+
+/// GitHub as [`github`] gives it, with these issues open, each with its own labels.
+fn labeled_github(issues: &[(u32, &[&str])]) -> FakeGitHub {
+    let mut gh = github(&[]);
+    let mut open = Vec::new();
+    for &(n, labels) in issues {
+        gh = gh.with_issue_text(issue_text(n));
+        open.push(open_issue(n, labels, "Why\n"));
+    }
+    gh.with_open_issues(open)
+}
+
+/// The size column of `row`, a loop log row: `| #3 | Fix 3 | M | …`.
+fn size_of(row: &str) -> &str {
+    row.split('|').nth(3).unwrap_or_default().trim()
+}
+
+/// The lines of `out` that warn.
+fn warnings(out: &str) -> Vec<&str> {
+    out.lines().filter(|l| l.contains("warning:")).collect()
+}
+
+#[test]
+fn an_adopted_running_child_whose_issue_is_sized_m_has_size_m_in_its_row() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        adoptable(&f.base(), 3, Location::Cloud, CHILD);
+        let gh = labeled_github(&[(3, &["size:M"])]);
+
+        let run = run_loop(&f, &gh, &[(CHILD, 3, 10, Act::Ready)], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        run.at("finish 3");
+        let rows = rows(&f, 3);
+        assert_eq!(rows.len(), 1, "{}", f.log_text());
+        assert_eq!(size_of(&rows[0]), "M", "{cloud_slots:?}: {}", rows[0]);
+        assert!(warnings(&run.out).is_empty(), "{}", run.out);
+    }
+}
+
+#[test]
+fn an_adopted_child_that_ended_with_its_outcome_and_is_sized_s_has_size_s_in_its_row() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        ended_ready(&f.base(), 3);
+        let gh = labeled_github(&[(3, &["size:S"])]);
+
+        let run = run_loop(&f, &gh, &[], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert_eq!(run.events, ["finish 3"], "{}", run.out);
+        let rows = rows(&f, 3);
+        assert_eq!(rows.len(), 1, "{}", f.log_text());
+        assert_eq!(size_of(&rows[0]), "S", "{cloud_slots:?}: {}", rows[0]);
+    }
+}
+
+#[test]
+fn a_task_cut_off_when_its_loop_died_and_sized_m_has_size_m_in_its_row_after_its_resume() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        ended_under(&f.base(), 3, Act::Crash, None, Process::new(DEAD_LOOP, 0));
+        let dir = record::task_dir(&f.base(), "issue-3");
+        let mut rec = read(&f.base(), 3);
+        rec.status = Status::Running;
+        record::write(&dir, &rec).unwrap();
+        let gh = labeled_github(&[(3, &["size:M"])]);
+
+        let run = run_loop(&f, &gh, &[], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert!(run.out.contains("(size M), tried again"), "{}", run.out);
+        run.at("finish 3");
+        let rows = rows(&f, 3);
+        assert_eq!(rows.len(), 1, "{}", f.log_text());
+        assert_eq!(size_of(&rows[0]), "M", "{cloud_slots:?}: {}", rows[0]);
+    }
+}
+
+#[test]
+fn an_adopted_child_whose_issue_has_no_size_label_is_unknown_with_no_warning() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        adoptable(&f.base(), 3, Location::Cloud, CHILD);
+        let gh = labeled_github(&[(3, &["bug"])]);
+
+        let run = run_loop(&f, &gh, &[(CHILD, 3, 10, Act::Ready)], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        run.at("finish 3");
+        let rows = rows(&f, 3);
+        assert_eq!(rows.len(), 1, "{}", f.log_text());
+        assert_eq!(size_of(&rows[0]), "unknown", "{}", rows[0]);
+        assert!(warnings(&run.out).is_empty(), "{}", run.out);
+    }
+}
+
+#[test]
+fn an_adopted_child_whose_size_lookup_fails_is_unknown_with_one_warning_and_still_finished() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        adoptable(&f.base(), 3, Location::Cloud, CHILD);
+        let gh = labeled_github(&[(3, &["size:M"])]).failing_issues_open_once("gh is down");
+
+        let run = run_loop(&f, &gh, &[(CHILD, 3, 10, Act::Ready)], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        run.at("finish 3");
+        assert_eq!(read(&f.base(), 3).stage, Stage::Finished);
+        let rows = rows(&f, 3);
+        assert_eq!(rows.len(), 1, "{}", f.log_text());
+        assert_eq!(size_of(&rows[0]), "unknown", "{}", rows[0]);
+        let warnings = warnings(&run.out);
+        assert_eq!(warnings.len(), 1, "{}", run.out);
+        assert!(warnings[0].contains("gh is down"), "{}", warnings[0]);
+    }
+}
+
+#[test]
+fn a_task_the_loop_starts_itself_next_to_an_adopted_one_keeps_its_own_size() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        adoptable(&f.base(), 3, Location::Cloud, CHILD);
+        let gh = labeled_github(&[(3, &["size:M"]), (5, &[READY, "size:L"])]);
+
+        let run = run_loop(&f, &gh, &[(CHILD, 3, 10, Act::Ready)], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        run.at("finish 5");
+        let rows = rows(&f, 5);
+        assert_eq!(rows.len(), 1, "{}", f.log_text());
+        assert_eq!(size_of(&rows[0]), "L", "{cloud_slots:?}: {}", rows[0]);
+        assert_eq!(size_of(&self::rows(&f, 3)[0]), "M", "{}", f.log_text());
+    }
+}
+
 // --- issue 657: a dead loop's child that ended with its outcome before the takeover ---
 
 /// Issue `issue`'s task as a child of the loop `owner` left it when it ended after `act` with

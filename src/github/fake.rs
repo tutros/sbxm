@@ -137,6 +137,8 @@ pub struct FakeGitHub {
     label_events_failure: Mutex<Option<String>>,
     /// What `pr_merged_at` answers, by PR; not merged when not scripted.
     merged_at: Mutex<Vec<(u32, u64)>>,
+    /// The next `issues_open` fails with this, once (issue 687).
+    issues_open_failure: Mutex<Option<String>>,
     calls: Mutex<Vec<GhCall>>,
 }
 
@@ -336,6 +338,12 @@ impl FakeGitHub {
         self
     }
 
+    /// The next `issues_open` fails with `message`; the ones after it answer (issue 687).
+    pub fn failing_issues_open_once(self, message: &str) -> Self {
+        *self.issues_open_failure.lock().unwrap() = Some(message.to_owned());
+        self
+    }
+
     pub fn failing_issues_all(mut self) -> Self {
         self.fail_issues_all = true;
         self
@@ -518,6 +526,9 @@ impl GitHubBackend for FakeGitHub {
 
     fn issues_open(&self, repo: &str) -> Result<Vec<Issue>> {
         self.record(GhCall::IssuesOpen(repo.to_owned()))?;
+        if let Some(message) = self.issues_open_failure.lock().unwrap().take() {
+            return Err(anyhow!("{message}"));
+        }
         Ok(self.open_issues.lock().unwrap().clone())
     }
 
