@@ -1,19 +1,30 @@
 //! The state machine migration (decisions 173-175, spec section 5, spike
 //! `sdlc/spikes/state-table.md`): the transition table in `task::machine` against what the
 //! commands that now decide through it (`check_can_gate`, `check_can_review`,
-//! `check_can_review_pr`, `check_can_finish`, `plan_removal`, `Record::advance`) say, for every
-//! (state, event) pair. Any difference would mean the table and a command have drifted apart; the
+//! `check_can_review_pr`, `check_can_finish`, `check_can_retry_summaries`, `check_can_resume`
+//! with and without `--rounds`, `plan_removal`, `Record::advance`) say, for every (state, event)
+//! pair. A state carries the recorded PR, whether the recorded process is alive and a `ready`
+//! task's stop and budget (issue 513), so the walk covers the recorded-PR rule, the process check,
+//! `--rounds` and `--should-fix` too. Any difference would mean the table and a command have drifted apart; the
 //! list below is pinned empty, so a new difference fails the test instead of going unnoticed.
 
 use std::collections::BTreeSet;
 
 use sbxm::task::finish::{check_can_finish, check_can_retry_summaries, plan_removal};
-use sbxm::task::machine::{Event, STAGES, State, dead_ends, matching, states, verdict};
+use sbxm::task::machine::{
+    Event, STAGES, ShouldFixRound, State, Stop, dead_ends, matching, states, verdict,
+};
 use sbxm::task::pipeline::{check_can_gate, check_can_review, check_can_review_pr};
-use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record, Stage, Stopped};
-use sbxm::task::resume::check_can_resume;
+use sbxm::task::record::{
+    self, Kind, NewTask, Process, ProcessProbe, Record, ReviewResult, Stopped,
+};
+use sbxm::task::resume::{check_can_resume, check_can_resume_with, check_should_fix};
 
 const T0: u64 = 1_790_000_000;
+
+/// A review with one should-fix finding sized S and no must-fix.
+const S_ONE: &str = "Must-fix findings: 0\n\n## Should fix\n\n\
+    ### S-1 - a.txt:2 a small slip.\n\n**Where:** a.txt:2\n**Size:** S (one line)\n";
 
 struct Probe(Option<u64>);
 
@@ -47,6 +58,26 @@ fn record_in(state: &State) -> Record {
     );
     record.stage = state.stage;
     record.status = state.status;
+    record.pr = state
+        .has_pr
+        .then(|| "https://github.com/o/r/pull/9".to_owned());
+    // The stop and the budget as the state names them (review M-1): never chosen per event.
+    record.fix_rounds = 2;
+    (record.stopped, record.round) = match state.stop {
+        Stop::Clean => (None, 0),
+        Stop::RoundsLeft => (Some(Stopped::RepeatFinding), 1),
+        Stop::RoundsUsed => (Some(Stopped::RoundsExhausted), 2),
+    };
+    match state.should_fix {
+        ShouldFixRound::Open => {}
+        ShouldFixRound::MustFixLeft => {
+            record.review = Some(ReviewResult {
+                must_fix: 1,
+                ..ReviewResult::default()
+            });
+        }
+        ShouldFixRound::Used => record.should_fix_round = true,
+    }
     record
 }
 
@@ -55,41 +86,31 @@ fn record_in(state: &State) -> Record {
 /// the table as both change.
 fn guard(state: &State, event: Event) -> bool {
     let record = record_in(state);
-    let probe = Probe(if state.interrupted { None } else { Some(T0) });
+    // The recorded process started at `T0`: alive when the probe still sees that start time.
+    let probe = Probe(state.alive.then_some(T0));
+    assert_eq!(State::of(&record, &probe), *state, "{}", key(state, event));
     match event {
         Event::Gates => check_can_gate(&record, &probe).is_ok(),
         Event::Review => match state.kind {
             Kind::Issue | Kind::Spec | Kind::Fix => check_can_review(&record, &probe).is_ok(),
             Kind::Pr => check_can_review_pr(&record, &probe).is_ok(),
         },
-        Event::Finish => check_can_finish(&record).is_ok(),
-        // Asked with a recorded PR, which no table state carries; the PR-less case is in
-        // `tests/task_finish_retry_states.rs`.
-        Event::FinishSummaries => {
-            let mut record = record;
-            record.pr = Some("https://github.com/o/r/pull/9".to_owned());
-            check_can_retry_summaries(&record).is_ok()
-        }
+        Event::Finish => check_can_finish(&record, &probe).is_ok(),
+        Event::FinishSummaries => check_can_retry_summaries(&record, &probe).is_ok(),
         Event::Rm => {
             let base = tempfile::tempdir().unwrap();
             record::write(&record::task_dir(base.path(), &record.id), &record).unwrap();
             plan_removal(base.path(), &record.id, &probe).is_ok()
         }
-        // The table doesn't model the recorded process of a task that isn't `running`: a state
-        // it calls not in flight has no live process. `ready` is resumable only once the task
-        // stopped (`stopped`, not in the table either), so it is asked with a stopped task and
-        // `--rounds 1`.
-        Event::Resume => {
-            let alive = state.status == record::Status::Running && !state.interrupted;
-            let probe = Probe(alive.then_some(T0));
-            let mut record = record;
-            let rounds = if state.stage == Stage::Ready {
-                record.stopped = Some(Stopped::RoundsExhausted);
-                Some(1)
-            } else {
-                None
-            };
-            check_can_resume(&record, &probe, rounds).is_ok()
+        Event::Resume => check_can_resume(&record, &probe, None).is_ok(),
+        Event::ResumeRounds => check_can_resume(&record, &probe, Some(1)).is_ok(),
+        // The command's own checks, `check_should_fix` too, with a review that has one
+        // should-fix finding sized S: what the review file holds is not part of a state.
+        Event::ResumeShouldFix => {
+            let meta = tempfile::tempdir().unwrap();
+            std::fs::write(meta.path().join("review.md"), S_ONE).unwrap();
+            check_can_resume_with(&record, &probe, Some(1), true).is_ok()
+                && check_should_fix(&record, meta.path(), Some(1)).is_ok()
         }
         Event::Advance(to) => {
             let mut record = record;
@@ -106,6 +127,8 @@ fn events() -> Vec<Event> {
         Event::FinishSummaries,
         Event::Rm,
         Event::Resume,
+        Event::ResumeRounds,
+        Event::ResumeShouldFix,
     ];
     all.extend(STAGES.iter().map(|&stage| Event::Advance(stage)));
     all
@@ -113,7 +136,7 @@ fn events() -> Vec<Event> {
 
 fn key(state: &State, event: Event) -> String {
     format!(
-        "{:?} {:?}/{:?}{} {:?}",
+        "{:?} {:?}/{:?}{}{}{} {:?} {:?} {:?}",
         state.kind,
         state.stage,
         state.status,
@@ -122,6 +145,14 @@ fn key(state: &State, event: Event) -> String {
         } else {
             ""
         },
+        if state.alive && state.status != record::Status::Running {
+            "+alive"
+        } else {
+            ""
+        },
+        if state.has_pr { "+pr" } else { "" },
+        state.stop,
+        state.should_fix,
         event
     )
 }

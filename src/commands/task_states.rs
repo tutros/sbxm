@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use crate::task::machine::{self, Event, Row};
+use crate::task::machine::{self, Event, Row, ShouldFixRound, Stop};
 use crate::task::record::Kind;
 
 fn stage_cell(stages: &[crate::task::record::Stage]) -> String {
@@ -42,17 +42,45 @@ fn kind_suffix(kinds: &[Kind]) -> &'static str {
     }
 }
 
+fn stop_suffix(stops: &[Stop]) -> &'static str {
+    match stops {
+        [Stop::Clean] => ", not stopped",
+        [Stop::RoundsLeft] => ", stopped with rounds left",
+        [Stop::RoundsUsed] => ", stopped with its rounds used",
+        [Stop::RoundsLeft, Stop::RoundsUsed] => ", stopped",
+        // Every stop: the row doesn't look at it.
+        _ => "",
+    }
+}
+
+fn should_fix_suffix(rounds: &[ShouldFixRound]) -> &'static str {
+    match rounds {
+        [ShouldFixRound::Open] => ", no must-fix, should-fix round unused",
+        [ShouldFixRound::MustFixLeft] => ", must-fix left",
+        [ShouldFixRound::Used] => ", should-fix round used",
+        // Every value: the row doesn't look at it.
+        _ => "",
+    }
+}
+
 fn from_cell(row: &Row) -> String {
     format!(
-        "{} {}{}{}",
+        "{} {}{}{}{}{}{}",
         stage_cell(row.stages),
         status_cell(row.statuses),
         kind_suffix(row.kinds),
-        if row.live == machine::Live::Interrupted {
-            ", interrupted"
-        } else {
-            ""
+        match row.live {
+            machine::Live::Any => "",
+            machine::Live::Interrupted => ", interrupted",
+            machine::Live::Gone => ", no live process",
         },
+        match row.pr {
+            machine::RecordedPr::Any => "",
+            machine::RecordedPr::Yes => ", with a recorded PR",
+            machine::RecordedPr::No => ", no recorded PR",
+        },
+        stop_suffix(row.stops),
+        should_fix_suffix(row.should_fix),
     )
 }
 
@@ -64,6 +92,8 @@ fn event_cell(event: Event) -> &'static str {
         Event::FinishSummaries => "task finish",
         Event::Rm => "task rm",
         Event::Resume => "task resume",
+        Event::ResumeRounds => "task resume --rounds N",
+        Event::ResumeShouldFix => "task resume --rounds 1 --should-fix",
         Event::Advance(_) => "advance",
     }
 }

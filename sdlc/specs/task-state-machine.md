@@ -206,23 +206,26 @@ kept here as the design for issues #117-121 to build toward.
 | gating/reviewing running (pr), interrupted | task review | gating | remove the leftover reviewer, fetch the PR's head again, run the gates, then the reviewer |
 | reviewing completed (pr) | task review | reviewing | run the reviewer again |
 | ready ok (pr) | task review | gating | fetch the PR's new head, keep the review as review-<n>.md, run the gates, then the reviewer |
-| ready ok (issue) | task finish | finished | push the branch and open the PR |
-| ready ok (spec) | task finish | finished | deliver the branch through the [finish] sink |
-| ready ok (fix) | task finish | finished | push the branch onto the PR's own branch, a fast-forward or nothing |
-| finished ok (issue/spec) | task finish | finished | with a recorded PR: post or edit the issue summaries only (no push, no new PR, no PR review) |
+| ready ok (issue), no recorded PR | task finish | finished | push the branch and open the PR |
+| ready ok (spec), no recorded PR | task finish | finished | deliver the branch through the [finish] sink |
+| ready ok (fix), no recorded PR | task finish | finished | push the branch onto the PR's own branch, a fast-forward or nothing |
+| finished ok (issue/spec), with a recorded PR | task finish | finished | post or edit the issue summaries only (no push, no new PR, no PR review) |
 | prepared running (issue/spec/fix), interrupted | task resume | working | make the worker's sandbox again, then run the worker and review |
-| prepared failed (issue/spec/fix) | task resume | working | make the worker's sandbox again, then run the worker and review |
+| prepared failed (issue/spec/fix), no live process | task resume | working | make the worker's sandbox again, then run the worker and review |
 | working running (issue/spec/fix), interrupted | task resume | working | run the worker again in its clone, then review |
-| working failed (issue/spec/fix) | task resume | working | run the worker again in its clone, then review |
-| working/fixing completed/timed-out (issue/spec/fix) | task resume | reviewing | run the gates, then the reviewer |
-| gating passed/gates-failed (issue/spec/fix) | task resume | reviewing | run the reviewer (after the gates again, when they failed) |
+| working failed (issue/spec/fix), no live process | task resume | working | run the worker again in its clone, then review |
+| working/fixing completed/timed-out (issue/spec/fix), no live process | task resume | reviewing | run the gates, then the reviewer |
+| gating passed/gates-failed (issue/spec/fix), no live process | task resume | reviewing | run the reviewer (after the gates again, when they failed) |
 | gating running (issue/spec/fix), interrupted | task resume | reviewing | re-run the abandoned gates, then the reviewer |
 | reviewing running (issue/spec/fix), interrupted | task resume | reviewing | run the reviewer again |
-| reviewing failed (issue/spec/fix) | task resume | reviewing | run the reviewer again |
+| reviewing failed (issue/spec/fix), no live process | task resume | reviewing | run the reviewer again |
 | fixing running (issue/spec/fix), interrupted | task resume | fixing | run the fix round again in its clone, then the gates and the review |
-| fixing failed (issue/spec/fix) | task resume | fixing | run the fix round again in its clone, then the gates and the review |
-| reviewing completed (issue/spec/fix) | task resume | fixing | replay the recorded review: a fix round for its findings, else ready |
-| ready ok (issue/spec/fix) | task resume | fixing | when stopped: a fix round from the recorded review (--rounds N adds N rounds) |
+| fixing failed (issue/spec/fix), no live process | task resume | fixing | run the fix round again in its clone, then the gates and the review |
+| reviewing completed (issue/spec/fix), no live process | task resume | fixing | replay the recorded review: a fix round for its findings, else ready |
+| ready ok (issue/spec/fix), no live process, stopped with rounds left | task resume | fixing | a fix round from the recorded review |
+| ready ok (issue/spec/fix), no live process, stopped | task resume --rounds N | fixing | add N fix rounds to the budget, then a fix round from the recorded review |
+| ready ok (fix), no live process, not stopped | task resume | finished | push the branch onto the PR's own branch, a fast-forward or nothing |
+| ready ok (issue/spec/fix), no live process, not stopped, no must-fix, should-fix round unused | task resume --rounds 1 --should-fix | fixing | one fix round for the review's should-fix findings sized S |
 | any completed/timed-out/failed/passed/gates-failed/ok | task rm | removed | remove the task's folders and sandboxes |
 | any running, interrupted | task rm | removed | remove the task's folders and sandboxes |
 
@@ -318,6 +321,21 @@ reads the PR and fetches its head again (cloning `repo.git` first when the faile
 removes the reviewer sandbox and clone the interrupted run left, then runs the gates and the reviewer as the next
 round, every earlier `review-<n>.md` kept. From `reviewing completed` (which `review_pr` never saves itself: it records
 `ready` in the same write) it runs the reviewer again, as after a failure, with no replay.
+
+**Issue 513 status:** the rules that lived outside the table are rows of it now, so "Today (generated)" lists them
+and the checks cannot drift from it: the recorded-PR rule (`task finish` needs no recorded PR, its summary-only
+retry needs one: `no recorded PR` / `with a recorded PR`), `resume`'s process check (refused while the recorded
+process is alive whatever the status: `no live process`), and a `ready` task's stop and budget: plain `resume` needs
+a stop with rounds left (`stopped with rounds left`), `--rounds N` any stop (its own `task resume --rounds N` row,
+`stopped`), `--rounds 1 --should-fix` no stop, no must-fix left and no should-fix round yet (`not stopped, no
+must-fix, should-fix round unused`), and a clean fix task resumes to its push. A table
+state carries the recorded PR, whether the recorded process is alive, the stop (`machine::Stop`: not stopped,
+stopped with rounds left, stopped with its rounds used) and the should-fix round (`machine::ShouldFixRound`: open,
+must-fix left, used), and is built from a task record only by
+`machine::State::of`. Still checked outside the table, since they are about a flag's value or more than the record:
+a `--rounds` value of 0, too large, or other than 1 with `--should-fix`; whether the review file has should-fix
+findings sized S for `--should-fix`; an ambiguous cloud create; and
+the PR's head for `task review --pr`.
 
 `resume` is refused while the recorded process is alive (pid and start time, as `interrupted` is decided today).
 `--rounds N` is additive ("N more rounds", N >= 1; 0 is refused) and is valid from any `ready` with `stopped`,

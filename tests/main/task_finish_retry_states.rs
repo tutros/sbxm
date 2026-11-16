@@ -4,7 +4,7 @@
 use sbxm::commands::task_states;
 use sbxm::task::finish::check_can_retry_summaries;
 use sbxm::task::machine::{Event, State, verdict};
-use sbxm::task::record::{Kind, NewTask, Process, Record, Stage, Status};
+use sbxm::task::record::{Kind, NewTask, Process, ProcessProbe, Record, Stage, Status};
 
 const T0: u64 = 1_790_000_000;
 
@@ -34,13 +34,17 @@ fn finished(kind: Kind, pr: Option<&str>) -> Record {
     record
 }
 
-fn state(record: &Record) -> State {
-    State {
-        stage: record.stage,
-        status: record.status,
-        interrupted: false,
-        kind: record.kind,
+/// The recorded process is gone; `task finish` doesn't look at it.
+struct Gone;
+
+impl ProcessProbe for Gone {
+    fn start_time(&self, _pid: u32) -> Option<u64> {
+        None
     }
+}
+
+fn state(record: &Record) -> State {
+    State::of(record, &Gone)
 }
 
 #[test]
@@ -48,7 +52,7 @@ fn the_retry_agrees_with_the_table_for_every_kind() {
     for kind in [Kind::Issue, Kind::Spec, Kind::Fix, Kind::Pr] {
         let record = finished(kind, Some("https://github.com/o/r/pull/9"));
         assert_eq!(
-            check_can_retry_summaries(&record).is_ok(),
+            check_can_retry_summaries(&record, &Gone).is_ok(),
             verdict(&state(&record), Event::FinishSummaries),
             "{kind:?}",
         );
@@ -59,7 +63,7 @@ fn the_retry_agrees_with_the_table_for_every_kind() {
 fn a_finished_issue_or_spec_task_with_a_pr_may_retry() {
     for kind in [Kind::Issue, Kind::Spec] {
         let record = finished(kind, Some("https://github.com/o/r/pull/9"));
-        check_can_retry_summaries(&record).unwrap();
+        check_can_retry_summaries(&record, &Gone).unwrap();
     }
 }
 
@@ -67,11 +71,11 @@ fn a_finished_issue_or_spec_task_with_a_pr_may_retry() {
 fn a_finished_task_without_a_pr_or_a_fix_task_is_refused() {
     // A spec task under the `local` or `push` sink records no PR.
     for kind in [Kind::Issue, Kind::Spec] {
-        assert!(check_can_retry_summaries(&finished(kind, None)).is_err());
+        assert!(check_can_retry_summaries(&finished(kind, None), &Gone).is_err());
     }
     for kind in [Kind::Fix, Kind::Pr] {
         let pr = Some("https://github.com/o/r/pull/9");
-        assert!(check_can_retry_summaries(&finished(kind, pr)).is_err());
+        assert!(check_can_retry_summaries(&finished(kind, pr), &Gone).is_err());
     }
 }
 
@@ -79,7 +83,7 @@ fn a_finished_task_without_a_pr_or_a_fix_task_is_refused() {
 fn a_task_that_is_not_finished_is_refused() {
     let mut record = finished(Kind::Issue, Some("https://github.com/o/r/pull/9"));
     record.stage = Stage::Ready;
-    assert!(check_can_retry_summaries(&record).is_err());
+    assert!(check_can_retry_summaries(&record, &Gone).is_err());
 }
 
 #[test]

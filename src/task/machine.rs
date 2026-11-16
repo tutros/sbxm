@@ -1,11 +1,15 @@
 //! The task state machine as data (decisions 173, 174, 175; spec `sdlc/specs/task-state-machine.md`
 //! sections 2 and 5.2). `check_can_gate`, `check_can_review`, `check_can_review_pr`,
-//! `check_can_finish` and `finish::plan_removal` all decide through `verdict`/`row_for`, and
-//! `Record::advance` enforces the same moves directly (spike `sdlc/spikes/state-table.md`,
-//! migration step 2). `tests/main/task_machine.rs` walks every (state, event) pair and checks that
-//! the table and those commands still agree.
+//! `check_can_finish`, `check_can_retry_summaries`, `check_can_resume` and
+//! `finish::plan_removal` all decide through `verdict`/`row_for` on a [`State`] built by
+//! [`State::of`], the only way to build one (issue 513), and `Record::advance` enforces the same
+//! moves directly (spike `sdlc/spikes/state-table.md`, migration step 2). The recorded-PR rule of
+//! `task finish`, the process check of `task resume`, a `ready` task's stop and budget, `task
+//! resume --rounds` and `--should-fix` (with its must-fix and once-per-task rules) are rows here
+//! too (issue 513), so `task states` lists them. `tests/main/task_machine.rs` walks every (state,
+//! event) pair and checks that the table and those commands still agree.
 
-use super::record::{Kind, Stage, Status};
+use super::record::{Kind, ProcessProbe, Record, Stage, Status, Stopped};
 
 /// Something that can be asked of a task in a given state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,34 +21,142 @@ pub enum Event {
     /// `task finish`.
     Finish,
     /// `task finish` again on a finished task that has a PR (issue 467): only the issue
-    /// summaries are retried or edited. The PR itself is not part of a table state; see
-    /// `finish::check_can_retry_summaries`.
+    /// summaries are retried or edited (`finish::check_can_retry_summaries`).
     FinishSummaries,
     /// `task rm` and `task start --restart`.
     Rm,
     /// `task resume` (decisions 173(c), 175; issue 118): continue a task from its recorded stage,
     /// keeping its clone and commits.
     Resume,
+    /// `task resume --rounds N` (decisions 173(c), 177(b)(q)): add N fix rounds to the budget of a
+    /// task that stopped `ready`, then resume it (issue 513 moved the rule into the table).
+    ResumeRounds,
+    /// `task resume --rounds 1 --should-fix` (issue 510, decision 306): one fix round for a clean
+    /// `ready` task's should-fix findings sized S. What the review holds is `check_should_fix`'s.
+    ResumeShouldFix,
     /// The pipeline moving the task to a stage (`Record::advance`).
     Advance(Stage),
 }
 
-/// Everything the guards look at: the stage, the status, whether a `running` task's process is gone
-/// and the kind of task.
+/// Everything the guards look at: the stage, the status, whether a `running` task's process is
+/// gone, whether the recorded process is alive at all, the kind of task, whether it has a
+/// recorded PR, whether it stopped with fix rounds left and whether its should-fix round is open. Built only by [`State::of`] (and [`states`], which lists them all), so no check can
+/// leave a field out:
+///
+/// ```compile_fail,E0063
+/// use sbxm::task::machine::{ShouldFixRound, State, Stop};
+/// use sbxm::task::record::{Kind, Stage, Status};
+/// let _ = State {
+///     stage: Stage::Ready,
+///     status: Status::Ok,
+///     interrupted: false,
+///     alive: false,
+///     kind: Kind::Issue,
+///     has_pr: false,
+///     stop: Stop::Clean,
+///     should_fix: ShouldFixRound::Open,
+/// };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    clippy::manual_non_exhaustive,
+    reason = "`#[non_exhaustive]` would still let the crate's own modules build a State by hand"
+)]
 pub struct State {
     pub stage: Stage,
     pub status: Status,
+    /// A `running` task whose recorded process is gone.
     pub interrupted: bool,
+    /// The recorded process is alive, whatever the status.
+    pub alive: bool,
     pub kind: Kind,
+    /// `task.json` records a PR (`pr`).
+    pub has_pr: bool,
+    /// Whether the task stopped, and with fix rounds left (`stopped`, `round`, `fix_rounds`).
+    pub stop: Stop,
+    /// Whether its should-fix round is still open (`review`'s must-fix count, `should_fix_round`).
+    pub should_fix: ShouldFixRound,
+    /// Private, so a `State` can't be built outside this module (issue 513).
+    sealed: (),
 }
 
-/// Which `running` tasks a row covers; irrelevant for any other status.
+impl State {
+    /// The state of `task` now, with `probe` telling whether its recorded process is alive.
+    pub fn of(task: &Record, probe: &dyn ProcessProbe) -> Self {
+        Self {
+            stage: task.stage,
+            status: task.status,
+            interrupted: task.is_interrupted(probe),
+            alive: task.process_alive(probe),
+            kind: task.kind,
+            has_pr: task.pr.is_some(),
+            stop: match task.stopped {
+                None => Stop::Clean,
+                Some(Stopped::RoundsExhausted) => Stop::RoundsUsed,
+                Some(Stopped::RepeatFinding) if task.round >= task.fix_rounds => Stop::RoundsUsed,
+                Some(Stopped::RepeatFinding) => Stop::RoundsLeft,
+            },
+            should_fix: if task.review.as_ref().is_some_and(|r| r.must_fix > 0) {
+                ShouldFixRound::MustFixLeft
+            } else if task.should_fix_round {
+                ShouldFixRound::Used
+            } else {
+                ShouldFixRound::Open
+            },
+            sealed: (),
+        }
+    }
+}
+
+/// Whether a task stopped on something unresolved (`stopped`, set when it stops `ready`), and
+/// whether its budget has a fix round left for a plain `task resume` (review M-1 of issue 513).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    /// Not stopped.
+    Clean,
+    /// Stopped (`repeat-finding`) with rounds left in the budget.
+    RoundsLeft,
+    /// Stopped with its rounds used: `rounds-exhausted`, or the budget is spent.
+    RoundsUsed,
+}
+
+pub const STOPS: [Stop; 3] = [Stop::Clean, Stop::RoundsLeft, Stop::RoundsUsed];
+const STOPPED: &[Stop] = &[Stop::RoundsLeft, Stop::RoundsUsed];
+
+/// Whether a task may still have its should-fix round (issue 510, decision 306; second review M-1
+/// of issue 513): at most one per task, and only after a review with no must-fix left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShouldFixRound {
+    /// No must-fix in the recorded review, and no should-fix round yet.
+    Open,
+    /// The recorded review has must-fix findings left.
+    MustFixLeft,
+    /// The task already had its should-fix round.
+    Used,
+}
+
+pub const SHOULD_FIX_ROUNDS: [ShouldFixRound; 3] = [
+    ShouldFixRound::Open,
+    ShouldFixRound::MustFixLeft,
+    ShouldFixRound::Used,
+];
+
+/// Which tasks a row covers by their recorded process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Live {
     Any,
-    /// The recorded process is gone.
+    /// A `running` task whose recorded process is gone; irrelevant for any other status.
     Interrupted,
+    /// No recorded process is alive, whatever the status (`task resume`'s process check).
+    Gone,
+}
+
+/// Which tasks a row covers by their recorded PR (`task finish`'s rule, issues 430, 467, 480).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordedPr {
+    Any,
+    Yes,
+    No,
 }
 
 /// One allowed move: in any of `stages` with any of `statuses` (and `live`), a task of one of the
@@ -53,6 +165,11 @@ pub struct Row {
     pub stages: &'static [Stage],
     pub statuses: &'static [Status],
     pub live: Live,
+    pub pr: RecordedPr,
+    /// The stops a row covers (`STOPS` for a row that doesn't look at them).
+    pub stops: &'static [Stop],
+    /// The should-fix rounds a row covers (`SHOULD_FIX_ROUNDS` for a row that doesn't look).
+    pub should_fix: &'static [ShouldFixRound],
     pub kinds: &'static [Kind],
     pub event: Event,
     /// Where the move leaves the task; `None` for a row that does not change the stage by itself
@@ -68,7 +185,18 @@ impl Row {
             && self.stages.contains(&state.stage)
             && self.statuses.contains(&state.status)
             && self.kinds.contains(&state.kind)
-            && (self.live == Live::Any || state.interrupted)
+            && match self.live {
+                Live::Any => true,
+                Live::Interrupted => state.interrupted,
+                Live::Gone => !state.alive,
+            }
+            && match self.pr {
+                RecordedPr::Any => true,
+                RecordedPr::Yes => state.has_pr,
+                RecordedPr::No => !state.has_pr,
+            }
+            && self.stops.contains(&state.stop)
+            && self.should_fix.contains(&state.should_fix)
     }
 }
 
@@ -114,6 +242,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Prepared],
         statuses: &[Status::Running],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Advance(Stage::Working),
         to: Some(Stage::Working),
@@ -123,6 +254,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Prepared],
         statuses: &[Status::Running],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: PR,
         event: Event::Advance(Stage::Gating),
         to: Some(Stage::Gating),
@@ -133,6 +267,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Prepared],
         statuses: &[Status::Running],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: PR,
         event: Event::Advance(Stage::Reviewing),
         to: Some(Stage::Reviewing),
@@ -142,6 +279,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Working],
         statuses: WORKER_DONE,
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Advance(Stage::Gating),
         to: Some(Stage::Gating),
@@ -151,6 +291,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: &[Status::Passed],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: ANY,
         event: Event::Advance(Stage::Reviewing),
         to: Some(Stage::Reviewing),
@@ -163,6 +306,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: &[Status::GatesFailed],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Advance(Stage::Fixing),
         to: Some(Stage::Fixing),
@@ -172,6 +318,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Reviewing],
         statuses: &[Status::Completed],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Advance(Stage::Fixing),
         to: Some(Stage::Fixing),
@@ -181,6 +330,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Reviewing],
         statuses: &[Status::Completed],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: ANY,
         event: Event::Advance(Stage::Ready),
         to: Some(Stage::Ready),
@@ -190,6 +342,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Fixing],
         statuses: WORKER_DONE,
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Advance(Stage::Gating),
         to: Some(Stage::Gating),
@@ -199,6 +354,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Ready],
         statuses: &[Status::Ok],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: ISSUE,
         event: Event::Advance(Stage::Finished),
         to: Some(Stage::Finished),
@@ -208,6 +366,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Ready],
         statuses: &[Status::Ok],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: SPEC,
         event: Event::Advance(Stage::Finished),
         to: Some(Stage::Finished),
@@ -217,6 +378,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Ready],
         statuses: &[Status::Ok],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: FIX,
         event: Event::Advance(Stage::Finished),
         to: Some(Stage::Finished),
@@ -228,6 +392,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Ready],
         statuses: &[Status::Ok],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Advance(Stage::Fixing),
         to: Some(Stage::Fixing),
@@ -239,6 +406,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Ready],
         statuses: &[Status::Ok],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: PR,
         event: Event::Advance(Stage::Gating),
         to: Some(Stage::Gating),
@@ -249,6 +419,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Working, Stage::Fixing],
         statuses: WORKER_DONE,
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Gates,
         to: Some(Stage::Gating),
@@ -258,6 +431,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: GATES_ENDED,
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Gates,
         to: Some(Stage::Gating),
@@ -267,6 +443,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: &[Status::Running],
         live: Live::Interrupted,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Gates,
         to: Some(Stage::Gating),
@@ -278,6 +457,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Working, Stage::Fixing],
         statuses: WORKER_DONE,
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Review,
         to: Some(Stage::Reviewing),
@@ -287,6 +469,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: GATES_ENDED,
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Review,
         to: Some(Stage::Reviewing),
@@ -296,6 +481,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: &[Status::Running],
         live: Live::Interrupted,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Review,
         to: Some(Stage::Reviewing),
@@ -305,6 +493,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Reviewing],
         statuses: &[Status::Failed],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Review,
         to: Some(Stage::Reviewing),
@@ -315,6 +506,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Prepared],
         statuses: &[Status::Running],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: PR,
         event: Event::Review,
         to: Some(Stage::Gating),
@@ -324,6 +518,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: GATES_ENDED,
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: PR,
         event: Event::Review,
         to: Some(Stage::Reviewing),
@@ -333,6 +530,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Reviewing],
         statuses: &[Status::Failed],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: PR,
         event: Event::Review,
         to: Some(Stage::Reviewing),
@@ -345,6 +545,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Prepared],
         statuses: &[Status::Failed],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: PR,
         event: Event::Review,
         to: Some(Stage::Gating),
@@ -354,6 +557,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating, Stage::Reviewing],
         statuses: &[Status::Running],
         live: Live::Interrupted,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: PR,
         event: Event::Review,
         to: Some(Stage::Gating),
@@ -365,6 +571,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Reviewing],
         statuses: &[Status::Completed],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: PR,
         event: Event::Review,
         to: Some(Stage::Reviewing),
@@ -377,16 +586,22 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Ready],
         statuses: &[Status::Ok],
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: PR,
         event: Event::Review,
         to: Some(Stage::Gating),
         action: "fetch the PR's new head, keep the review as review-<n>.md, run the gates, then the reviewer",
     },
-    // `task finish`.
+    // `task finish`, on a task with no recorded PR yet (a recorded one means it was published).
     Row {
         stages: &[Stage::Ready],
         statuses: &[Status::Ok],
         live: Live::Any,
+        pr: RecordedPr::No,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: ISSUE,
         event: Event::Finish,
         to: Some(Stage::Finished),
@@ -396,6 +611,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Ready],
         statuses: &[Status::Ok],
         live: Live::Any,
+        pr: RecordedPr::No,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: SPEC,
         event: Event::Finish,
         to: Some(Stage::Finished),
@@ -405,30 +623,39 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Ready],
         statuses: &[Status::Ok],
         live: Live::Any,
+        pr: RecordedPr::No,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: FIX,
         event: Event::Finish,
         to: Some(Stage::Finished),
         action: "push the branch onto the PR's own branch, a fast-forward or nothing",
     },
-    // `task finish` on a finished issue or spec task whose PR is recorded (issues 430, 467): the
-    // table cannot see `pr` or the spec's sink, so `check_can_retry_summaries` also needs a
-    // recorded PR (a `local` or `push` spec task has none).
+    // `task finish` on a finished issue or spec task whose PR is recorded (issues 430, 467, 480;
+    // a `local` or `push` spec task has none).
     Row {
         stages: &[Stage::Finished],
         statuses: &[Status::Ok],
         live: Live::Any,
+        pr: RecordedPr::Yes,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: &[Kind::Issue, Kind::Spec],
         event: Event::FinishSummaries,
         to: Some(Stage::Finished),
-        action: "with a recorded PR: post or edit the issue summaries only (no push, no new PR, no PR review)",
+        action: "post or edit the issue summaries only (no push, no new PR, no PR review)",
     },
     // `task resume` (decisions 173(c), 175; issue 118), a task with a worker: a failed or
     // interrupted stage runs again in the task's own clone, and the task goes on to `ready`.
+    // Refused while the recorded process is alive, whatever the status (`Live::Gone`).
     // F4 (decision 175): a preparation that failed or was cut off keeps its folders and clone.
     Row {
         stages: &[Stage::Prepared],
         statuses: &[Status::Running],
         live: Live::Interrupted,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Resume,
         to: Some(Stage::Working),
@@ -437,7 +664,10 @@ pub const TABLE: &[Row] = &[
     Row {
         stages: &[Stage::Prepared],
         statuses: &[Status::Failed],
-        live: Live::Any,
+        live: Live::Gone,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Resume,
         to: Some(Stage::Working),
@@ -447,6 +677,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Working],
         statuses: &[Status::Running],
         live: Live::Interrupted,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Resume,
         to: Some(Stage::Working),
@@ -455,7 +688,10 @@ pub const TABLE: &[Row] = &[
     Row {
         stages: &[Stage::Working],
         statuses: &[Status::Failed],
-        live: Live::Any,
+        live: Live::Gone,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Resume,
         to: Some(Stage::Working),
@@ -466,7 +702,10 @@ pub const TABLE: &[Row] = &[
     Row {
         stages: &[Stage::Working, Stage::Fixing],
         statuses: WORKER_DONE,
-        live: Live::Any,
+        live: Live::Gone,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Resume,
         to: Some(Stage::Reviewing),
@@ -475,7 +714,10 @@ pub const TABLE: &[Row] = &[
     Row {
         stages: &[Stage::Gating],
         statuses: GATES_ENDED,
-        live: Live::Any,
+        live: Live::Gone,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Resume,
         to: Some(Stage::Reviewing),
@@ -485,6 +727,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: &[Status::Running],
         live: Live::Interrupted,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Resume,
         to: Some(Stage::Reviewing),
@@ -495,6 +740,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Reviewing],
         statuses: &[Status::Running],
         live: Live::Interrupted,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Resume,
         to: Some(Stage::Reviewing),
@@ -503,7 +751,10 @@ pub const TABLE: &[Row] = &[
     Row {
         stages: &[Stage::Reviewing],
         statuses: &[Status::Failed],
-        live: Live::Any,
+        live: Live::Gone,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Resume,
         to: Some(Stage::Reviewing),
@@ -514,6 +765,9 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Fixing],
         statuses: &[Status::Running],
         live: Live::Interrupted,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Resume,
         to: Some(Stage::Fixing),
@@ -522,7 +776,10 @@ pub const TABLE: &[Row] = &[
     Row {
         stages: &[Stage::Fixing],
         statuses: &[Status::Failed],
-        live: Live::Any,
+        live: Live::Gone,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Resume,
         to: Some(Stage::Fixing),
@@ -532,28 +789,79 @@ pub const TABLE: &[Row] = &[
     Row {
         stages: &[Stage::Reviewing],
         statuses: &[Status::Completed],
-        live: Live::Any,
+        live: Live::Gone,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Resume,
         to: Some(Stage::Fixing),
         action: "replay the recorded review: a fix round for its findings, else ready",
     },
     // A task that stopped `ready` with findings left (`stopped`): another fix round, after
-    // `--rounds N` added to the budget when it was used (decisions 173(c), 177(b)(q)).
+    // `--rounds N` added to the budget when it was used (decisions 173(c), 177(b)(q)); `--rounds`
+    // is for these states only (issue 513).
     Row {
         stages: &[Stage::Ready],
         statuses: &[Status::Ok],
-        live: Live::Any,
+        live: Live::Gone,
+        pr: RecordedPr::Any,
+        stops: &[Stop::RoundsLeft],
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: HAS_WORKER,
         event: Event::Resume,
         to: Some(Stage::Fixing),
-        action: "when stopped: a fix round from the recorded review (--rounds N adds N rounds)",
+        action: "a fix round from the recorded review",
+    },
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Gone,
+        pr: RecordedPr::Any,
+        stops: STOPPED,
+        should_fix: &SHOULD_FIX_ROUNDS,
+        kinds: HAS_WORKER,
+        event: Event::ResumeRounds,
+        to: Some(Stage::Fixing),
+        action: "add N fix rounds to the budget, then a fix round from the recorded review",
+    },
+    // A clean `ready` fix task has only its push onto the PR's branch left (issue 485), which
+    // `task resume --pr` makes.
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Gone,
+        pr: RecordedPr::Any,
+        stops: &[Stop::Clean],
+        should_fix: &SHOULD_FIX_ROUNDS,
+        kinds: FIX,
+        event: Event::Resume,
+        to: Some(Stage::Finished),
+        action: "push the branch onto the PR's own branch, a fast-forward or nothing",
+    },
+    // A clean `ready` task's should-fix round (issue 510, decision 306): no must-fix left, at
+    // most one per task, for the review's should-fix findings sized S (`check_should_fix` reads
+    // the review file).
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Gone,
+        pr: RecordedPr::Any,
+        stops: &[Stop::Clean],
+        should_fix: &[ShouldFixRound::Open],
+        kinds: HAS_WORKER,
+        event: Event::ResumeShouldFix,
+        to: Some(Stage::Fixing),
+        action: "one fix round for the review's should-fix findings sized S",
     },
     // `task rm`: anything that is not running, or running with its process gone.
     Row {
         stages: &STAGES,
         statuses: NOT_RUNNING,
         live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: ANY,
         event: Event::Rm,
         to: None,
@@ -563,6 +871,9 @@ pub const TABLE: &[Row] = &[
         stages: &STAGES,
         statuses: &[Status::Running],
         live: Live::Interrupted,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
         kinds: ANY,
         event: Event::Rm,
         to: None,
@@ -588,9 +899,10 @@ pub fn verdict(state: &State, event: Event) -> bool {
     row_for(state, event).is_some()
 }
 
-/// Every state a task of `kind` can be recorded in: each stage with each of its statuses, and a
-/// `running` one both alive and interrupted. A PR task has no worker, so it is never `working` or
-/// `fixing`.
+/// Every state a task of `kind` can be recorded in: each stage with each of its statuses, its
+/// recorded process alive or gone (a `running` one with its process gone is interrupted), with a
+/// recorded PR or without when `finished` (no other stage has one), and with each [`Stop`] and
+/// [`ShouldFixRound`]. A PR task has no worker, so it is never `working` or `fixing`.
 pub fn states(kind: Kind) -> Vec<State> {
     let mut all = Vec::new();
     for stage in STAGES {
@@ -598,16 +910,36 @@ pub fn states(kind: Kind) -> Vec<State> {
             continue;
         }
         for &status in stage.statuses() {
-            for interrupted in [false, true] {
-                if interrupted && status != Status::Running {
+            for (interrupted, alive) in [(false, true), (false, false), (true, false)] {
+                // A `running` task is interrupted exactly when its process is gone.
+                if status == Status::Running && interrupted == alive {
                     continue;
                 }
-                all.push(State {
-                    stage,
-                    status,
-                    interrupted,
-                    kind,
-                });
+                if status != Status::Running && interrupted {
+                    continue;
+                }
+                for has_pr in [false, true] {
+                    // `finish` records the PR in the same write that makes the task `finished`.
+                    if has_pr && stage != Stage::Finished {
+                        continue;
+                    }
+                    for (stop, should_fix) in STOPS
+                        .into_iter()
+                        .flat_map(|stop| SHOULD_FIX_ROUNDS.map(|round| (stop, round)))
+                    {
+                        all.push(State {
+                            stage,
+                            status,
+                            interrupted,
+                            alive,
+                            kind,
+                            has_pr,
+                            stop,
+                            should_fix,
+                            sealed: (),
+                        });
+                    }
+                }
             }
         }
     }
@@ -616,18 +948,25 @@ pub fn states(kind: Kind) -> Vec<State> {
 
 /// The states of a `kind` task that are not where it settles once there is nowhere further to go
 /// on its own (`finished`; a PR task's `ready`, which `task review --pr` can still move on from,
-/// issue 195, but nothing drives it there by itself), not in flight (a `running` task whose
-/// process is alive) and from which no command moves it on: only `rm` is allowed. Each is a gap in
+/// issue 195, but nothing drives it there by itself), not in flight (a task whose recorded process
+/// is alive) and from which no command moves it on: only `rm` is allowed. Each is a gap in
 /// the operations.
 pub fn dead_ends(kind: Kind) -> Vec<State> {
     states(kind)
         .into_iter()
         .filter(|s| s.stage != Stage::Finished && !(kind == Kind::Pr && s.stage == Stage::Ready))
-        .filter(|s| s.status != Status::Running || s.interrupted)
+        .filter(|s| !s.alive)
         .filter(|s| {
-            [Event::Gates, Event::Review, Event::Finish, Event::Resume]
-                .iter()
-                .all(|&e| !verdict(s, e))
+            [
+                Event::Gates,
+                Event::Review,
+                Event::Finish,
+                Event::Resume,
+                Event::ResumeRounds,
+                Event::ResumeShouldFix,
+            ]
+            .iter()
+            .all(|&e| !verdict(s, e))
         })
         .collect()
 }
