@@ -403,8 +403,8 @@ const HEADER: &str =
     "Times UTC. Written by `sbxm task loop`, one row per task; `unknown` where not measured.
 
 | # | Issue | Size | Slot | Started | Ready (time to ready) | Worker / reviewer s | Rounds \
-(must-fix) | Outcome | Stops (cause, duration) | Idle before | User interventions |
-|---|---|---|---|---|---|---|---|---|---|---|---|
+(must-fix) | Outcome | Stops (cause, duration) | Idle before |
+|---|---|---|---|---|---|---|---|---|---|---|
 ";
 
 /// A table cell: one line, with `|` escaped.
@@ -456,8 +456,7 @@ fn render_as(number: usize, item: &str, row: &Row) -> String {
             .join("; ")
     };
     format!(
-        "| {number} | {item} | {} | {} | {} | {ready} | {durations} | {rounds} | {} | {} | {} | \
-         unknown |\n",
+        "| {number} | {item} | {} | {} | {} | {ready} | {durations} | {rounds} | {} | {} | {} |\n",
         row.size.as_deref().unwrap_or("unknown"),
         row.slot.map_or("-", Location::as_str),
         clock(row.started),
