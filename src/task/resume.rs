@@ -130,11 +130,12 @@ pub fn check_can_resume_with(
     should_fix: bool,
 ) -> Result<()> {
     let id = &task.id;
-    // `--rounds` is a row of its own (issue 513): it is for a task that stopped `ready` only.
-    let event = if rounds.is_some() {
-        Event::ResumeRounds
-    } else {
-        Event::Resume
+    // `--rounds` and `--should-fix` are rows of their own (issue 513): for a `ready` task that
+    // stopped, and one that didn't.
+    let event = match (should_fix, rounds) {
+        (true, _) => Event::ResumeShouldFix,
+        (false, Some(_)) => Event::ResumeRounds,
+        (false, None) => Event::Resume,
     };
     let allowed = machine::verdict(&machine::State::of(task, probe), event);
     if task.kind == Kind::Pr {
@@ -167,6 +168,7 @@ pub fn check_can_resume_with(
     }
     if let Some(n) = rounds
         && !allowed
+        && task.stage != Stage::Ready
     {
         bail!(
             "--rounds {n} is for a task that stopped ready with its rounds used; task {id} is at \
@@ -186,16 +188,11 @@ pub fn check_can_resume_with(
         );
     }
     if allowed {
-        return if task.stage == Stage::Ready {
-            if should_fix && task.stopped.is_none() {
-                return Ok(());
-            }
-            check_stopped(task, rounds)
-        } else {
-            Ok(())
-        };
+        return Ok(());
     }
     match task.stage {
+        Stage::Ready if should_fix => Err(should_fix_unclean(task)),
+        Stage::Ready => Err(stopped_refusal(task)),
         Stage::Finished => bail!(
             "task {id} is already finished; to work on what its review found, file the findings \
              (`sbxm task file-findings`) and start tasks for them"
@@ -225,13 +222,8 @@ pub fn check_should_fix(task: &Record, meta: &Path, rounds: Option<u32>) -> Resu
             task.status.name()
         );
     }
-    let must_fix = task.review.as_ref().map_or(0, |r| r.must_fix);
-    if task.stopped.is_some() || must_fix > 0 {
-        bail!(
-            "--should-fix is for a clean task (0 must-fix, no stop); task {id} stopped ready ({}) \
-             with {must_fix} must-fix finding(s), so resume it without --should-fix",
-            task.stopped.map_or("no stop", Stopped::name)
-        );
+    if task.stopped.is_some() || task.review.as_ref().is_some_and(|r| r.must_fix > 0) {
+        return Err(should_fix_unclean(task));
     }
     if task.should_fix_round {
         bail!(
@@ -346,37 +338,39 @@ pub fn rounds_cap(task: &Record, n: u32) -> Option<u32> {
     task.round.checked_add(n)
 }
 
-/// A `ready` task is resumed only when it stopped with something unresolved (spec section 5.2):
-/// `--rounds N` adds rounds from any stop, and without it a repeat stop needs rounds left in the
-/// budget (decision 177(q)).
-fn check_stopped(task: &Record, rounds: Option<u32>) -> Result<()> {
+/// Why `task resume` refuses a `ready` task that the table's `Resume` and `ResumeRounds` rows
+/// refuse (spec section 5.2): `--rounds N` adds rounds from any stop, without it a stop needs
+/// rounds left in the budget (decision 177(q)), and a task that did not stop has nothing to
+/// resume but a fix task's push (issue 485).
+fn stopped_refusal(task: &Record) -> anyhow::Error {
     let (id, flag) = (&task.id, next::record_flag(task));
-    let Some(stopped) = task.stopped else {
-        // Its push onto the PR's branch is what is left: `task resume --pr` makes it (issue 485).
-        if task.kind == Kind::Fix {
-            if rounds.is_some() {
-                bail!(
-                    "task {id} is ready and did not stop on anything unresolved, so it needs no \
-                     more fix rounds; push it with `sbxm task resume {flag}`"
-                );
-            }
-            return Ok(());
-        }
-        bail!(
+    match task.stopped {
+        None if task.kind == Kind::Fix => anyhow::anyhow!(
+            "task {id} is ready and did not stop on anything unresolved, so it needs no more fix \
+             rounds; push it with `sbxm task resume {flag}`"
+        ),
+        None => anyhow::anyhow!(
             "task {id} is ready and did not stop on anything unresolved, so there is nothing to \
              resume; publish it with `sbxm task finish {flag}`"
-        );
-    };
-    let used_up = task.round >= task.fix_rounds;
-    if rounds.is_none() && (stopped == Stopped::RoundsExhausted || used_up) {
-        bail!(
+        ),
+        Some(stopped) => anyhow::anyhow!(
             "task {id} stopped ready ({}) with all {} of its fix rounds used; give it more with \
              `sbxm task resume {flag} --rounds N`",
             stopped.name(),
-            task.fix_rounds
-        );
+            task.fix_rounds,
+        ),
     }
-    Ok(())
+}
+
+/// Why `--should-fix` refuses a task that stopped or has must-fix findings left (issue 510).
+fn should_fix_unclean(task: &Record) -> anyhow::Error {
+    let must_fix = task.review.as_ref().map_or(0, |r| r.must_fix);
+    anyhow::anyhow!(
+        "--should-fix is for a clean task (0 must-fix, no stop); task {} stopped ready ({}) with \
+         {must_fix} must-fix finding(s), so resume it without --should-fix",
+        task.id,
+        task.stopped.map_or("no stop", Stopped::name)
+    )
 }
 
 /// Whether resuming the task at this stage and status restores the worker's input, rebuilds its

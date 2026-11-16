@@ -149,10 +149,9 @@ fn task_states_lists_the_moved_rules() {
         "task finish",
     );
     row(
-        "ready ok (issue/spec/fix), no live process",
+        "ready ok (issue/spec/fix), no live process, stopped",
         "task resume --rounds N",
     );
-    row("ready ok (issue/spec/fix), no live process", "task resume");
     row(
         "working failed (issue/spec/fix), no live process",
         "task resume",

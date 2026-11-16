@@ -222,8 +222,10 @@ kept here as the design for issues #117-121 to build toward.
 | fixing running (issue/spec/fix), interrupted | task resume | fixing | run the fix round again in its clone, then the gates and the review |
 | fixing failed (issue/spec/fix), no live process | task resume | fixing | run the fix round again in its clone, then the gates and the review |
 | reviewing completed (issue/spec/fix), no live process | task resume | fixing | replay the recorded review: a fix round for its findings, else ready |
-| ready ok (issue/spec/fix), no live process | task resume | fixing | when stopped: a fix round from the recorded review |
-| ready ok (issue/spec/fix), no live process | task resume --rounds N | fixing | when stopped: add N fix rounds to the budget, then a fix round from the recorded review |
+| ready ok (issue/spec/fix), no live process, stopped with rounds left | task resume | fixing | a fix round from the recorded review |
+| ready ok (issue/spec/fix), no live process, stopped | task resume --rounds N | fixing | add N fix rounds to the budget, then a fix round from the recorded review |
+| ready ok (fix), no live process, not stopped | task resume | finished | push the branch onto the PR's own branch, a fast-forward or nothing |
+| ready ok (issue/spec/fix), no live process, not stopped | task resume --rounds 1 --should-fix | fixing | one fix round for the review's should-fix findings sized S, once per task |
 | any completed/timed-out/failed/passed/gates-failed/ok | task rm | removed | remove the task's folders and sandboxes |
 | any running, interrupted | task rm | removed | remove the task's folders and sandboxes |
 
@@ -320,14 +322,18 @@ removes the reviewer sandbox and clone the interrupted run left, then runs the g
 round, every earlier `review-<n>.md` kept. From `reviewing completed` (which `review_pr` never saves itself: it records
 `ready` in the same write) it runs the reviewer again, as after a failure, with no replay.
 
-**Issue 513 status:** three rules that lived outside the table are rows of it now, so "Today (generated)" lists them
+**Issue 513 status:** the rules that lived outside the table are rows of it now, so "Today (generated)" lists them
 and the checks cannot drift from it: the recorded-PR rule (`task finish` needs no recorded PR, its summary-only
 retry needs one: `no recorded PR` / `with a recorded PR`), `resume`'s process check (refused while the recorded
-process is alive whatever the status: `no live process`) and `--rounds` (its own `task resume --rounds N` row, for a
-`ready` task only). A table state carries the recorded PR and whether the recorded process is alive, and is built
-from a task record only by `machine::State::of`. Still checked outside the table, since they need more than a
-state: `stopped` and the round budget of a `ready` task, `--should-fix`, a `--rounds` value of 0 or too large, an
-ambiguous cloud create, and the PR's head for `task review --pr`.
+process is alive whatever the status: `no live process`), and a `ready` task's stop and budget: plain `resume` needs
+a stop with rounds left (`stopped with rounds left`), `--rounds N` any stop (its own `task resume --rounds N` row,
+`stopped`), `--rounds 1 --should-fix` no stop (`not stopped`), and a clean fix task resumes to its push. A table
+state carries the recorded PR, whether the recorded process is alive and the stop (`machine::Stop`: not stopped,
+stopped with rounds left, stopped with its rounds used), and is built from a task record only by
+`machine::State::of`. Still checked outside the table, since they are about a flag's value or more than the record:
+a `--rounds` value of 0, too large, or other than 1 with `--should-fix`; what the review holds for `--should-fix`
+(its must-fix count, should-fix findings sized S, one should-fix round per task); an ambiguous cloud create; and
+the PR's head for `task review --pr`.
 
 `resume` is refused while the recorded process is alive (pid and start time, as `interrupted` is decided today).
 `--rounds N` is additive ("N more rounds", N >= 1; 0 is refused) and is valid from any `ready` with `stopped`,

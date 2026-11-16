@@ -3,17 +3,18 @@
 //! commands that now decide through it (`check_can_gate`, `check_can_review`,
 //! `check_can_review_pr`, `check_can_finish`, `check_can_retry_summaries`, `check_can_resume`
 //! with and without `--rounds`, `plan_removal`, `Record::advance`) say, for every (state, event)
-//! pair. A state carries the recorded PR and whether the recorded process is alive (issue 513),
-//! so the walk covers the recorded-PR rule and the process check too. Any difference would mean the table and a command have drifted apart; the
+//! pair. A state carries the recorded PR, whether the recorded process is alive and a `ready`
+//! task's stop and budget (issue 513), so the walk covers the recorded-PR rule, the process check,
+//! `--rounds` and `--should-fix` too. Any difference would mean the table and a command have drifted apart; the
 //! list below is pinned empty, so a new difference fails the test instead of going unnoticed.
 
 use std::collections::BTreeSet;
 
 use sbxm::task::finish::{check_can_finish, check_can_retry_summaries, plan_removal};
-use sbxm::task::machine::{Event, STAGES, State, dead_ends, matching, states, verdict};
+use sbxm::task::machine::{Event, STAGES, State, Stop, dead_ends, matching, states, verdict};
 use sbxm::task::pipeline::{check_can_gate, check_can_review, check_can_review_pr};
-use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record, Stage, Stopped};
-use sbxm::task::resume::check_can_resume;
+use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record, Stopped};
+use sbxm::task::resume::{check_can_resume, check_can_resume_with};
 
 const T0: u64 = 1_790_000_000;
 
@@ -52,6 +53,13 @@ fn record_in(state: &State) -> Record {
     record.pr = state
         .has_pr
         .then(|| "https://github.com/o/r/pull/9".to_owned());
+    // The stop and the budget as the state names them (review M-1): never chosen per event.
+    record.fix_rounds = 2;
+    (record.stopped, record.round) = match state.stop {
+        Stop::Clean => (None, 0),
+        Stop::RoundsLeft => (Some(Stopped::RepeatFinding), 1),
+        Stop::RoundsUsed => (Some(Stopped::RoundsExhausted), 2),
+    };
     record
 }
 
@@ -76,23 +84,9 @@ fn guard(state: &State, event: Event) -> bool {
             record::write(&record::task_dir(base.path(), &record.id), &record).unwrap();
             plan_removal(base.path(), &record.id, &probe).is_ok()
         }
-        // `ready` is resumable only once the task stopped (`stopped`, not in the table): without
-        // `--rounds` on a stop with rounds left, with `--rounds 1` once they are used up.
-        Event::Resume => {
-            let mut record = record;
-            if state.stage == Stage::Ready {
-                record.stopped = Some(Stopped::RepeatFinding);
-                record.fix_rounds = 2;
-            }
-            check_can_resume(&record, &probe, None).is_ok()
-        }
-        Event::ResumeRounds => {
-            let mut record = record;
-            if state.stage == Stage::Ready {
-                record.stopped = Some(Stopped::RoundsExhausted);
-            }
-            check_can_resume(&record, &probe, Some(1)).is_ok()
-        }
+        Event::Resume => check_can_resume(&record, &probe, None).is_ok(),
+        Event::ResumeRounds => check_can_resume(&record, &probe, Some(1)).is_ok(),
+        Event::ResumeShouldFix => check_can_resume_with(&record, &probe, Some(1), true).is_ok(),
         Event::Advance(to) => {
             let mut record = record;
             record.advance(to, T0 + 1, Process::new(1234, T0)).is_ok()
@@ -109,6 +103,7 @@ fn events() -> Vec<Event> {
         Event::Rm,
         Event::Resume,
         Event::ResumeRounds,
+        Event::ResumeShouldFix,
     ];
     all.extend(STAGES.iter().map(|&stage| Event::Advance(stage)));
     all
@@ -116,7 +111,7 @@ fn events() -> Vec<Event> {
 
 fn key(state: &State, event: Event) -> String {
     format!(
-        "{:?} {:?}/{:?}{}{}{} {:?}",
+        "{:?} {:?}/{:?}{}{}{} {:?} {:?}",
         state.kind,
         state.stage,
         state.status,
@@ -131,6 +126,7 @@ fn key(state: &State, event: Event) -> String {
             ""
         },
         if state.has_pr { "+pr" } else { "" },
+        state.stop,
         event
     )
 }

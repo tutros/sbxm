@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use crate::task::machine::{self, Event, Row};
+use crate::task::machine::{self, Event, Row, Stop};
 use crate::task::record::Kind;
 
 fn stage_cell(stages: &[crate::task::record::Stage]) -> String {
@@ -42,9 +42,20 @@ fn kind_suffix(kinds: &[Kind]) -> &'static str {
     }
 }
 
+fn stop_suffix(stops: &[Stop]) -> &'static str {
+    match stops {
+        [Stop::Clean] => ", not stopped",
+        [Stop::RoundsLeft] => ", stopped with rounds left",
+        [Stop::RoundsUsed] => ", stopped with its rounds used",
+        [Stop::RoundsLeft, Stop::RoundsUsed] => ", stopped",
+        // Every stop: the row doesn't look at it.
+        _ => "",
+    }
+}
+
 fn from_cell(row: &Row) -> String {
     format!(
-        "{} {}{}{}{}",
+        "{} {}{}{}{}{}",
         stage_cell(row.stages),
         status_cell(row.statuses),
         kind_suffix(row.kinds),
@@ -58,6 +69,7 @@ fn from_cell(row: &Row) -> String {
             machine::RecordedPr::Yes => ", with a recorded PR",
             machine::RecordedPr::No => ", no recorded PR",
         },
+        stop_suffix(row.stops),
     )
 }
 
@@ -70,6 +82,7 @@ fn event_cell(event: Event) -> &'static str {
         Event::Rm => "task rm",
         Event::Resume => "task resume",
         Event::ResumeRounds => "task resume --rounds N",
+        Event::ResumeShouldFix => "task resume --rounds 1 --should-fix",
         Event::Advance(_) => "advance",
     }
 }
