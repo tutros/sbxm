@@ -12,7 +12,10 @@ Without a switch, the script:
 1. In the loop checkout (-Checkout), refuses to start when `git status --porcelain` shows local changes, saying
    why and overwriting nothing; otherwise runs `git fetch` and `git checkout --detach origin/main`.
 2. Waits up to 10 minutes for `sbx ls` to succeed, checking every 30 seconds; still failing counts as an error.
-3. Runs `<wrapper> task loop --wait` in the checkout, through the wrapper path given (-Sbxm), never a build.
+3. Runs `<wrapper> task loop --wait` in the checkout, through the wrapper path given (-Sbxm), never a build, and
+   waits for the loop's own process only, not for the task processes it started (issue 676). The loop's output
+   goes to two files in -LogDir, `<UTC yyyyMMdd-HHmmss>-loop.out.log` and `...-loop.err.log`, not to a window;
+   the script prints both paths at each start.
 4. After an exit that is neither 0 (a stop request) nor 3 (a stop that needs the user), waits 10 minutes and
    starts it again from step 2, at most 3 times in an hour: exit 0 or 3, or a 4th failure within the hour, leaves
    it down until the next logon or a start by hand.
@@ -30,9 +33,18 @@ param(
     [string]$Checkout = 'H:\sbxm-e2e\loop-checkout',
     # The wrapper that runs the known sbxm binary.
     [string]$Sbxm = 'H:\sbxm-e2e\sbxm.ps1',
+    # The folder of the loop's output files, created if missing.
+    [string]$LogDir = 'H:\sbxm-e2e\loop-trigger-logs',
     # The commands and the clock, parameters only so tests can stand in for them.
     [scriptblock]$Git = { git @args },
     [scriptblock]$Sbx = { sbx @args },
+    # Starts the loop and returns its process, without waiting: the wrapper is a script, so it runs in pwsh.
+    [scriptblock]$StartLoop = {
+        param($sbxm, $arguments, $checkout, $out, $err)
+        $pwsh = (Get-Command pwsh).Source
+        Start-Process -FilePath $pwsh -ArgumentList "-NoLogo -NoProfile -NonInteractive -File `"$sbxm`" $($arguments -join ' ')" `
+            -WorkingDirectory $checkout -RedirectStandardOutput $out -RedirectStandardError $err -NoNewWindow -PassThru
+    },
     [scriptblock]$Sleep = { param($seconds) Start-Sleep -Seconds $seconds },
     [scriptblock]$Now = { Get-Date }
 )
@@ -52,7 +64,7 @@ $sbxPoll = 30
 
 if ($Register) {
     $pwsh = (Get-Command pwsh).Source
-    $arguments = "-NoLogo -NoProfile -WindowStyle Hidden -File `"$PSCommandPath`" -Checkout `"$Checkout`" -Sbxm `"$Sbxm`""
+    $arguments = "-NoLogo -NoProfile -WindowStyle Hidden -File `"$PSCommandPath`" -Checkout `"$Checkout`" -Sbxm `"$Sbxm`" -LogDir `"$LogDir`""
     $action = New-ScheduledTaskAction -Execute $pwsh -Argument $arguments -WorkingDirectory $Checkout
     $user = "$env:USERDOMAIN\$env:USERNAME"
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
@@ -113,14 +125,20 @@ function Wait-Sbx {
 $failures = @()
 while ($true) {
     if (Wait-Sbx) {
-        Write-Host 'Starting sbxm task loop --wait.'
-        Push-Location -LiteralPath $Checkout
-        try {
-            $global:LASTEXITCODE = 0
-            & $Sbxm task loop --wait | Out-Host
-            $code = $LASTEXITCODE
-        }
-        finally { Pop-Location }
+        # Not `& $Sbxm ... | Out-Host`: a pipeline ends only once every holder of its output has closed it, and the
+        # loop's task processes inherit it, so a killed loop would be restarted only after its last task ended.
+        New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+        $stamp = (& $Now).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
+        $out = Join-Path $LogDir "$stamp-loop.out.log"
+        $err = Join-Path $LogDir "$stamp-loop.err.log"
+        Write-Host "Starting sbxm task loop --wait; its output goes to $out and $err."
+        $loop = & $StartLoop $Sbxm @('task', 'loop', '--wait') $Checkout $out $err
+        # Read now: a Start-Process -PassThru process whose handle was never read can report no exit code.
+        $null = $loop.Handle
+        # With a timeout, so only the process is waited for: with none, .NET also waits for the end of output it
+        # redirected, which the task processes hold open (on Linux, where Start-Process redirects through .NET).
+        while (-not $loop.WaitForExit(1000)) {}
+        $code = $loop.ExitCode
     }
     else {
         Write-Host "sbx ls still fails after $($sbxWait / 60) minutes; Docker Desktop or sbx is not up."

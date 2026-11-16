@@ -19,6 +19,21 @@ exit [int]`$code
         $fake
     }
 
+    # A stand-in for the loop's start: runs the wrapper in this process (so it moves the test clock) in the checkout,
+    # its output to the two log files, and returns what `Start-Process -PassThru` would: a process that has
+    # already exited with the wrapper's code. LASTEXITCODE is left 0, as after a successful Start-Process.
+    $script:fakeStart = {
+        param($sbxm, $arguments, $checkout, $out, $err)
+        Push-Location -LiteralPath $checkout
+        try {
+            & $sbxm @arguments > $out 2> $err
+            $code = $LASTEXITCODE
+        }
+        finally { Pop-Location }
+        $global:LASTEXITCODE = 0
+        [pscustomobject]@{ ExitCode = $code } | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true } -PassThru
+    }
+
     # A stand-in command logging each call as `<name> <arguments>` to calls.txt in $dir, answering with the
     # exit code (and output) the scriptblock $answer gives for the joined arguments.
     function New-Tool([string]$dir, [string]$name, [scriptblock]$answer) {
@@ -43,11 +58,13 @@ exit [int]`$code
         $dir = Join-Path $TestDrive ([guid]::NewGuid())
         $checkout = Join-Path $dir 'checkout'
         New-Item -ItemType Directory -Force $checkout | Out-Null
-        $global:fakeClock = [datetime]'2026-11-09T08:00:00'
+        $global:fakeClock = [datetime]::SpecifyKind([datetime]'2026-11-09T08:00:00', 'Utc')
         $log = Join-Path $dir 'calls.txt'
         $params = @{
-            Checkout = $checkout
-            Sbxm     = New-FakeSbxm $dir $codes
+            Checkout  = $checkout
+            Sbxm      = New-FakeSbxm $dir $codes
+            LogDir    = Join-Path $dir 'logs'
+            StartLoop = $script:fakeStart
             Git      = New-Tool $dir 'git' $git
             Sbx      = New-Tool $dir 'sbx' $sbx
             Sleep    = { param($seconds) Add-Content -LiteralPath $log -Value "sleep $seconds"; $global:fakeClock = $global:fakeClock.AddSeconds($seconds) }.GetNewClosure()
@@ -55,7 +72,7 @@ exit [int]`$code
         }
         $global:LASTEXITCODE = 0
         $output = & $script:trigger @params *>&1 | Out-String
-        @{ code = $LASTEXITCODE; output = $output; calls = Get-Calls $dir; checkout = $checkout }
+        @{ code = $LASTEXITCODE; output = $output; calls = Get-Calls $dir; checkout = $checkout; logs = $params.LogDir }
     }
 
     function Get-Loops($run) { @($run.calls | Where-Object { $_ -like 'loop *' }) }
@@ -92,6 +109,80 @@ Describe 'loop-trigger.ps1: the restart rule' {
     It 'runs the loop with --wait in the checkout' {
         $run = Invoke-Trigger @('0')
         (Get-Loops $run) | Should -Be @("loop task loop --wait in $($run.checkout)")
+    }
+}
+
+Describe "loop-trigger.ps1: waiting on the loop's own process (issue 676)" {
+    It 'sees the loop exit at once while a child it started still runs, and schedules the restart' {
+        # The real start (Start-Process). The wrapper runs a native process, as the real one runs sbxm: the first
+        # time, it starts a child sleeping 60 s, which inherits its output, and exits 1; the second time it exits 0.
+        $dir = Join-Path $TestDrive ([guid]::NewGuid())
+        $checkout = Join-Path $dir 'checkout'
+        New-Item -ItemType Directory -Force $checkout | Out-Null
+        $runs = Join-Path $dir 'runs.txt'
+        $childPid = Join-Path $dir 'child.pid'
+        $loop = Join-Path $dir 'loop.ps1'
+        Set-Content -LiteralPath $loop -Value @"
+`$child = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList '-NoLogo -NoProfile -Command Start-Sleep 60' -NoNewWindow -PassThru
+Set-Content -LiteralPath '$childPid' -Value `$child.Id
+exit 1
+"@
+        $wrapper = Join-Path $dir 'sbxm.ps1'
+        Set-Content -LiteralPath $wrapper -Value @"
+Add-Content -LiteralPath '$runs' -Value "`$args"
+if (@(Get-Content -LiteralPath '$runs').Count -gt 1) { exit 0 }
+& (Get-Command pwsh).Source -NoLogo -NoProfile -File '$loop'
+exit `$LASTEXITCODE
+"@
+        $log = Join-Path $dir 'calls.txt'
+        $global:fakeClock = [datetime]'2026-11-09T08:00:00'
+        $params = @{
+            Checkout = $checkout
+            Sbxm     = $wrapper
+            LogDir   = Join-Path $dir 'logs'
+            Git      = { $global:LASTEXITCODE = 0 }
+            Sbx      = { $global:LASTEXITCODE = 0 }
+            Sleep    = { param($seconds) Add-Content -LiteralPath $log -Value "sleep $seconds" }.GetNewClosure()
+            Now      = { $global:fakeClock }
+        }
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            $global:LASTEXITCODE = 0
+            $output = & $script:trigger @params *>&1 | Out-String
+            $code = $LASTEXITCODE
+            $watch.Stop()
+            $child = Get-Process -Id ([int](Get-Content -LiteralPath $childPid)) -ErrorAction SilentlyContinue
+            $child | Should -Not -BeNullOrEmpty
+        }
+        finally {
+            if (Test-Path -LiteralPath $childPid) { Stop-Process -Id ([int](Get-Content -LiteralPath $childPid)) -Force -ErrorAction SilentlyContinue }
+        }
+        $watch.Elapsed.TotalSeconds | Should -BeLessThan 30
+        $code | Should -Be 0
+        $output | Should -Match 'The loop failed \(exit code 1\)'
+        @(Get-Content -LiteralPath $log) | Should -Be @('sleep 600')
+        @(Get-Content -LiteralPath $runs) | Should -Be @('task loop --wait', 'task loop --wait')
+    }
+
+    It "acts on the loop's own exit code, not on the start succeeding" {
+        $run = Invoke-Trigger @('1', '0')
+        $run.code | Should -Be 0
+        (Get-Loops $run).Count | Should -Be 2
+        $run.output | Should -Match 'The loop failed \(exit code 1\)'
+        @($run.calls | Where-Object { $_ -eq 'sleep 600' }).Count | Should -Be 1
+    }
+
+    It 'creates a missing log folder and writes the two log files of each start, naming them' {
+        $run = Invoke-Trigger @('1', '0')
+        $files = @(Get-ChildItem -LiteralPath $run.logs | Sort-Object Name | ForEach-Object Name)
+        $files | Should -Be @(
+            '20261109-080000-loop.err.log'
+            '20261109-080000-loop.out.log'
+            '20261109-081000-loop.err.log'
+            '20261109-081000-loop.out.log'
+        )
+        $run.output | Should -Match ([regex]::Escape((Join-Path $run.logs '20261109-080000-loop.out.log')))
+        $run.output | Should -Match ([regex]::Escape((Join-Path $run.logs '20261109-080000-loop.err.log')))
     }
 }
 
@@ -225,14 +316,14 @@ Describe 'loop-trigger.ps1: -Register and -Unregister' {
 
     It 'registers the job at logon, while logged on, one instance, no time limit; twice replaces it' {
         & $script:trigger -Register -Checkout 'H:\loop' -Sbxm 'H:\sbxm.ps1' *>&1 | Out-Null
-        & $script:trigger -Register -Checkout 'H:\loop' -Sbxm 'H:\sbxm.ps1' *>&1 | Out-Null
+        & $script:trigger -Register -Checkout 'H:\loop' -Sbxm 'H:\sbxm.ps1' -LogDir 'H:\logs' *>&1 | Out-Null
         $global:scheduled.Keys | Should -Be @('sbxm task loop')
         $job = $global:scheduled['sbxm task loop']
         $job.Trigger.AtLogOn | Should -BeTrue
         $job.Principal.LogonType | Should -Be 'Interactive'
         "$($job.Settings.MultipleInstances)" | Should -Be 'IgnoreNew'
         $job.Settings.ExecutionTimeLimit | Should -Be ([TimeSpan]::Zero)
-        $job.Action.Argument | Should -Match ([regex]::Escape('-Checkout "H:\loop" -Sbxm "H:\sbxm.ps1"'))
+        $job.Action.Argument | Should -Match ([regex]::Escape('-Checkout "H:\loop" -Sbxm "H:\sbxm.ps1" -LogDir "H:\logs"'))
         $job.Action.WorkingDirectory | Should -Be 'H:\loop'
     }
 
