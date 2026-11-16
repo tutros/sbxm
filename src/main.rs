@@ -1218,6 +1218,7 @@ fn run() -> anyhow::Result<()> {
                         },
                         &SbxBackend::LOCAL,
                         &sbxm::task::record::SystemProbe,
+                        &sbxm::task::TemplateTasks,
                         out,
                         warn,
                     )

@@ -13,11 +13,10 @@ use crate::harness::Harness;
 use crate::run::checks::timed_exec;
 use crate::run::orchestrate::in_sandbox_path;
 use crate::run::results::format_timestamp;
+use crate::shared::gates::{self, CARGO_ENV, DEFAULT_GATE_TIMEOUT};
 use crate::shared::process::{Process, ProcessProbe};
-use crate::task::config::DEFAULT_GATE_TIMEOUT;
-use crate::task::gates::{self, CARGO_ENV};
 use crate::template;
-use crate::{disk, kit, seed, task};
+use crate::{disk, kit, seed};
 
 #[derive(Debug, Default)]
 pub struct Options {
@@ -36,10 +35,11 @@ pub fn run(
     options: &Options,
     backend: &dyn SandboxBackend,
     probe: &dyn ProcessProbe,
+    tasks: &dyn template::Tasks,
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
-    build_tag(config_dir, options, backend, probe, out, warn).map(|_| ())
+    build_tag(config_dir, options, backend, probe, tasks, out, warn).map(|_| ())
 }
 
 /// [`run`], returning the tag it built (a queued `template` job's result names it, issue 524).
@@ -48,10 +48,11 @@ pub fn build_tag(
     options: &Options,
     backend: &dyn SandboxBackend,
     probe: &dyn ProcessProbe,
+    tasks: &dyn template::Tasks,
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<String> {
-    match build(config_dir, options, None, backend, probe, out, warn)? {
+    match build(config_dir, options, None, backend, probe, tasks, out, warn)? {
         Refreshed::Built(tag) | Refreshed::Fresh(tag) => Ok(tag),
     }
 }
@@ -81,6 +82,7 @@ pub fn refresh(
     sleep: &dyn Fn(Duration),
     backend: &dyn SandboxBackend,
     probe: &dyn ProcessProbe,
+    tasks: &dyn template::Tasks,
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<Refreshed> {
@@ -90,6 +92,7 @@ pub fn refresh(
         Some(Waiting { lock_hash, sleep }),
         backend,
         probe,
+        tasks,
         out,
         warn,
     )
@@ -102,12 +105,14 @@ struct Waiting<'a> {
     sleep: &'a dyn Fn(Duration),
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build(
     config_dir: &Path,
     options: &Options,
     waiting: Option<Waiting>,
     backend: &dyn SandboxBackend,
     probe: &dyn ProcessProbe,
+    tasks: &dyn template::Tasks,
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<Refreshed> {
@@ -133,7 +138,11 @@ fn build(
             config_dir.join("config.toml").display()
         );
     }
-    let warm = options.warm.as_deref().map(Warm::check).transpose()?;
+    let warm = options
+        .warm
+        .as_deref()
+        .map(|repo| Warm::check(repo, tasks))
+        .transpose()?;
     let sbx_version = backend.version()?;
     template::check_sbx_version(&sbx_version)?;
     disk::require(&config, config_dir, &options.disk)?;
@@ -222,7 +231,7 @@ fn build(
         .map_err(|err| build.clean_up(backend, &progress, err))?;
     writeln!(out, "{}", record.tag)?;
     let tag = record.tag.clone();
-    let kept = retire_previous(&config.base_dir, &record.previous, backend, out)?;
+    let kept = retire_previous(&config.base_dir, &record.previous, backend, tasks, out)?;
     if kept != record.previous {
         template::Record {
             previous: kept,
@@ -240,6 +249,7 @@ fn retire_previous(
     base_dir: &Path,
     previous: &[String],
     backend: &dyn SandboxBackend,
+    tasks: &dyn template::Tasks,
     out: &mut dyn Write,
 ) -> Result<Vec<String>> {
     if previous.is_empty() {
@@ -262,7 +272,7 @@ fn retire_previous(
         if !images.iter().any(|t| t.reference() == *tag) {
             continue;
         }
-        let users = match template::users(base_dir, tag) {
+        let users = match template::users(base_dir, tag, tasks) {
             Ok(users) => users,
             Err(err) => {
                 writeln!(
@@ -354,14 +364,14 @@ struct Warm {
 }
 
 impl Warm {
-    fn check(repo: &Path) -> Result<Self> {
+    fn check(repo: &Path, tasks: &dyn template::Tasks) -> Result<Self> {
         if !repo.is_dir() {
             bail!(
                 "repo {} is not a directory; point --warm at the repo to warm the template with",
                 repo.display()
             );
         }
-        if let Some(warm) = task::config::load_warm(repo)? {
+        if let Some(warm) = tasks.warm(repo)? {
             seed::reject_repo_links(repo)?;
             let lock_hash = template::lock_hash(repo, &warm.lock_files)?;
             return Ok(Self {

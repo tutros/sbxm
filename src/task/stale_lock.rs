@@ -385,6 +385,7 @@ fn rebuild(
             r.sleep,
             r.backend,
             r.probe,
+            &crate::task::TemplateTasks,
             &mut out,
             &mut progress,
         )

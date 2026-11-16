@@ -62,6 +62,7 @@ fn build(env: &Env, backend: &FakeBackend, harness: Harness, warm: Option<&Path>
         },
         backend,
         &sbxm::task::record::SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut out,
         &mut Vec::new(),
     )

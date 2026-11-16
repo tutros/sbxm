@@ -69,6 +69,7 @@ fn build_template(f: &Fixture, backend: &FakeBackend) -> String {
         },
         backend,
         &record::SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut out,
         &mut Vec::new(),
     )

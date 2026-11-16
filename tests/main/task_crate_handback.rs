@@ -88,6 +88,7 @@ fn build_warm(env: &Env, backend: &FakeBackend, repo: &std::path::Path, harness:
         },
         backend,
         &record::SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut Vec::new(),
         &mut Vec::new(),
     )

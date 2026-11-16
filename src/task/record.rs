@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 
 use crate::backend::Location;
 use crate::run::results::format_timestamp;
+pub use crate::shared::gates::GateResult;
+pub use crate::shared::kind::Kind;
 pub use crate::shared::process::{Process, ProcessProbe, SystemProbe};
 
 pub const SCHEMA: u32 = 1;
@@ -21,32 +23,6 @@ pub const DEFAULT_FIX_ROUNDS: u32 = 3;
 
 fn default_fix_rounds() -> u32 {
     DEFAULT_FIX_ROUNDS
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Kind {
-    Issue,
-    Pr,
-    /// A task whose source is a file instead of a GitHub issue (decision 174(d), issue 142): the
-    /// id is given explicitly (`spec-<name>-<hash>`, see [`spec_id`]), never derived from
-    /// `number`, which is unused (always 0).
-    Spec,
-    /// A task that fixes the must-fix findings of a pull request's latest sbxm review on that
-    /// pull request's own branch (issue 313): `number` is the PR's, and the id names the head
-    /// the review covered ([`fix_id`]), so a fix of a later head is a task of its own.
-    Fix,
-}
-
-impl Kind {
-    fn prefix(self) -> &'static str {
-        match self {
-            Self::Issue => "issue",
-            Self::Pr => "pr",
-            Self::Spec => "spec",
-            Self::Fix => "fix",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,15 +232,6 @@ pub struct Agent {
     /// harness, or a session that couldn't be), and always on the reviewer's `Agent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GateResult {
-    pub phase: String,
-    pub tier: String,
-    pub command: String,
-    pub exit: Option<i32>,
-    pub passed: bool,
 }
 
 /// What the latest *passed* gate run covered: which tiers passed, on which commit of the task

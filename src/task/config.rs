@@ -12,15 +12,16 @@ use crate::backend::Location;
 use crate::config::resolve_inside;
 use crate::harness::Harness;
 use crate::run::config::{headless_harness, parse_duration};
+pub(crate) use crate::shared::gates::DEFAULT_GATE_TIMEOUT;
 use crate::task::record::DEFAULT_FIX_ROUNDS;
 use crate::task::risk::{self, Level, PathRule};
 use crate::task::shape::{self, Shape};
+pub use crate::template::Warm;
 
 pub const FILE_NAME: &str = "sbxm-task.toml";
 
 const DEFAULT_WORKER_LIMIT: Duration = Duration::from_secs(2 * 3600);
 const DEFAULT_REVIEWER_LIMIT: Duration = Duration::from_secs(45 * 60);
-pub(crate) const DEFAULT_GATE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// `[loop] usage_wait` and `usage_wait_total` when absent (issue 320, decision 6).
 const DEFAULT_USAGE_WAIT: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_USAGE_WAIT_TOTAL: Duration = Duration::from_secs(5 * 3600);
@@ -102,15 +103,6 @@ pub enum ShouldFix {
     /// A clean task with should-fix findings sized S gets one more fix round on them (`task
     /// resume --rounds 1 --should-fix`) before `task finish`; the rest are filed.
     Fix,
-}
-
-/// How `template build --warm` fills a template's caches from this repo (decision 207).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Warm {
-    /// Run in order with `sh -c` in the copied repo, each under the gate timeout.
-    pub commands: Vec<String>,
-    /// Paths from the repo's root, hashed into the template's record.
-    pub lock_files: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

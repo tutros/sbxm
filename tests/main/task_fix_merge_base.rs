@@ -588,6 +588,7 @@ fn warm_from(f: &Fixture, backend: &FakeBackend, main: &Path) {
             },
             backend,
             &Probe,
+            &sbxm::task::TemplateTasks,
             &mut Vec::new(),
             &mut Vec::new(),
         )
