@@ -262,6 +262,7 @@ mod task_review_status;
 mod task_risk;
 mod task_rm;
 mod task_rm_archive;
+mod task_rm_archive_issue_md;
 mod task_rm_cmd;
 mod task_rm_delete_retry;
 mod task_rm_fix_pr;
