@@ -750,7 +750,7 @@ impl StderrTail {
 /// bytes, so the error (and `run.log`, which gets it) names the cause (issue 556).
 fn create_failed(sandbox: &str, status: &str, stderr: &[u8]) -> String {
     // Masked before it is cut, so a cut never leaves part of a secret the mask can't see (M-2).
-    let text = crate::task::runlog::redact(String::from_utf8_lossy(stderr).trim());
+    let text = crate::shared::runlog::redact(String::from_utf8_lossy(stderr).trim());
     let reason = if text.is_empty() {
         "no output from sbx on stderr".to_owned()
     } else if text.len() > STDERR_KEPT {
@@ -818,7 +818,7 @@ fn parse_json<T: DeserializeOwned>(output: &str, command: &str) -> Result<T> {
 
 /// `parse_json` and the note about the trailer, if it has one. The note shows the first
 /// non-empty trailing line, cut to `TRAILER_SHOWN` characters, unless that line looks like a
-/// secret (`task::runlog::redact` changes it): then the note leaves the text out.
+/// secret (`shared::runlog::redact` changes it): then the note leaves the text out.
 fn parse_json_noting_trailer<T: DeserializeOwned>(
     output: &str,
     command: &str,
@@ -835,7 +835,7 @@ fn parse_json_noting_trailer<T: DeserializeOwned>(
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(|line| {
-            let shown = if crate::task::runlog::redact(line) != line {
+            let shown = if crate::shared::runlog::redact(line) != line {
                 "the text is not shown: it looks like a secret".to_owned()
             } else {
                 line.chars().take(TRAILER_SHOWN).collect()

@@ -689,7 +689,7 @@ impl GitHubBackend for GhBackend {
 
     fn branch_head(&self, repo: &str, branch: &str) -> Result<String> {
         // The branch goes into the API path: only a usable branch name is accepted.
-        if !crate::task::repo::valid_ref_name(branch) {
+        if !crate::shared::names::valid_ref_name(branch) {
             bail!("{branch:?} isn't a usable branch name, so its head can't be read");
         }
         let raw: RawBranch = self.json(&strings(&[
@@ -705,7 +705,7 @@ impl GitHubBackend for GhBackend {
 
     fn branch_exists(&self, repo: &str, branch: &str) -> Result<bool> {
         // The branch goes into the API path: only a usable branch name is accepted.
-        if !crate::task::repo::valid_ref_name(branch) {
+        if !crate::shared::names::valid_ref_name(branch) {
             bail!("{branch:?} isn't a usable branch name, so it can't be looked up");
         }
         // Every ref whose name starts with this one: `issue-4` matches `issue-468` too.

@@ -14,7 +14,7 @@ use sbxm::confirm::Terminal;
 use sbxm::hint::{self, Local};
 use sbxm::screen::{self, Screen};
 use sbxm::task;
-use sbxm::task::runlog::Tee;
+use sbxm::task::runlog::{RunLog, Tee};
 
 /// The task id (`issue-5`, `pr-7`) a command works on. `--spec` tasks (issue 142) don't reach
 /// this: `status`/`rm`/`file-findings` don't take a spec task yet.
@@ -30,9 +30,9 @@ fn task_id(kind: task::record::Kind, number: u32) -> String {
 
 /// A `sbxm task` command's screen writer: its hints name the commands they suggest with the
 /// running executable (issue 574), on the screen and in the `run.log`.
-type TaskOut = Local<Tee<Screen<std::io::Stdout>>>;
+type TaskOut = Local<Tee<Screen<std::io::Stdout>, RunLog>>;
 /// A `sbxm task` command's warning writer, rewritten like [`TaskOut`].
-type TaskWarn = Local<Tee<Screen<std::io::Stderr>>>;
+type TaskWarn = Local<Tee<Screen<std::io::Stderr>, RunLog>>;
 
 /// The screen and warning writers of a `sbxm task` command, each copying its lines to the
 /// `run.log` of the tasks `ids` (and, with `discover`, of every task this process's own identity

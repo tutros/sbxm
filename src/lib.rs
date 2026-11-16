@@ -17,6 +17,7 @@ pub mod run;
 pub mod sandbox_name;
 pub mod screen;
 pub mod seed;
+pub mod shared;
 pub mod slot;
 pub mod state;
 pub mod status;

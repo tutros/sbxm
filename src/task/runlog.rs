@@ -9,27 +9,14 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
-
-use regex::Regex;
+use std::sync::{Arc, Mutex};
 
 use super::record::{self, is_valid_id};
 use crate::run::results::{format_timestamp, now};
+pub use crate::shared::runlog::{LineSink, Tee, redact};
 
 /// The stage shown for a line printed before the task has a folder (or when its record can't be read).
 const NO_STAGE: &str = "-";
-
-/// Values that look like an API key or token: `sk-…`, `ghp_…` (and the other `gh*_` kinds),
-/// `github_pat_…` and Google `AIza…` keys.
-static SECRET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|AIza[A-Za-z0-9_-]{16,})")
-        .expect("the secret pattern is valid")
-});
-
-/// `text` with every value that looks like a secret replaced by `[redacted]`.
-pub fn redact(text: &str) -> String {
-    SECRET.replace_all(text, "[redacted]").into_owned()
-}
 
 /// The first line of each invocation's section: when, the command line, the executable, its
 /// SHA-256, the commit if the build knows it, and the process id.
@@ -291,68 +278,8 @@ pub fn task_line(dir: &Path, text: &str) {
     }
 }
 
-/// Where a [`Tee`] sends each whole line: a task's [`RunLog`], or a run folder's log
-/// (`run::log::RunFolderLog`, decision 170, part 3).
-pub trait LineSink {
-    fn line(&mut self, text: &str);
-}
-
 impl LineSink for RunLog {
     fn line(&mut self, text: &str) {
         RunLog::line(self, text);
-    }
-}
-
-/// A writer that passes everything to `inner` unchanged and hands each whole line to the log.
-pub struct Tee<W: Write, L: LineSink = RunLog> {
-    inner: W,
-    log: Arc<Mutex<L>>,
-    partial: Vec<u8>,
-}
-
-impl<W: Write, L: LineSink> Tee<W, L> {
-    pub fn new(inner: W, log: Arc<Mutex<L>>) -> Self {
-        Self {
-            inner,
-            log,
-            partial: Vec::new(),
-        }
-    }
-
-    fn ship(&mut self, all: bool) {
-        while let Some(end) = self.partial.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.partial.drain(..=end).collect();
-            self.send(&line[..end]);
-        }
-        if all && !self.partial.is_empty() {
-            let rest = std::mem::take(&mut self.partial);
-            self.send(&rest);
-        }
-    }
-
-    fn send(&self, line: &[u8]) {
-        let text = String::from_utf8_lossy(line);
-        if let Ok(mut log) = self.log.lock() {
-            log.line(text.trim_end_matches('\r'));
-        }
-    }
-}
-
-impl<W: Write, L: LineSink> Write for Tee<W, L> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let written = self.inner.write(buf)?;
-        self.partial.extend_from_slice(&buf[..written]);
-        self.ship(false);
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-
-impl<W: Write, L: LineSink> Drop for Tee<W, L> {
-    fn drop(&mut self) {
-        self.ship(true);
     }
 }
