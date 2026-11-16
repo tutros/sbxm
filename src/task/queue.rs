@@ -385,7 +385,7 @@ pub struct Row {
     pub worker_s: Option<u64>,
     pub reviewer_s: Option<u64>,
     /// The record's review round; shown only when `must_fix` is empty, since a gate failure can
-    /// use a round before the first review.
+    /// use a round before the first review and a review whose count can't be read sets none.
     pub rounds: Option<u32>,
     /// Each saved review's must-fix count, in order (issue 697): `None` for a round whose count
     /// can't be read, shown as `?`; their number is the cell's round count, as in `task facts`.
@@ -445,17 +445,17 @@ fn render_as(number: usize, item: &str, row: &Row) -> String {
         (None, None) => "-".to_owned(),
         (w, r) => format!("{} / {}", opt(w), opt(r)),
     };
-    let rounds = match row.rounds {
-        None => "-".to_owned(),
-        Some(rounds) if row.must_fix.is_empty() => rounds.to_string(),
-        Some(_) => {
-            let counts: Vec<String> = row
-                .must_fix
-                .iter()
-                .map(|c| c.map_or_else(|| "?".to_owned(), |c| c.to_string()))
-                .collect();
-            format!("{} ({})", counts.len(), counts.join(", "))
-        }
+    // The saved reviews decide the cell when there are any (review M-1 of issue 697): a review
+    // whose count can't be read is saved, but the record gets no review from it.
+    let rounds = if row.must_fix.is_empty() {
+        row.rounds.map_or_else(|| "-".to_owned(), |r| r.to_string())
+    } else {
+        let counts: Vec<String> = row
+            .must_fix
+            .iter()
+            .map(|c| c.map_or_else(|| "?".to_owned(), |c| c.to_string()))
+            .collect();
+        format!("{} ({})", counts.len(), counts.join(", "))
     };
     let stops = if row.stops.is_empty() {
         "none".to_owned()

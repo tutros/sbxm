@@ -64,6 +64,13 @@ fn the_round_count_is_the_number_of_saved_reviews_as_task_facts_counts_them() {
 }
 
 #[test]
+fn saved_reviews_show_with_no_review_in_the_record() {
+    // Review M-1: a first review with no readable count is saved, but the record gets no review.
+    assert_eq!(cell(&row(None, vec![None])), "1 (?)");
+    assert_eq!(cell(&row(None, vec![None, None])), "2 (?, ?)");
+}
+
+#[test]
 fn no_review_round_shows_a_dash() {
     assert_eq!(cell(&row(None, Vec::new())), "-");
 }

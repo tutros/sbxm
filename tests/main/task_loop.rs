@@ -79,6 +79,9 @@ struct Script {
     /// When this call is made, the command run by hand on this issue's task ends, freeing its
     /// lock, after leaving the task as [`Hand`] says.
     unlock_on: RefCell<Option<(String, u32, Hand)>>,
+    /// Issues whose task has saved a first review with this many must-fix when its phase ends,
+    /// whatever the phase leaves in the record (issue 697).
+    saved_review: RefCell<HashMap<u32, u32>>,
 }
 
 /// What the command run by hand leaves of the task when it ends (review M-1 of issue 409).
@@ -108,7 +111,13 @@ impl Script {
             finish_fails: RefCell::default(),
             continues: RefCell::default(),
             unlock_on: RefCell::default(),
+            saved_review: RefCell::default(),
         }
+    }
+
+    fn saving_a_review(self, issue: u32, must_fix: u32) -> Self {
+        self.saved_review.borrow_mut().insert(issue, must_fix);
+        self
     }
 
     fn unlocking(self, call: &str, issue: u32) -> Self {
@@ -173,6 +182,15 @@ impl Script {
             .get_mut(&issue)
             .and_then(VecDeque::pop_front)
             .unwrap_or(Act::Ready(0));
+        if let Some(&must_fix) = self.saved_review.borrow().get(&issue) {
+            let dir = record::task_dir(&self.base, &format!("issue-{issue}"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("review-1.md"),
+                format!("Reviewer: claude\n\nMust-fix findings: {must_fix}\n"),
+            )
+            .unwrap();
+        }
         match act {
             Act::Ready(must_fix) => {
                 write_record(&self.base, issue, Stage::Ready, Some(must_fix), None);
@@ -1081,7 +1099,9 @@ fn an_environment_failure_before_any_record_is_run_again_once() {
 fn a_sign_in_stop_exits_the_loop_with_the_three_steps() {
     let f = fixture();
     let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
-    let script = Script::new(&f.base()).plays(3, &[Act::SignedOut(true)]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::SignedOut(true)])
+        .saving_a_review(3, 1);
 
     let run = run_loop(&f, opts(&f), &script, &gh);
 
@@ -1147,6 +1167,45 @@ fn a_harness_sign_in_failure_exits_the_loop_without_a_resume() {
         "{text}"
     );
     assert!(f.log_text().contains("stopped at working: sign-in"));
+}
+
+// --- issue 697, review M-1: a stopped task's row still lists its saved reviews ---
+
+#[test]
+fn a_sign_in_stops_row_lists_the_saved_reviews() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S")]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::SignedOut(true)])
+        .saving_a_review(3, 1);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    assert!(run.result.is_err(), "{}", run.out);
+    let log = f.log_text();
+    assert!(
+        log.contains("| 1 (1) | stopped at working: sign-in |"),
+        "{log}"
+    );
+}
+
+#[test]
+fn a_usage_limit_stops_row_lists_the_saved_reviews() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S")]);
+    let limit = Act::Fail("You've hit your usage limit", true);
+    let script = Script::new(&f.base())
+        .plays(3, &[limit.clone(), limit.clone(), limit])
+        .saving_a_review(3, 1);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    assert!(run.result.is_err(), "{}", run.out);
+    let log = f.log_text();
+    assert!(
+        log.contains("| 1 (1) | stopped at working: usage limit |"),
+        "{log}"
+    );
 }
 
 #[test]
