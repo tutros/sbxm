@@ -199,6 +199,7 @@ mod task_loop_job_children;
 mod task_loop_jobs;
 mod task_loop_jobs_2b;
 mod task_loop_log;
+mod task_loop_log_columns;
 mod task_loop_log_must_fix;
 mod task_loop_medium;
 mod task_loop_notify;
