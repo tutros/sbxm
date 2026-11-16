@@ -300,13 +300,7 @@ fn reserve_locked(
 pub fn check_can_gate(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
     let id = &task.id;
     let number = task.number;
-    let state = machine::State {
-        stage: task.stage,
-        status: task.status,
-        interrupted: task.is_interrupted(probe),
-        kind: task.kind,
-    };
-    if machine::verdict(&state, machine::Event::Gates) {
+    if machine::verdict(&machine::State::of(task, probe), machine::Event::Gates) {
         return Ok(());
     }
     match (task.stage, task.status) {
@@ -3801,13 +3795,7 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
     };
     // What continues a failed or interrupted stage (issue 118).
     let resume = next::resume(task);
-    let state = machine::State {
-        stage: task.stage,
-        status: task.status,
-        interrupted: task.is_interrupted(probe),
-        kind: task.kind,
-    };
-    if machine::verdict(&state, machine::Event::Review) {
+    if machine::verdict(&machine::State::of(task, probe), machine::Event::Review) {
         return Ok(());
     }
     match (task.stage, task.status) {
@@ -4210,13 +4198,7 @@ pub fn check_can_review_pr(task: &Record, probe: &dyn ProcessProbe) -> Result<()
     let (id, number) = (&task.id, task.number);
     // A PR task's reviewer name is decided against the record too (decision 268).
     super::resume::refuse_ambiguous(task, "be reviewed")?;
-    let state = machine::State {
-        stage: task.stage,
-        status: task.status,
-        interrupted: task.is_interrupted(probe),
-        kind: task.kind,
-    };
-    if machine::verdict(&state, machine::Event::Review) {
+    if machine::verdict(&machine::State::of(task, probe), machine::Event::Review) {
         return Ok(());
     }
     match (task.stage, task.status) {

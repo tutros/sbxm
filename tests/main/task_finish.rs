@@ -619,7 +619,7 @@ fn a_spec_task_is_refused_until_ready_and_may_be_finished_once_ready() {
         Process::new(1, 0),
     );
 
-    let message = format!("{:#}", check_can_finish(&record).unwrap_err());
+    let message = format!("{:#}", check_can_finish(&record, &Probe).unwrap_err());
     assert!(
         message.contains("spec-idea-abc123") && message.contains("not ready"),
         "{message}"
@@ -636,7 +636,7 @@ fn a_spec_task_is_refused_until_ready_and_may_be_finished_once_ready() {
         record.finish(done).unwrap();
     }
     record.advance(Stage::Ready, 0, Process::new(1, 0)).unwrap();
-    check_can_finish(&record).unwrap();
+    check_can_finish(&record, &Probe).unwrap();
 }
 
 /// The issue path never publishes a spec task as a PR, even a ready one.

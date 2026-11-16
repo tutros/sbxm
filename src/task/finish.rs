@@ -242,14 +242,7 @@ pub fn plan_removal_forgetting(
     }
     match record::read(&json) {
         Ok(task) => {
-            let interrupted = task.is_interrupted(probe);
-            let state = machine::State {
-                stage: task.stage,
-                status: task.status,
-                interrupted,
-                kind: task.kind,
-            };
-            if !machine::verdict(&state, machine::Event::Rm) {
+            if !machine::verdict(&machine::State::of(&task, probe), machine::Event::Rm) {
                 bail!(
                     "task {id} is running (stage {}); wait for it to finish, or stop it, then run `sbxm task rm` again",
                     task.stage.name()
@@ -1864,22 +1857,18 @@ fn reviewed_head(task: &Record, tip: &str) -> Option<String> {
 }
 
 /// Whether `task finish` on this task is the summary-only retry of issue 430: a finished issue or
-/// spec task with a recorded PR. Decided through `machine::TABLE` once the `pr` field is checked;
-/// a spec task under the `local` or `push` sink records no PR, and a fix task is never a PR of
-/// its own.
-pub fn check_can_retry_summaries(task: &Record) -> Result<()> {
+/// spec task with a recorded PR. Decided through `machine::TABLE`, which holds the recorded-PR
+/// rule too (issue 513); a spec task under the `local` or `push` sink records no PR, and a fix
+/// task is never a PR of its own.
+pub fn check_can_retry_summaries(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
     let id = &task.id;
-    if task.pr.is_none() {
-        bail!("task {id} has no recorded PR, so there are no summaries to retry");
-    }
-    let state = machine::State {
-        stage: task.stage,
-        status: task.status,
-        interrupted: false,
-        kind: task.kind,
-    };
-    if machine::verdict(&state, machine::Event::FinishSummaries) {
+    if machine::verdict(
+        &machine::State::of(task, probe),
+        machine::Event::FinishSummaries,
+    ) {
         Ok(())
+    } else if task.pr.is_none() {
+        bail!("task {id} has no recorded PR, so there are no summaries to retry");
     } else {
         bail!(
             "task {id} ({:?} task, stage {}) has no summaries to retry",
@@ -1889,24 +1878,15 @@ pub fn check_can_retry_summaries(task: &Record) -> Result<()> {
     }
 }
 
-/// Whether the task may be finished now. Decided through `machine::TABLE` once the `pr` field (not
-/// part of a table state; see `sdlc/spikes/state-table.md`) is checked. The reason for a refusal
-/// says what to do.
-pub fn check_can_finish(task: &Record) -> Result<()> {
+/// Whether the task may be finished now. Decided through `machine::TABLE`, which holds the
+/// recorded-PR rule too (issue 513). The reason for a refusal says what to do.
+pub fn check_can_finish(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
     let (id, number) = (&task.id, task.number);
+    if machine::verdict(&machine::State::of(task, probe), machine::Event::Finish) {
+        return Ok(());
+    }
     if let Some(url) = &task.pr {
         bail!("task {id} already has a PR, {url}; there is nothing left to finish");
-    }
-    let state = machine::State {
-        stage: task.stage,
-        status: task.status,
-        // No command retries an interrupted task towards `finish` yet, so this check never sees
-        // one; `finish` itself only ever runs on `ready`, never on a `running` status.
-        interrupted: false,
-        kind: task.kind,
-    };
-    if machine::verdict(&state, machine::Event::Finish) {
-        return Ok(());
     }
     match task.kind {
         record::Kind::Pr => bail!("task {id} is a PR review; only an issue's task can be finished"),
@@ -2110,10 +2090,10 @@ fn open_task_pr(
     if prepared.record.kind == record::Kind::Fix {
         bail!("task {id} is a fix task; `sbxm task fix` pushes it onto its PR's branch itself");
     }
-    if check_can_retry_summaries(&prepared.record).is_ok() {
+    if check_can_retry_summaries(&prepared.record, probe).is_ok() {
         return retry_summaries(prepared, github);
     }
-    check_can_finish(&prepared.record)?;
+    check_can_finish(&prepared.record, probe)?;
     let task = prepared.record.clone();
     crate::commands::task_start::check_repo(&task.repo)?;
     for (what, name) in [("branch", &task.branch), ("base", &task.base)] {
@@ -2592,7 +2572,7 @@ pub fn finish_fix(
     if task.kind != record::Kind::Fix {
         bail!("task {id} isn't a fix task; only `sbxm task fix` pushes onto a PR's own branch");
     }
-    check_can_finish(&task)?;
+    check_can_finish(&task, probe)?;
     crate::commands::task_start::check_repo(&task.repo)?;
     let Some(continued) = task.continues.clone() else {
         bail!("task {id} records no PR branch to push to; see task.json");
@@ -2736,7 +2716,7 @@ pub struct Kept {
 /// host-owned `repo.git` and the task becomes `finished`. Nothing is pushed and nothing leaves
 /// the machine; the caller says how to fetch the branch.
 pub fn finish_local(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Result<Kept> {
-    let (mut prepared, kept, _) = open_spec_result(base_dir, id, "keep")?;
+    let (mut prepared, kept, _) = open_spec_result(base_dir, id, "keep", probe)?;
     record_finished(&mut prepared, probe)?;
     Ok(kept)
 }
@@ -2753,7 +2733,7 @@ pub fn finish_push(
     push_unresolved: bool,
     probe: &dyn ProcessProbe,
 ) -> Result<Kept> {
-    let (mut prepared, kept, tip) = open_spec_result(base_dir, id, "push")?;
+    let (mut prepared, kept, tip) = open_spec_result(base_dir, id, "push", probe)?;
     let (branch, repo_git) = (&kept.branch, &kept.repo_git);
     if !push_unresolved {
         let unresolved = |what: String| {
@@ -2793,12 +2773,17 @@ pub fn finish_push(
 
 /// A ready spec task with a branch worth delivering, for either sink, and the branch's tip:
 /// `what` names the action in the refusals.
-fn open_spec_result(base_dir: &Path, id: &str, what: &str) -> Result<(Prepared, Kept, String)> {
+fn open_spec_result(
+    base_dir: &Path,
+    id: &str,
+    what: &str,
+    probe: &dyn ProcessProbe,
+) -> Result<(Prepared, Kept, String)> {
     let prepared = Prepared::open(base_dir, id)?;
     if prepared.record.kind != record::Kind::Spec {
         bail!("task {id} isn't a spec task; only a spec task has a [finish] sink");
     }
-    check_can_finish(&prepared.record)?;
+    check_can_finish(&prepared.record, probe)?;
     let branch = prepared.record.branch.clone();
     if !repo::valid_ref_name(&branch) {
         bail!(

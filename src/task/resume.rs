@@ -4,7 +4,8 @@
 //! `sbxm` process is alive, and for a PR task (no worker; `task review --pr` moves it on). A
 //! `task fix --pr N` task is named by `--pr N` (issue 485): the one made for the PR's current
 //! head ([`fix_task_for_head`]). Decided through
-//! `machine::TABLE`'s `Resume` rows; the refusal text for each state lives here.
+//! `machine::TABLE`'s `Resume` and `ResumeRounds` rows, which hold the process check and the
+//! `--rounds` rule too (issue 513); the refusal text for each state lives here.
 
 use std::fs;
 use std::path::Path;
@@ -129,12 +130,13 @@ pub fn check_can_resume_with(
     should_fix: bool,
 ) -> Result<()> {
     let id = &task.id;
-    let state = machine::State {
-        stage: task.stage,
-        status: task.status,
-        interrupted: task.is_interrupted(probe),
-        kind: task.kind,
+    // `--rounds` is a row of its own (issue 513): it is for a task that stopped `ready` only.
+    let event = if rounds.is_some() {
+        Event::ResumeRounds
+    } else {
+        Event::Resume
     };
+    let allowed = machine::verdict(&machine::State::of(task, probe), event);
     if task.kind == Kind::Pr {
         // `task review --pr` moves a PR task on from every state it can be left in: a `ready`
         // one (decision 190), a failed reviewer, and since issue 379 the states it used to be
@@ -145,7 +147,9 @@ pub fn check_can_resume_with(
             task.number
         );
     }
-    if task.process_alive(probe)
+    // The table refuses every state while the recorded process is alive (`Live::Gone`, issue 513).
+    if !allowed
+        && task.process_alive(probe)
         && let Some(process) = &task.process
     {
         bail!(
@@ -162,7 +166,7 @@ pub fn check_can_resume_with(
         bail!("--rounds adds fix rounds to the task's budget; give 1 or more");
     }
     if let Some(n) = rounds
-        && task.stage != Stage::Ready
+        && !allowed
     {
         bail!(
             "--rounds {n} is for a task that stopped ready with its rounds used; task {id} is at \
@@ -181,7 +185,7 @@ pub fn check_can_resume_with(
             u32::MAX
         );
     }
-    if machine::verdict(&state, Event::Resume) {
+    if allowed {
         return if task.stage == Stage::Ready {
             if should_fix && task.stopped.is_none() {
                 return Ok(());

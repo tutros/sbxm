@@ -214,6 +214,7 @@ mod task_loop_slot_stop;
 mod task_loop_stop_before_phase;
 mod task_loop_trial;
 mod task_machine;
+mod task_machine_rules;
 mod task_merged;
 mod task_merged_remove;
 mod task_merged_spec_on_origin;

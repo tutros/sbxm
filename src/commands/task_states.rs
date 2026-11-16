@@ -44,14 +44,19 @@ fn kind_suffix(kinds: &[Kind]) -> &'static str {
 
 fn from_cell(row: &Row) -> String {
     format!(
-        "{} {}{}{}",
+        "{} {}{}{}{}",
         stage_cell(row.stages),
         status_cell(row.statuses),
         kind_suffix(row.kinds),
-        if row.live == machine::Live::Interrupted {
-            ", interrupted"
-        } else {
-            ""
+        match row.live {
+            machine::Live::Any => "",
+            machine::Live::Interrupted => ", interrupted",
+            machine::Live::Gone => ", no live process",
+        },
+        match row.pr {
+            machine::RecordedPr::Any => "",
+            machine::RecordedPr::Yes => ", with a recorded PR",
+            machine::RecordedPr::No => ", no recorded PR",
         },
     )
 }
@@ -64,6 +69,7 @@ fn event_cell(event: Event) -> &'static str {
         Event::FinishSummaries => "task finish",
         Event::Rm => "task rm",
         Event::Resume => "task resume",
+        Event::ResumeRounds => "task resume --rounds N",
         Event::Advance(_) => "advance",
     }
 }
