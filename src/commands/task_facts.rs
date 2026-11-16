@@ -219,16 +219,7 @@ fn read(path: &Path) -> Result<Record, String> {
 }
 
 fn row(task: &Record, dir: &Path, started: String) -> Row {
-    let must_fix: Vec<Option<u32>> = review::saved_rounds(dir)
-        .into_iter()
-        .map(|r| dir.join(format!("review-{r}.md")))
-        .filter(|path| plain_file(path))
-        .map(|path| {
-            fs::read_to_string(path)
-                .ok()
-                .and_then(|text| review::saved_must_fix_count(&text))
-        })
-        .collect();
+    let must_fix = review::saved_must_fix(dir);
     let ready = task
         .stages
         .iter()

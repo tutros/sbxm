@@ -493,6 +493,31 @@ fn a_child_of_the_dead_loop_cut_off_again_after_its_resume_is_parked() {
     );
 }
 
+/// Issue 697, review M-1: the parked row lists the reviews the task saved before it was cut off.
+#[test]
+fn a_child_cut_off_again_is_parked_with_its_saved_reviews_in_its_row() {
+    let f = fixture();
+    let dir = save(&f.env.base_dir(), 3, Stage::Working, CHILD, Some(LOOP));
+    let mut rec = record::read(&dir.join("task.json")).unwrap();
+    rec.hooks = serde_json::json!({ "task_loop_resumed": true });
+    record::write(&dir, &rec).unwrap();
+    fs::write(
+        dir.join("review-1.md"),
+        "Reviewer: claude\n\nMust-fix findings: 2\n",
+    )
+    .unwrap();
+    let script = Script::new(&f.env.base_dir());
+
+    let out = restart(&f, &script);
+
+    let log = fs::read_to_string(sbxm::task::loop_log::path(&f.env.base_dir(), START))
+        .unwrap_or_default();
+    assert!(
+        log.contains("| 1 (2) | parked at working: cut off again after its resume |"),
+        "{log}\n{out}"
+    );
+}
+
 #[test]
 fn a_resumed_child_that_fails_again_is_parked() {
     let f = fixture();

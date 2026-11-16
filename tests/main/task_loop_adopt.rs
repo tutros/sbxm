@@ -562,6 +562,33 @@ fn an_adopted_cloud_child_that_ends_ready_is_finished_with_one_row_of_its_own_st
     assert!(rows[0].contains("| cloud | 09:00:00 |"), "{}", rows[0]);
 }
 
+// --- issue 697: an adopted child's row lists every round's must-fix ---
+
+#[test]
+fn an_adopted_childs_row_lists_every_review_rounds_must_fix() {
+    let f = fixture(Some(2), true);
+    ended_ready(&f.base(), 3);
+    let dir = record::task_dir(&f.base(), "issue-3");
+    let mut rec = read(&f.base(), 3);
+    rec.review.as_mut().unwrap().round = 4;
+    record::write(&dir, &rec).unwrap();
+    for (round, count) in [(1, 1), (2, 1), (3, 0), (4, 0)] {
+        fs::write(
+            dir.join(format!("review-{round}.md")),
+            format!("Reviewer: claude\n\nMust-fix findings: {count}\n"),
+        )
+        .unwrap();
+    }
+    let gh = github(&[]);
+
+    let run = run_loop(&f, &gh, &[], &[], &never);
+
+    assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+    let rows = rows(&f, 3);
+    assert_eq!(rows.len(), 1, "{}", f.log_text());
+    assert!(rows[0].contains("| 4 (1, 1, 0, 0) |"), "{}", rows[0]);
+}
+
 // --- boundary case 2: an adopted local child holds the local slot ---
 
 #[test]
@@ -1465,7 +1492,7 @@ fn earlier_log(f: &Fixture, at: u64, issue: u32, outcome: &str) {
         worker_s: None,
         reviewer_s: None,
         rounds: None,
-        must_fix: None,
+        must_fix: Vec::new(),
         outcome: outcome.into(),
         stops: Vec::new(),
         idle_before: None,

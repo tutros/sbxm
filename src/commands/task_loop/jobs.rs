@@ -656,7 +656,7 @@ impl Loop<'_> {
             worker_s: None,
             reviewer_s: None,
             rounds: None,
-            must_fix: None,
+            must_fix: Vec::new(),
             outcome: format!("{}: {}", result.outcome.name(), first_line(&result.reason)),
             stops: Vec::new(),
             idle_before: None,

@@ -202,6 +202,7 @@ mod task_loop_jobs;
 mod task_loop_jobs_2b;
 mod task_loop_log;
 mod task_loop_log_columns;
+mod task_loop_log_must_fix;
 mod task_loop_medium;
 mod task_loop_notify;
 mod task_loop_notify_not_run;
