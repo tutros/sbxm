@@ -12,6 +12,7 @@ use crate::disk::gib;
 use crate::harness::Harness;
 use crate::run::results::parse_timestamp;
 use crate::status::tasks::format_duration;
+use crate::task::TemplateTasks;
 use crate::template;
 
 #[derive(Debug, Default)]
@@ -46,7 +47,7 @@ pub fn run(
     for (profile, harness, record) in records {
         let users = std::iter::once(&record.tag)
             .chain(&record.previous)
-            .map(|tag| template::users(&config.base_dir, tag).map(|u| u.len()))
+            .map(|tag| template::users(&config.base_dir, tag, &TemplateTasks).map(|u| u.len()))
             .sum::<Result<usize>>()
             .map_or_else(|err| format!("? ({err:#})"), |n| n.to_string());
         let age = parse_timestamp(&record.created_at)

@@ -9,21 +9,9 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::git;
-
-/// A branch or ref name that is safe to hand to git as an argument: no leading `-`, no
-/// spaces or shell-ish characters, none of git's forbidden sequences.
-pub fn valid_ref_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with(['-', '/', '.'])
-        && !name.ends_with(['/', '.'])
-        && !name.ends_with(".lock")
-        && !name.contains("..")
-        && !name.contains("//")
-        && !name.contains("@{")
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
-}
+pub(crate) use crate::shared::files::open_file_in;
+pub use crate::shared::files::{AgentFile, read_file_in};
+pub use crate::shared::names::valid_ref_name;
 
 pub(super) fn check_ref(what: &str, name: &str) -> Result<()> {
     if !valid_ref_name(name) {
@@ -693,52 +681,6 @@ fn open_agent_file(workspace: &Path, name: &str) -> Result<Option<(std::fs::File
     open_file_in(workspace, BUNDLE_DIR, name)
 }
 
-/// [`open_agent_file`] for `<workspace>/<folder>/<name>`, `folder` being one plain name.
-fn open_file_in(
-    workspace: &Path,
-    folder_name: &str,
-    name: &str,
-) -> Result<Option<(std::fs::File, u64)>> {
-    use std::io::ErrorKind::NotFound;
-
-    let folder = workspace.join(folder_name);
-    let real_workspace = std::fs::canonicalize(workspace)
-        .with_context(|| format!("cannot read the workspace {}", workspace.display()))?;
-    let real_folder = match std::fs::canonicalize(&folder) {
-        Ok(path) => path,
-        Err(e) if e.kind() == NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("cannot read {}", folder.display())),
-    };
-    if real_folder != real_workspace.join(folder_name) {
-        bail!(
-            "the folder {} doesn't resolve to a folder inside the workspace; refusing to read it",
-            folder.display()
-        );
-    }
-    let path = real_folder.join(name);
-    let meta = match std::fs::symlink_metadata(&path) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
-    };
-    let not_plain = || {
-        anyhow::anyhow!(
-            "{} is not a plain file; refusing to read it",
-            path.display()
-        )
-    };
-    if !meta.file_type().is_file() {
-        return Err(not_plain());
-    }
-    let file =
-        std::fs::File::open(&path).with_context(|| format!("cannot read {}", path.display()))?;
-    let opened = file.metadata()?;
-    if !opened.is_file() {
-        return Err(not_plain());
-    }
-    Ok(Some((file, opened.len())))
-}
-
 /// What `write_agent_files` does when `.sbxm-task` is not a plain folder inside the workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Existing {
@@ -824,40 +766,10 @@ pub fn write_agent_files(
     Ok(())
 }
 
-/// What reading a file the agent wrote found.
-#[derive(Debug, PartialEq, Eq)]
-pub enum AgentFile {
-    Missing,
-    /// Bigger than the cap; not read.
-    TooLarge(u64),
-    Text(String),
-}
-
 /// Reads `<workspace>/.sbxm-task/<name>` as text (lossily), at most `cap` bytes; never follows
 /// a link out of the workspace.
 pub fn read_agent_file(workspace: &Path, name: &str, cap: u64) -> Result<AgentFile> {
     read_file_in(workspace, BUNDLE_DIR, name, cap)
-}
-
-/// [`read_agent_file`] for `<workspace>/<folder>/<name>`: the same link-free, size-capped read,
-/// e.g. of the Jev evaluator's `response.json` (decision 241).
-pub fn read_file_in(workspace: &Path, folder: &str, name: &str, cap: u64) -> Result<AgentFile> {
-    use std::io::Read;
-
-    let Some((file, len)) = open_file_in(workspace, folder, name)? else {
-        return Ok(AgentFile::Missing);
-    };
-    if len > cap {
-        return Ok(AgentFile::TooLarge(len));
-    }
-    let mut bytes = Vec::new();
-    file.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > cap {
-        return Ok(AgentFile::TooLarge(bytes.len() as u64));
-    }
-    Ok(AgentFile::Text(
-        String::from_utf8_lossy(&bytes).into_owned(),
-    ))
 }
 
 /// Brings the agent's commits on `branch` into `repo_git` from the bundle the sandbox wrote at

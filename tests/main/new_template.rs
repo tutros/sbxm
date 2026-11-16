@@ -38,6 +38,7 @@ fn build_template(env: &Env, backend: &FakeBackend) -> String {
         },
         backend,
         &sbxm::task::record::SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut out,
         &mut Vec::new(),
     )
@@ -715,6 +716,7 @@ fn build_warm_template(env: &Env, lock: &str) -> FakeBackend {
         },
         &backend,
         &sbxm::task::record::SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut Vec::new(),
         &mut Vec::new(),
     )
@@ -821,6 +823,7 @@ fn build_codex_template(env: &Env, backend: &FakeBackend) {
         },
         backend,
         &sbxm::task::record::SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut Vec::new(),
         &mut Vec::new(),
     )
@@ -1068,6 +1071,7 @@ fn only_a_strict_codex_sandbox_gets_deny_rules_and_the_check() {
             },
             &backend,
             &sbxm::task::record::SystemProbe,
+            &sbxm::task::TemplateTasks,
             &mut Vec::new(),
             &mut Vec::new(),
         )

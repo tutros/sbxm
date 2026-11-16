@@ -17,7 +17,7 @@ use crate::confirm::Confirm;
 use crate::eval::{human, score};
 use crate::run::config::RunConfig;
 use crate::run::{id, results};
-use crate::task::review::agent_label;
+use crate::shared::names::agent_label;
 
 /// The review folder's name inside the run's metadata folder.
 const REVIEW_DIR: &str = "review";

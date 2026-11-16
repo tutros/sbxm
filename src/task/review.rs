@@ -7,6 +7,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::github::{CommitStatus, GitHubBackend, StatusState};
+pub use crate::shared::names::agent_label;
 
 use super::findings;
 use super::record::OpenFinding;
@@ -395,12 +396,6 @@ fn titled_comment(title: &str, risk_section: &str, review: &str) -> String {
 /// The text saved as `review.md`: the reviewer's own words under a line naming who wrote them.
 pub fn with_header(harness: &str, model: Option<&str>, review: &str) -> String {
     format!("Reviewer: {}\n\n{review}", agent_label(harness, model))
-}
-
-/// How a worker or reviewer is named in output: `antigravity (gemini-3.8-flash-medium)`, or
-/// `claude (default model)` when the harness picks its own (issue 314).
-pub fn agent_label(harness: &str, model: Option<&str>) -> String {
-    format!("{harness} ({})", model.unwrap_or("default model"))
 }
 
 /// Past the [`with_header`] line (a file without it is read as it is).

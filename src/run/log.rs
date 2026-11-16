@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::run::results::format_timestamp;
-use crate::task::runlog::{LineSink, redact};
+use crate::shared::runlog::{LineSink, redact};
 
 /// Before the run folder exists: checking the config, the secrets and the profiles.
 pub const PREFLIGHT: &str = "preflight";

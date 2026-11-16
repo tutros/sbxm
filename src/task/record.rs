@@ -11,6 +11,9 @@ use sha2::{Digest, Sha256};
 
 use crate::backend::Location;
 use crate::run::results::format_timestamp;
+pub use crate::shared::gates::GateResult;
+pub use crate::shared::kind::Kind;
+pub use crate::shared::process::{Process, ProcessProbe, SystemProbe};
 
 pub const SCHEMA: u32 = 1;
 
@@ -20,32 +23,6 @@ pub const DEFAULT_FIX_ROUNDS: u32 = 3;
 
 fn default_fix_rounds() -> u32 {
     DEFAULT_FIX_ROUNDS
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Kind {
-    Issue,
-    Pr,
-    /// A task whose source is a file instead of a GitHub issue (decision 174(d), issue 142): the
-    /// id is given explicitly (`spec-<name>-<hash>`, see [`spec_id`]), never derived from
-    /// `number`, which is unused (always 0).
-    Spec,
-    /// A task that fixes the must-fix findings of a pull request's latest sbxm review on that
-    /// pull request's own branch (issue 313): `number` is the PR's, and the id names the head
-    /// the review covered ([`fix_id`]), so a fix of a later head is a task of its own.
-    Fix,
-}
-
-impl Kind {
-    fn prefix(self) -> &'static str {
-        match self {
-            Self::Issue => "issue",
-            Self::Pr => "pr",
-            Self::Spec => "spec",
-            Self::Fix => "fix",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,37 +162,6 @@ pub struct Stamp {
     pub at: String,
 }
 
-/// The `sbxm` process working on the task: its pid and when it started.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Process {
-    pub pid: u32,
-    pub started_at: String,
-}
-
-impl Process {
-    /// `started_secs`: the process's start time in seconds since the epoch.
-    pub fn new(pid: u32, started_secs: u64) -> Self {
-        Self {
-            pid,
-            started_at: format_timestamp(started_secs),
-        }
-    }
-
-    /// Whether this process is still running: its pid with the same start time, so a reused pid
-    /// doesn't count (decision 163).
-    pub fn alive(&self, probe: &dyn ProcessProbe) -> bool {
-        probe
-            .start_time(self.pid)
-            .is_some_and(|started| format_timestamp(started) == self.started_at)
-    }
-
-    /// This process, as the probe sees it.
-    pub fn current(probe: &dyn ProcessProbe) -> Self {
-        let pid = std::process::id();
-        Self::new(pid, probe.start_time(pid).unwrap_or(0))
-    }
-}
-
 /// The environment variable in which `task loop` gives a child it starts the loop's own process,
 /// as JSON (`{"pid": .., "started_at": ..}`, decision 322): `main` reads it once, into
 /// [`started_by_loop`].
@@ -240,29 +186,6 @@ pub fn in_loop() -> bool {
 /// The loop's process from [`LOOP_ENV`]'s value; `None` for anything else.
 pub fn parse_loop(value: &str) -> Option<Process> {
     serde_json::from_str(value).ok()
-}
-
-/// Looks a process up by pid (faked in tests).
-pub trait ProcessProbe: Send + Sync {
-    /// The start time (seconds since the epoch) of the process with this pid, if it exists.
-    fn start_time(&self, pid: u32) -> Option<u64>;
-}
-
-/// The real probe, over the operating system's process table.
-pub struct SystemProbe;
-
-impl ProcessProbe for SystemProbe {
-    fn start_time(&self, pid: u32) -> Option<u64> {
-        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-        let pid = Pid::from_u32(pid);
-        let mut system = System::new();
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&[pid]),
-            true,
-            ProcessRefreshKind::nothing(),
-        );
-        system.process(pid).map(sysinfo::Process::start_time)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,15 +232,6 @@ pub struct Agent {
     /// harness, or a session that couldn't be), and always on the reviewer's `Agent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GateResult {
-    pub phase: String,
-    pub tier: String,
-    pub command: String,
-    pub exit: Option<i32>,
-    pub passed: bool,
 }
 
 /// What the latest *passed* gate run covered: which tiers passed, on which commit of the task

@@ -31,6 +31,7 @@ fn build(
         options,
         backend,
         &SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut Vec::new(),
         &mut Vec::new(),
     )
@@ -305,6 +306,7 @@ fn a_cold_build_prints_its_tag() {
         &at_now(Harness::Codex),
         &sbx_046(),
         &SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut out,
         &mut Vec::new(),
     )
@@ -502,6 +504,7 @@ fn build_at(env: &Env, now: u64, backend: &FakeBackend) -> String {
         &options,
         backend,
         &SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut out,
         &mut Vec::new(),
     )
@@ -759,6 +762,7 @@ fn kit_warnings_are_shown() {
         &at_now(Harness::Claude),
         &backend,
         &SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut Vec::new(),
         &mut warn,
     )
@@ -811,6 +815,7 @@ fn build_with(env: &Env, probe: &Probe, backend: &FakeBackend) -> (anyhow::Resul
         &at_now(Harness::Claude),
         backend,
         probe,
+        &sbxm::task::TemplateTasks,
         &mut Vec::new(),
         &mut warn,
     );
@@ -979,6 +984,7 @@ fn a_lock_another_build_took_over_meanwhile_is_left_alone() {
         &at_now(Harness::Claude),
         &backend,
         &probe,
+        &sbxm::task::TemplateTasks,
         &mut Vec::new(),
         &mut Vec::new(),
     );
@@ -1054,6 +1060,7 @@ fn a_tag_saved_while_waiting_for_the_lock_is_refused() {
         &at_now(Harness::Claude),
         &backend,
         &probe,
+        &sbxm::task::TemplateTasks,
         &mut Vec::new(),
         &mut Vec::new(),
     );
@@ -1728,6 +1735,7 @@ fn traced_build(
         options,
         &backend,
         &SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut out,
         &mut warn,
     );

@@ -13,6 +13,7 @@ use crate::config::Profile;
 use crate::harness::Harness;
 use crate::kit;
 use crate::run::results::format_timestamp;
+use crate::shared::kind::Kind;
 
 /// The `sbx` version templates were tested with (spike S11); older is unsupported (decision 213).
 /// The global `min_sbx_version` stays for everything else.
@@ -113,11 +114,7 @@ pub enum User {
         harness: String,
     },
     /// A task whose worker or reviewer has the template.
-    Task {
-        id: String,
-        kind: crate::task::record::Kind,
-        number: u32,
-    },
+    Task { id: String, kind: Kind, number: u32 },
 }
 
 impl User {
@@ -125,7 +122,6 @@ impl User {
     /// so a sandbox always names it; a spec task's `task.json` records no spec path, so its file
     /// is a placeholder.
     pub fn remove_command(&self) -> String {
-        use crate::task::record::Kind;
         match self {
             Self::Sandbox {
                 project, harness, ..
@@ -154,9 +150,29 @@ impl std::fmt::Display for User {
     }
 }
 
+/// What the template side asks of `sbxm task` (issue 539): it never names `crate::task`, so the
+/// task side (`task::TemplateTasks`) is handed in by the command.
+pub trait Tasks {
+    /// Each task whose worker or reviewer records `tag` as its template (decision 205).
+    fn users(&self, base_dir: &Path, tag: &str) -> Result<Vec<User>>;
+
+    /// `[warm]` of `<repo>/sbxm-task.toml`, or `None` when there is no such file or table
+    /// (decision 207).
+    fn warm(&self, repo: &Path) -> Result<Option<Warm>>;
+}
+
+/// How `template build --warm` fills a template's caches from a repo (decision 207).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Warm {
+    /// Run in order with `sh -c` in the copied repo, each under the gate timeout.
+    pub commands: Vec<String>,
+    /// Paths from the repo's root, hashed into the template's record.
+    pub lock_files: Vec<String>,
+}
+
 /// Who still records `tag` as their template (decision 205): each `state.json` entry and each
-/// task whose worker or reviewer has it.
-pub fn users(base_dir: &Path, tag: &str) -> Result<Vec<User>> {
+/// task whose worker or reviewer has it ([`Tasks::users`]).
+pub fn users(base_dir: &Path, tag: &str, tasks: &dyn Tasks) -> Result<Vec<User>> {
     let mut users = Vec::new();
     for (project, state) in crate::state::load_all(base_dir)? {
         for (harness, sandbox) in &state.sandboxes {
@@ -169,19 +185,7 @@ pub fn users(base_dir: &Path, tag: &str) -> Result<Vec<User>> {
             }
         }
     }
-    for task in crate::task::record::load_all(base_dir)? {
-        let agents = [&task.worker, &task.reviewer];
-        if agents
-            .iter()
-            .any(|a| a.as_ref().and_then(|a| a.template.as_deref()) == Some(tag))
-        {
-            users.push(User::Task {
-                id: task.id,
-                kind: task.kind,
-                number: task.number,
-            });
-        }
-    }
+    users.extend(tasks.users(base_dir, tag)?);
     Ok(users)
 }
 

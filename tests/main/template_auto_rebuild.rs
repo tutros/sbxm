@@ -91,6 +91,7 @@ fn build_warm(env: &Env, backend: &FakeBackend, repo: &Path, harness: Harness, n
         },
         backend,
         &record::SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut out,
         &mut Vec::new(),
     )

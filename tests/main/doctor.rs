@@ -729,6 +729,7 @@ fn build_template(env: &Env, backend: &FakeBackend, at: u64) -> sbxm::template::
         },
         backend,
         &sbxm::task::record::SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut Vec::new(),
         &mut Vec::new(),
     )

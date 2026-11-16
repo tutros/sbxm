@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use crate::backend::SandboxBackend;
 use crate::config::{self, GlobalConfig};
 use crate::harness::Harness;
+use crate::task::TemplateTasks;
 use crate::template;
 
 #[derive(Debug, Default)]
@@ -48,7 +49,7 @@ pub fn run(
     };
     let tags: Vec<&String> = record.previous.iter().chain([&record.tag]).collect();
     for tag in &tags {
-        let users = template::users(&config.base_dir, tag)?;
+        let users = template::users(&config.base_dir, tag, &TemplateTasks)?;
         if !users.is_empty() {
             let names: Vec<String> = users.iter().map(ToString::to_string).collect();
             let commands: Vec<String> = users

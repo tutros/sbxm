@@ -5636,6 +5636,7 @@ impl Steps for TaskSteps<'_> {
             },
             self.backend,
             self.probe,
+            &crate::task::TemplateTasks,
             out,
             warn,
         )

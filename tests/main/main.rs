@@ -123,6 +123,7 @@ mod status_task_time;
 mod status_watch_redraw;
 mod stop;
 mod task_agent_dir;
+mod task_boundary;
 mod task_checkout;
 mod task_cloud;
 mod task_cloud_finish;

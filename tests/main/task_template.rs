@@ -121,6 +121,7 @@ fn build_template(env: &Env, backend: &FakeBackend) -> String {
         },
         backend,
         &sbxm::task::record::SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut out,
         &mut Vec::new(),
     )
@@ -248,6 +249,7 @@ fn build_warm(env: &Env, backend: &FakeBackend, repo: &Path, harness: Harness) -
         },
         backend,
         &sbxm::task::record::SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut out,
         &mut Vec::new(),
     )
@@ -497,6 +499,7 @@ fn a_strict_codex_worker_whose_kit_widens_is_removed() {
         },
         &backend,
         &sbxm::task::record::SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut Vec::new(),
         &mut Vec::new(),
     )
@@ -898,6 +901,7 @@ fn a_strict_reviewer_whose_template_differs_from_the_base_too_gets_it_rebuilt_fr
         },
         &backend,
         &sbxm::task::record::SystemProbe,
+        &sbxm::task::TemplateTasks,
         &mut out,
         &mut Vec::new(),
     )

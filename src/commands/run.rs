@@ -20,8 +20,8 @@ use crate::run::config::RunConfig;
 use crate::run::log::{self as run_log, RunFolderLog};
 use crate::run::orchestrate::{self, PairOutcome};
 use crate::run::{id, kits, preflight, results};
-use crate::task::review::agent_label;
-use crate::task::runlog::Tee;
+use crate::shared::names::agent_label;
+use crate::shared::runlog::Tee;
 
 #[derive(Debug)]
 pub struct Summary {

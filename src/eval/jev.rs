@@ -20,7 +20,7 @@ use crate::run::checks::timed_exec;
 use crate::run::config::{Criterion, CriterionKind, Jev, JevQuestion, QuestionKind, RunConfig};
 use crate::run::id::RunRoots;
 use crate::run::orchestrate::{PairOutcome, in_sandbox_path};
-use crate::task::repo::{AgentFile, read_file_in};
+use crate::shared::files::{AgentFile, read_file_in};
 
 /// The one host the evaluator sandbox can reach, and the one the secret is swapped for.
 pub const HOST: &str = "api.typesafe.ai";
