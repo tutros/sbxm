@@ -29,6 +29,7 @@ mod docs_cloud_ambiguous;
 mod docs_m4_status;
 mod docs_status;
 mod docs_status_2026_11_12;
+mod docs_status_m5_done;
 mod docs_trust_boundary;
 mod doctor;
 mod eval_cosine;

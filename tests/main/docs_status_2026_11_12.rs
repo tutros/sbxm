@@ -27,17 +27,14 @@ fn spike_line<'a>(spikes: &'a str, label: &str) -> &'a str {
 }
 
 #[test]
-fn the_project_state_is_dated_2026_11_12_and_names_milestone_5() {
+fn the_project_state_names_what_was_merged_by_2026_11_12() {
     let project = read("docs/project.md");
-    let state = section(&project, "## State (as of 2026-11-12)");
+    let state = section(&project, "## State (as of ");
 
-    assert!(state.contains("milestone 5 is in progress"));
-    assert!(state.contains("slices 1 and 2 merged as PRs #605 and #613"));
     assert!(state.contains("decision 316, #568"));
     assert!(state.contains("`[resources] cloud_slots`"));
     assert!(state.contains("labelled `run-cloud` to the cloud (#613)"));
     assert!(state.contains("(the last: `sdlc/retros/2026-11-11-retro.md`)"));
-    assert!(state.contains("milestone 5's remaining slices (#561"));
     assert!(!state.contains("toasts when the user is needed"));
 }
 
@@ -58,14 +55,4 @@ fn the_spikes_that_were_run_read_as_done() {
     assert!(spike_line(spikes, "S14").contains("`sdlc/spikes/S14.md`"));
     assert!(spike_line(spikes, "S16").contains("decision 270"));
     assert!(spike_line(spikes, "#199").contains("not run"));
-}
-
-#[test]
-fn agents_md_names_milestone_5_as_in_progress() {
-    let agents = read("AGENTS.md");
-    let status = section(&agents, "## Status");
-
-    assert!(status.contains("Milestones 1 to 4 are merged to `main`"));
-    assert!(status.contains("Milestone 5 (the loop runs local and cloud tasks at once"));
-    assert!(status.contains("is in progress"));
 }
