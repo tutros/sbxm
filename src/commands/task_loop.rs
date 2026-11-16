@@ -695,6 +695,8 @@ struct Adopted {
     /// Whether its process had ended, with its `outcome.json`, before this loop started (issue
     /// 657): the loop acts on that outcome at once.
     ended: bool,
+    /// Its issue's size, from its `size:` label as a fresh start reads it (issue 687).
+    size: Option<String>,
 }
 
 /// Whether the dead loop whose lock this loop took over owns `rec`: the loop its child recorded,
@@ -2008,6 +2010,7 @@ impl Loop<'_> {
                 title: rec.title,
                 process: rec.process,
                 ended: gone,
+                size: None,
             });
         }
         found.sort_by_key(|a| a.issue);
@@ -2032,6 +2035,46 @@ impl Loop<'_> {
             )?;
         }
         Ok(found)
+    }
+
+    /// Gives the cut-off tasks in `due` and the children in `adopted` their issues' sizes, from
+    /// the open issues' `size:` labels as a fresh start reads them (issue 687): one listing,
+    /// none when there are no such tasks. A listing that fails is one warning, and leaves them
+    /// unknown.
+    fn sizes(
+        &mut self,
+        due: &mut VecDeque<Held>,
+        adopted: &mut [Adopted],
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        if due.is_empty() && adopted.is_empty() {
+            return Ok(());
+        }
+        let open = match self.github.issues_open(&self.repo) {
+            Ok(open) => open,
+            Err(e) => {
+                return self.warn_once(
+                    warn,
+                    format!(
+                        "the open issues could not be listed ({e:#}); the sizes of the tasks the \
+                         loop took over from the loop that stopped are unknown"
+                    ),
+                );
+            }
+        };
+        let size = |issue: u32| {
+            open.iter()
+                .find(|i| i.number == issue)
+                .and_then(|i| queue::size(&i.labels))
+                .map(str::to_owned)
+        };
+        for h in due.iter_mut() {
+            h.size = size(h.issue);
+        }
+        for a in adopted {
+            a.size = size(a.issue);
+        }
+        Ok(())
     }
 
     /// Whether the end `ended` of task `issue`'s adopted child cut the task off: no outcome
@@ -4297,10 +4340,11 @@ fn run_loop(
     // The dead loop's children that ended with an outcome it never acted on (issue 657), read
     // first; then the cut-off tasks: their owed resumes are written before anything else can fail.
     let result = lp.ended_under(dead.as_ref(), warn).and_then(|ended| {
-        let due = lp.cut_off(dead.as_ref(), &ended, out, warn)?;
+        let mut due = lp.cut_off(dead.as_ref(), &ended, out, warn)?;
         // The children that outlived the dead loop, adopted (issue 643), and those that ended
         // with an outcome (issue 657).
-        let adopted = lp.adopt(dead.as_ref(), &ended, out)?;
+        let mut adopted = lp.adopt(dead.as_ref(), &ended, out)?;
+        lp.sizes(&mut due, &mut adopted, warn)?;
         for a in adopted.iter().filter(|a| !a.ended) {
             if let Some(process) = &a.process {
                 lp.steps.adopted(process);
@@ -4464,7 +4508,7 @@ fn work(
                         due.push_front(Held {
                             issue: a.issue,
                             title: a.title,
-                            size: None,
+                            size: a.size,
                             started: a.started,
                             stops: vec![("loop stopped".to_owned(), 0)],
                             retry: Retry::Resume { failures: 1 },
@@ -4489,7 +4533,7 @@ fn work(
                     warn,
                 )
             };
-            (a.issue, a.title, None, a.started, stops, ended, None)
+            (a.issue, a.title, a.size, a.started, stops, ended, None)
         } else {
             if (env.stop_requested)() {
                 writeln!(out, "stopped on request")?;
