@@ -62,6 +62,8 @@ Each slice's issue is readied with the user just in time (open points, boundary 
 5. Kill the loop mid-run; restart it: no task starts twice; interrupted ones resume once.
 6. Unset `cloud_slots`: the loop runs one task at a time, as before.
 
+**Results.** Steps 1, 2, 3, 5 and 6 passed on 2026-11-15/16 (binaries 932b6c3 and ed2a3a5). The first step-5 run found #676 (the trigger waited for orphaned children) and #680 (a restarted loop skipped ended tasks with a null recorded process), both fixed (PRs #683 and #681). Step 4 (`task loop --stop` during a run) passed on 2026-11-16. The record is the comments on #561.
+
 ## 7. Out of scope, and risks
 
 - Out of scope: a per-provider cap and a money cap (triggers in [317]); more than 2 cloud slots until measured; parallel local sandboxes on this machine.

@@ -1,5 +1,6 @@
 //! Issue #309: the status sections say what was merged by 2026-11-12, and the open-spikes list
-//! marks the spikes that were run as done.
+//! marks the spikes that were run as done. Issue #691: milestone 5 is done; `docs/project.md`, the `AGENTS.md`
+//! status and the plan's checklist say so (the last section).
 
 use std::fs;
 use std::path::PathBuf;
@@ -27,17 +28,14 @@ fn spike_line<'a>(spikes: &'a str, label: &str) -> &'a str {
 }
 
 #[test]
-fn the_project_state_is_dated_2026_11_12_and_names_milestone_5() {
+fn the_project_state_names_what_was_merged_by_2026_11_12() {
     let project = read("docs/project.md");
-    let state = section(&project, "## State (as of 2026-11-12)");
+    let state = section(&project, "## State (as of ");
 
-    assert!(state.contains("milestone 5 is in progress"));
-    assert!(state.contains("slices 1 and 2 merged as PRs #605 and #613"));
     assert!(state.contains("decision 316, #568"));
     assert!(state.contains("`[resources] cloud_slots`"));
     assert!(state.contains("labelled `run-cloud` to the cloud (#613)"));
     assert!(state.contains("(the last: `sdlc/retros/2026-11-11-retro.md`)"));
-    assert!(state.contains("milestone 5's remaining slices (#561"));
     assert!(!state.contains("toasts when the user is needed"));
 }
 
@@ -60,12 +58,40 @@ fn the_spikes_that_were_run_read_as_done() {
     assert!(spike_line(spikes, "#199").contains("not run"));
 }
 
+// Issue #691: milestone 5 is done.
+
 #[test]
-fn agents_md_names_milestone_5_as_in_progress() {
+fn docs_status_2026_11_12_m5_done_the_project_state_names_milestone_5_as_merged() {
+    let project = read("docs/project.md");
+    let state = section(&project, "## State (as of 2026-11-16)");
+
+    assert!(state.contains(
+        "4 (cloud sandboxes, PR #322) and 5 (the loop runs local and cloud tasks at once"
+    ));
+    assert!(state.contains("`sandbox_slots`, `cloud_slots`, children, adoption on restart"));
+    assert!(!state.contains("milestone 5 is in progress"));
+    assert!(!state.contains("milestone 5's remaining slices"));
+}
+
+#[test]
+fn docs_status_2026_11_12_m5_done_agents_md_names_milestones_1_to_5_as_merged() {
     let agents = read("AGENTS.md");
     let status = section(&agents, "## Status");
 
-    assert!(status.contains("Milestones 1 to 4 are merged to `main`"));
-    assert!(status.contains("Milestone 5 (the loop runs local and cloud tasks at once"));
-    assert!(status.contains("is in progress"));
+    assert!(status.contains("Milestones 1 to 5 are merged to `main`"));
+    assert!(status.contains("M5 the loop runs local and cloud tasks at once)"));
+    assert!(!status.contains("is in progress"));
+    assert!(status.contains("`docs/project.md`") && status.contains("#405"));
+}
+
+#[test]
+fn docs_status_2026_11_12_m5_done_the_checklist_records_its_results() {
+    let plan = read("sdlc/milestone-5.md");
+    let checklist = section(&plan, "## 6. Manual end-to-end checklist");
+
+    assert!(checklist.contains("**Results.** Steps 1, 2, 3, 5 and 6 passed"));
+    for name in ["932b6c3", "ed2a3a5", "#676", "#680", "#683", "#681", "#561"] {
+        assert!(checklist.contains(name), "the results miss {name}");
+    }
+    assert!(checklist.contains("Step 4 (`task loop --stop` during a run) passed on 2026-11-16"));
 }
