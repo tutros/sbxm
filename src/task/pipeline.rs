@@ -1746,8 +1746,19 @@ fn prepare_source_with(
                 let log = |line: &str| runlog::task_line(&meta, line);
                 let _ = ctx.backend.remove(&sandbox, Some(&log));
                 let _ = fs::remove_dir_all(&workspace);
+                let mut warnings = Vec::new();
+                let archived = archive_failed(&global.base_dir, id, &mut warnings);
                 let _ = fs::remove_dir_all(&meta);
-                return Err(e);
+                if archived.is_none() && warnings.is_empty() {
+                    return Err(e);
+                }
+                return Err(e.context(FailedAfterCreate {
+                    id: id.to_owned(),
+                    events: Vec::new(),
+                    kept: None,
+                    warnings,
+                    archived,
+                }));
             }
             // A cloud start removes only the sandbox it owns, the one whose `create` returned
             // (review M-1 of slice 1; decision 268), and has no host clone, so a
@@ -1764,11 +1775,17 @@ fn prepare_source_with(
                     .as_ref()
                     .and_then(Record::ambiguous_create)
                     .map(|name| lifetime::ambiguous_create(name, lifetime::FORGET_BY_RM));
+                let mut archived = None;
                 if kept.is_none() {
+                    archived = archive_failed(&global.base_dir, id, &mut cleanup_warnings);
                     let _ = fs::remove_dir_all(&meta);
                 }
                 // A create that failed took its secrets back: what that said still shows.
-                if events.is_empty() && cleanup_warnings.is_empty() && kept.is_none() {
+                if events.is_empty()
+                    && cleanup_warnings.is_empty()
+                    && kept.is_none()
+                    && archived.is_none()
+                {
                     return Err(e);
                 }
                 return Err(e.context(FailedAfterCreate {
@@ -1776,6 +1793,7 @@ fn prepare_source_with(
                     events,
                     kept,
                     warnings: cleanup_warnings,
+                    archived,
                 }));
             };
             let stopped =
@@ -1795,6 +1813,7 @@ fn prepare_source_with(
                     lifetime::Released::Warning(warning) => warnings.push(warning),
                 }
             }
+            let mut archived = None;
             if warm_up::failed(&e) {
                 // Issue 560, review M-1: a failed warm-up keeps the task, `prepared/failed`, so
                 // `run.log` gets the step's output and `task resume` makes the sandbox afresh.
@@ -1812,6 +1831,7 @@ fn prepare_source_with(
                     ));
                 }
             } else if kept.is_none() {
+                archived = archive_failed(&global.base_dir, id, &mut warnings);
                 let _ = fs::remove_dir_all(&meta);
             }
             Err(e.context(FailedAfterCreate {
@@ -1819,14 +1839,36 @@ fn prepare_source_with(
                 events,
                 kept,
                 warnings,
+                archived,
             }))
+        }
+    }
+}
+
+/// Archives the text records of `id`'s folder before a failed preparation's rollback deletes it
+/// (issue 682), unless the start is a `--restart`'s: the old task is set aside then
+/// ([`finish::has_leftover`]) and goes back in place of the failed one (decision 185), so nothing
+/// is archived as failed. A failure to archive is one line in `warnings`, never the start's error.
+fn archive_failed(base_dir: &Path, id: &str, warnings: &mut Vec<String>) -> Option<PathBuf> {
+    if finish::has_leftover(base_dir, id) {
+        return None;
+    }
+    match super::merged::archive_failed(base_dir, id, now()) {
+        Ok(archived) => archived,
+        Err(e) => {
+            warnings.push(format!(
+                "the failed start's log and records couldn't be archived under {}: {e:#}",
+                super::merged::archive_root(base_dir).display()
+            ));
+            None
         }
     }
 }
 
 /// A start that failed after its first changing cloud call, a scoped secret's set or the
 /// sandbox's create (milestone 4 slice 3, review M-1; slice 4): the context on the failure
-/// itself, carrying what the screen, and so `run.log`, still has to show (decision 265).
+/// itself, carrying what the screen, and so `run.log`, still has to show (decision 265); also a
+/// local start's, once its folder's records were archived or couldn't be (issue 682).
 /// `task_start::run_spec_from` and the issue start read it back with `downcast_ref`.
 #[derive(Debug)]
 pub struct FailedAfterCreate {
@@ -1844,6 +1886,10 @@ pub struct FailedAfterCreate {
     /// warning each, never dropped. The folder doesn't stay for them: `task.json` records no
     /// secret, the cloud's list does.
     pub warnings: Vec<String>,
+    /// Where the text records of a new task's folder were archived before the folder went
+    /// (issue 682), named in the error; `None` when the folder stays, held no record yet, or
+    /// couldn't be archived (one of `warnings` then says why).
+    pub archived: Option<PathBuf>,
 }
 
 impl std::fmt::Display for FailedAfterCreate {
@@ -1855,9 +1901,13 @@ impl std::fmt::Display for FailedAfterCreate {
                 f,
                 "the start failed, and {why}; the task {} keeps its record of the sandbox",
                 self.id
-            ),
-            None => f.write_str("the start failed"),
+            )?,
+            None => f.write_str("the start failed")?,
         }
+        if let Some(archive) = &self.archived {
+            write!(f, "; its log and records are kept in {}", archive.display())?;
+        }
+        Ok(())
     }
 }
 

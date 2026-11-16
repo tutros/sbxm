@@ -600,25 +600,86 @@ pub fn archive_task(base_dir: &Path, id: &str) -> Result<PathBuf> {
         return Ok(archive);
     }
     fs::create_dir(&archive).with_context(|| format!("cannot create {}", archive.display()))?;
-    for name in archive_names(&meta) {
+    // A copy that fails leaves the archive half-written, which a rerun passes over (it differs
+    // from the task's records): the error names it, so the user can clear it.
+    copy_records(&meta, &archive).with_context(|| {
+        format!(
+            "{} is incomplete; move or delete it, then run `sbxm task rm` again",
+            archive.display()
+        )
+    })?;
+    Ok(archive)
+}
+
+/// Copies `meta`'s text records ([`archive_names`]) into the folder `archive`: only plain files
+/// that exist, never a link.
+fn copy_records(meta: &Path, archive: &Path) -> Result<()> {
+    for name in archive_names(meta) {
         let src = meta.join(&name);
         let plain = fs::symlink_metadata(&src).is_ok_and(|m| m.file_type().is_file());
         if !plain {
             continue;
         }
         let dest = archive.join(&name);
-        // A copy that fails leaves the archive half-written, which a rerun passes over (it
-        // differs from the task's records): the error names it, so the user can clear it.
         fs::copy(&src, &dest)
-            .with_context(|| format!("cannot archive {} to {}", src.display(), dest.display()))
-            .with_context(|| {
-                format!(
-                    "{} is incomplete; move or delete it, then run `sbxm task rm` again",
-                    archive.display()
-                )
-            })?;
+            .with_context(|| format!("cannot archive {} to {}", src.display(), dest.display()))?;
     }
-    Ok(archive)
+    Ok(())
+}
+
+/// Copies the text records of `id`, a new task whose preparation failed, before the rollback
+/// deletes its folder (issue 682): to `.sbxm/task-archive/<id>-failed-<UTC yyyyMMdd-HHmmss>` for
+/// the time `at`, or that name with `-2`, `-3`, ... after it when one exists in any form, so a
+/// later failure of the same task never writes to an earlier one's archive. Refuses as
+/// [`archive_task`] does (a task folder, `.sbxm` or `.sbxm/task-archive` that is a link or isn't
+/// really under `base_dir`). `None`, writing nothing, when the folder holds no record yet (a
+/// clone or kit that failed before the first one was written).
+pub fn archive_failed(base_dir: &Path, id: &str, at: u64) -> Result<Option<PathBuf>> {
+    let meta = record::task_dir(base_dir, id);
+    finish::check_own_folder(base_dir, &meta)?;
+    let has_records = archive_names(&meta)
+        .iter()
+        .any(|name| fs::symlink_metadata(meta.join(name)).is_ok_and(|m| m.file_type().is_file()));
+    if !has_records {
+        return Ok(None);
+    }
+    let sbxm = base_dir.join(".sbxm");
+    own_folder_or_create(base_dir, &sbxm)?;
+    let root = archive_root(base_dir);
+    own_folder_or_create(base_dir, &root)?;
+    // `2026-09-30T14:13:20Z` becomes `20260930-141320`.
+    let stamp: String = crate::run::results::format_timestamp(at)
+        .chars()
+        .filter_map(|c| match c {
+            'T' => Some('-'),
+            '-' | ':' | 'Z' => None,
+            c => Some(c),
+        })
+        .collect();
+    let name = format!("{id}-failed-{stamp}");
+    for n in 1u32.. {
+        let archive = if n == 1 {
+            root.join(&name)
+        } else {
+            root.join(format!("{name}-{n}"))
+        };
+        // `create_dir` fails if anything is there already, link or file included.
+        match fs::create_dir(&archive) {
+            Ok(()) => {
+                copy_records(&meta, &archive)
+                    .with_context(|| format!("{} is incomplete", archive.display()))?;
+                return Ok(Some(archive));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("cannot create {}", archive.display()));
+            }
+        }
+    }
+    bail!(
+        "no free archive folder for task {id} under {}",
+        root.display()
+    )
 }
 
 /// Whether `archive` is a plain folder of `base_dir` (never followed if it is a link) holding

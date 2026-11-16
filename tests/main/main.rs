@@ -137,6 +137,7 @@ mod task_config;
 mod task_crate_handback;
 mod task_dispatch_errors;
 mod task_facts;
+mod task_failed_prepare_archive;
 mod task_findings_cli;
 mod task_findings_create;
 mod task_findings_dry_run;
