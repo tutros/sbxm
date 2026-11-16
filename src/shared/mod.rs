@@ -5,5 +5,7 @@
 //! re-export what moved here, so task code keeps its paths.
 
 pub mod files;
+pub mod lock;
 pub mod names;
+pub mod process;
 pub mod runlog;

@@ -13,9 +13,9 @@ use crate::harness::Harness;
 use crate::run::checks::timed_exec;
 use crate::run::orchestrate::in_sandbox_path;
 use crate::run::results::format_timestamp;
+use crate::shared::process::{Process, ProcessProbe};
 use crate::task::config::DEFAULT_GATE_TIMEOUT;
 use crate::task::gates::{self, CARGO_ENV};
-use crate::task::record::{Process, ProcessProbe};
 use crate::template;
 use crate::{disk, kit, seed, task};
 

@@ -39,8 +39,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::GlobalConfig;
 use crate::run::results::{format_timestamp, now};
-use crate::task::lock;
-use crate::task::record::{Process, ProcessProbe, SystemProbe};
+use crate::shared::lock;
+use crate::shared::process::{Process, ProcessProbe, SystemProbe};
 
 /// How often a waiting command looks at the slots again.
 pub const POLL: Duration = Duration::from_secs(5);
