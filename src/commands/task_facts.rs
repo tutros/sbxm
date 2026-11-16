@@ -40,7 +40,8 @@ struct Row {
     /// The issue an issue task works on; `None` for any other kind.
     issue: Option<u32>,
     started: String,
-    /// From the `size:` label in the `issue.md` a live issue task saved (the archive keeps none).
+    /// From the `size:` label in the `issue.md` an issue task saved, live or archived (an archive
+    /// made before issue 698 keeps none).
     size: Option<&'static str>,
     review_rounds: usize,
     /// Each saved review round's must-fix count, in order; `None` for one without a readable count.
@@ -98,11 +99,7 @@ pub fn run(
     let mut rows = Vec::new();
     let live = folders(&base_dir, &record::tasks_root(&base_dir), warn)?;
     let archived = folders(&base_dir, &merged::archive_root(&base_dir), warn)?;
-    let folders = live
-        .into_iter()
-        .map(|dir| (dir, true))
-        .chain(archived.into_iter().map(|dir| (dir, false)));
-    for (dir, live) in folders {
+    for dir in live.into_iter().chain(archived) {
         let path = dir.join("task.json");
         match fs::symlink_metadata(&path) {
             Ok(m) if m.file_type().is_file() => {}
@@ -142,7 +139,7 @@ pub fn run(
         if !seen.insert((task.id.clone(), started.clone())) {
             continue;
         }
-        rows.push(row(&task, &dir, live, started));
+        rows.push(row(&task, &dir, started));
     }
     rows.sort_by(|a, b| (&a.started, &a.task).cmp(&(&b.started, &b.task)));
 
@@ -221,7 +218,7 @@ fn read(path: &Path) -> Result<Record, String> {
     serde_json::from_str(&text).map_err(|e| format!("not a task record ({e})"))
 }
 
-fn row(task: &Record, dir: &Path, live: bool, started: String) -> Row {
+fn row(task: &Record, dir: &Path, started: String) -> Row {
     let must_fix: Vec<Option<u32>> = review::saved_rounds(dir)
         .into_iter()
         .map(|r| dir.join(format!("review-{r}.md")))
@@ -242,7 +239,7 @@ fn row(task: &Record, dir: &Path, live: bool, started: String) -> Row {
     Row {
         task: task.id.clone(),
         issue: (task.kind == Kind::Issue).then_some(task.number),
-        size: if live && task.kind == Kind::Issue {
+        size: if task.kind == Kind::Issue {
             size(dir)
         } else {
             None
