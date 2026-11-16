@@ -120,6 +120,11 @@ pub fn file_tail(path: &Path, lines: usize) -> String {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         return format!("no {name}");
     };
+    text_tail(&text, lines)
+}
+
+/// The last `lines` lines of `text`, for a failure message (issue 693).
+pub fn text_tail(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
     all[all.len().saturating_sub(lines)..].join("\n")
 }
