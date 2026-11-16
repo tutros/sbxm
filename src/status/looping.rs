@@ -623,6 +623,19 @@ fn task_prs(base: &Path, repo: &str) -> anyhow::Result<Vec<(u32, Level)>> {
         .collect())
 }
 
+/// The issues with a task record under `base`, any stage (issue 688): the queue leaves them out,
+/// since the task table and the `task:` and `open task PRs:` lines show them already. Records
+/// that can't be read leave none out, so the queue shows each issue as before, with the loop's
+/// own check saying why it can't tell.
+fn with_task(base: &Path) -> Vec<u32> {
+    record::load_all(base)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|rec| rec.kind == Kind::Issue)
+        .map(|rec| rec.number)
+        .collect()
+}
+
 fn first_line(error: &anyhow::Error) -> String {
     format!("{error:#}")
         .lines()
@@ -666,10 +679,16 @@ pub fn fetch_checking(
         .flatten()
         .map(|i| (i.number, i.title.clone()))
         .collect();
+    let tasked = with_task(base);
+    let queued = |open: &[crate::github::Issue]| -> Vec<u32> {
+        let mut order = queue::queue_order(open);
+        order.retain(|n| !tasked.contains(n));
+        order
+    };
     let blocked = open
         .as_ref()
         .map(|open| {
-            let checked = listed.map_or_else(|| queue::queue_order(open), <[u32]>::to_vec);
+            let checked = listed.map_or_else(|| queued(open), <[u32]>::to_vec);
             checked
                 .into_iter()
                 .filter_map(|n| {
@@ -690,7 +709,7 @@ pub fn fetch_checking(
         })
         .unwrap_or_default();
     let queue = open.map(|open| {
-        queue::queue_order(&open)
+        queued(&open)
             .into_iter()
             .filter_map(|n| open.iter().find(|i| i.number == n))
             .map(|i| QueueItem {
