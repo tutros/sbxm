@@ -493,10 +493,12 @@ pub fn archive_line(archive: &Path) -> String {
 }
 
 /// The names of a task's text records worth archiving (decision 195 point 2): `review.md`, every
-/// `review-<n>.md`, `result.md`, `run.log`, `gates.log` and `task.json`. Never transcripts, clones
-/// or `repo.git`: those stay with whatever else `task rm` deletes.
+/// `review-<n>.md`, `result.md`, `run.log`, `gates.log` and `task.json`, plus `issue.md` (issue
+/// 698: the GitHub text an issue, PR or fix task saved, where `task facts` reads the size). Never
+/// transcripts, clones or `repo.git`: those stay with whatever else `task rm` deletes.
 fn archive_names(meta: &Path) -> Vec<String> {
     let mut names = vec![
+        "issue.md".to_owned(),
         "review.md".to_owned(),
         "result.md".to_owned(),
         "run.log".to_owned(),
