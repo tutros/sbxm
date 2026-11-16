@@ -452,6 +452,98 @@ mod not_run {
     }
 }
 
+// --- Issue 695: the checks no review sandbox can run don't hold auto-merge ---
+
+mod out_of_reach {
+    use super::*;
+    use sbxm::task::review;
+
+    /// A low-risk review whose not-run list is the one `## Not run` in `sections` gives.
+    fn low_from(sections: &str) -> Review {
+        let text = format!("Must-fix findings: 0\n\nRisk: low\n\n{sections}");
+        let not_run = review::not_run(&text).map(|checks| {
+            let checks: Vec<&'static str> = checks
+                .into_iter()
+                .map(|c| &*Box::leak(c.into_boxed_str()))
+                .collect();
+            &*Box::leak(checks.into_boxed_slice())
+        });
+        Review {
+            not_run,
+            ..LOW_CLEAN
+        }
+    }
+
+    fn go(review: Review) -> (Run, Vec<GhCall>, String) {
+        let f = fixture();
+        let gh = github(&[3]).with_pr(pr(103, PrState::Open, REVIEWED));
+        let script = Script::new(&f.base(), review);
+        let run = run_loop(&f, &f.opts(None), &script, &gh);
+        let log = f.log_text();
+        (run, arms(&gh), log)
+    }
+
+    #[test]
+    fn none_not_run_and_one_check_out_of_reach_is_armed() {
+        let (run, arms, _) = go(low_from(
+            "## Not run\n\n- none\n\n## Out of reach\n\n- GitHub smoke: no GitHub access\n",
+        ));
+        run.result.unwrap();
+        assert_eq!(
+            arms,
+            [GhCall::PrArmAutoMerge(REPO.into(), 103, REVIEWED.into())]
+        );
+    }
+
+    #[test]
+    fn one_check_not_run_and_none_out_of_reach_is_not_armed() {
+        let (run, arms, log) = go(low_from(
+            "## Not run\n\n- Pester tests: no pwsh\n\n## Out of reach\n\n- none\n",
+        ));
+        run.result.unwrap();
+        assert!(arms.is_empty(), "{}", run.out);
+        assert!(
+            run.out
+                .contains("awaits you: auto-merge not armed: 1 check not run"),
+            "{}",
+            run.out
+        );
+        assert!(log.contains("not armed: 1 check not run"), "{log}");
+    }
+
+    #[test]
+    fn out_of_reach_without_a_not_run_section_is_not_armed() {
+        let (run, arms, log) = go(low_from(
+            "## Out of reach\n\n- GitHub smoke: no GitHub access\n",
+        ));
+        run.result.unwrap();
+        assert!(arms.is_empty(), "{}", run.out);
+        assert!(
+            run.out
+                .contains("awaits you: auto-merge not armed: not-run list unknown"),
+            "{}",
+            run.out
+        );
+        assert!(log.contains("not armed: not-run list unknown"), "{log}");
+    }
+
+    #[test]
+    fn out_of_reach_bullets_are_neither_counted_nor_named() {
+        let (run, arms, log) = go(low_from(
+            "## Not run\n\n- Pester tests: no pwsh\n\n## Out of reach\n\n\
+             - GitHub smoke: no GitHub access\n- sbx smoke: no sbx here\n",
+        ));
+        run.result.unwrap();
+        assert!(arms.is_empty(), "{}", run.out);
+        assert!(log.contains("not armed: 1 check not run"), "{log}");
+        for text in [&run.out, &run.warn, &log] {
+            assert!(!text.contains("GitHub smoke"), "{text}");
+            assert!(!text.contains("sbx smoke"), "{text}");
+            assert!(!text.contains("3 checks"), "{text}");
+        }
+    }
+}
+
 #[test]
 fn a_medium_or_high_risk_pr_waits_for_the_user_and_counts_toward_the_cap() {
     for risk in [Level::Medium, Level::High] {
