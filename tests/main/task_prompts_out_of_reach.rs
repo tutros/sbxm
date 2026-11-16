@@ -30,10 +30,12 @@ fn every_reviewer_prompt_names_both_sections() {
 #[test]
 fn the_out_of_reach_section_comes_after_not_run() {
     for role in REVIEWERS {
-        let lf = prompts::template(role, &Prompts::default()).unwrap().text;
+        // A Windows checkout embeds the prompt with CRLF: make it LF first, so the CRLF copy
+        // isn't CR-CR-LF, then find the headings as whole lines in both copies.
+        let text = prompts::template(role, &Prompts::default()).unwrap().text;
+        let lf = text.replace("\r\n", "\n");
         let crlf = lf.replace('\n', "\r\n");
         for text in [lf, crlf] {
-            // Whole lines, not `\n## Not run\n`: a Windows checkout embeds the prompt with CRLF.
             let heading = |name: &str| text.lines().position(|line| line == name);
             let not_run = heading("## Not run").expect("a Not run heading");
             let out_of_reach = heading("## Out of reach").expect("an Out of reach heading");
