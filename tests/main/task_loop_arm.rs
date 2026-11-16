@@ -452,7 +452,7 @@ mod not_run {
     }
 }
 
-// --- Issue 695: the checks no review sandbox can run don't hold auto-merge ---
+// --- Issue 695: unnamed checks no review sandbox can run don't hold auto-merge ---
 
 mod out_of_reach {
     use super::*;

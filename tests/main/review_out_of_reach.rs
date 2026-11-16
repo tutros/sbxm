@@ -1,5 +1,5 @@
-//! Issue 695: a review's `## Out of reach` section, the checks its sandbox can never run, is not
-//! part of the `## Not run` list the loop reads.
+//! Issue 695: a review's `## Out of reach` section, the checks its sandbox can never run that
+//! neither the repository nor the task names, is not part of the `## Not run` list the loop reads.
 
 use sbxm::task::review::not_run;
 
