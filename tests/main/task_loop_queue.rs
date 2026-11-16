@@ -99,14 +99,14 @@ fn a_new_log_gets_its_header_then_the_row() {
     assert!(
         text.contains(
             "| # | Issue | Size | Slot | Started | Ready (time to ready) | Worker / reviewer s | Rounds \
-             (must-fix) | Outcome | Stops (cause, duration) | Idle before | User interventions |"
+             (must-fix) | Outcome | Stops (cause, duration) | Idle before |"
         ),
         "{text}"
     );
     assert!(
         text.contains(
             "| 1 | #291 Fix \\| it | S | - | 14:59:18 | 15:08:33 (9m15s) | 261 / 197 | 1 (0) | PR #293, \
-             clean | disk, 2m00s | 3m10s | unknown |"
+             clean | disk, 2m00s | 3m10s |"
         ),
         "{text}"
     );
@@ -148,8 +148,7 @@ fn a_task_that_never_got_ready_shows_dashes_and_no_stops_shows_none() {
     let text = fs::read_to_string(&path).unwrap();
     assert!(
         text.contains(
-            "| 1 | #5 Fix \\| it | unknown | - | 14:59:18 | - | - | - | parked at working | none | - | \
-             unknown |"
+            "| 1 | #5 Fix \\| it | unknown | - | 14:59:18 | - | - | - | parked at working | none | - |"
         ),
         "{text}"
     );

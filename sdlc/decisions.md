@@ -123,6 +123,10 @@ Decision 323: `sdlc/decisions/` (issue #266's real check; replaces decision 231)
 
 Decisions 325-327: `sdlc/decisions/` (`sdlc/retros/2026-11-14-retro.md`).
 
+## Round 24: the 2026-11-16 retro (2026-11-16)
+
+Decisions 328-329: `sdlc/decisions/` (`sdlc/retros/2026-11-16-retro.md`); decision 326 extended.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
