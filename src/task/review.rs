@@ -722,6 +722,22 @@ pub fn saved_rounds(meta: &Path) -> Vec<u32> {
     rounds
 }
 
+/// The [`saved_must_fix_count`] of each [`saved_rounds`] file in `meta`, in order: `None` for a
+/// round whose count can't be read. A `review-<round>.md` that isn't a plain file (a link) is
+/// left out (issue 593), as `sbxm task facts` and the loop log read them (issue 697).
+pub fn saved_must_fix(meta: &Path) -> Vec<Option<u32>> {
+    saved_rounds(meta)
+        .into_iter()
+        .map(|r| meta.join(format!("review-{r}.md")))
+        .filter(|path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file()))
+        .map(|path| {
+            fs::read_to_string(path)
+                .ok()
+                .and_then(|text| saved_must_fix_count(&text))
+        })
+        .collect()
+}
+
 /// [`open_from_saved`] over the `review-<round>.md` files a task saved in its folder `meta`, up
 /// to round `last`.
 pub fn open_from_task_dir(meta: &Path, last: u32) -> Vec<OpenFinding> {

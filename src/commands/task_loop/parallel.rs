@@ -39,7 +39,7 @@ use crate::harness::Harness;
 use crate::task::outcome;
 use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Process, Stage};
-use crate::task::{jobs, location, lock};
+use crate::task::{jobs, location, lock, review};
 
 /// How often the running children are looked at.
 pub const TICK: Duration = Duration::from_secs(2);
@@ -1119,10 +1119,7 @@ fn task_ended(
                 .as_ref()
                 .and_then(|r| r.review.as_ref())
                 .map(|r| r.round),
-            must_fix: rec
-                .as_ref()
-                .and_then(|r| r.review.as_ref())
-                .map(|r| r.must_fix),
+            must_fix: review::saved_must_fix(&lp.task_dir(issue)),
             outcome,
             stops: t.stops.clone(),
             idle_before: t.idle_before,

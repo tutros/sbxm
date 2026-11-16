@@ -57,7 +57,7 @@ use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
 use crate::task::{
     findings, finish, location, lock, loop_log, medium, next, pipeline, pr_fix, real_check, resume,
-    select, trial, window,
+    review, select, trial, window,
 };
 
 mod check;
@@ -1844,7 +1844,7 @@ impl Loop<'_> {
                             worker_s: None,
                             reviewer_s: None,
                             rounds: None,
-                            must_fix: None,
+                            must_fix: Vec::new(),
                             outcome: format!("parked at {stage}: cut off again after its resume"),
                             stops: Vec::new(),
                             idle_before: None,
@@ -2833,7 +2833,9 @@ impl Loop<'_> {
             worker_s: fix.as_ref().and_then(|r| duration(r.worker.as_ref())),
             reviewer_s: fix.as_ref().and_then(|r| duration(r.reviewer.as_ref())),
             rounds: review.as_ref().map(|r| r.round),
-            must_fix: review.as_ref().map(|r| r.must_fix),
+            must_fix: record::fix_id(number, head).map_or_else(Vec::new, |id| {
+                review::saved_must_fix(&record::task_dir(&self.base_dir, &id))
+            }),
             outcome: outcome.clone(),
             stops: Vec::new(),
             idle_before: None,
@@ -3543,7 +3545,7 @@ impl Loop<'_> {
                     worker_s: None,
                     reviewer_s: None,
                     rounds: None,
-                    must_fix: None,
+                    must_fix: Vec::new(),
                     outcome: if disarmed {
                         "auto-merge disarmed; awaits you"
                     } else {
@@ -3716,7 +3718,7 @@ impl Loop<'_> {
             worker_s: fix.as_ref().and_then(|r| duration(r.worker.as_ref())),
             reviewer_s: fix.as_ref().and_then(|r| duration(r.reviewer.as_ref())),
             rounds: review.as_ref().map(|r| r.round),
-            must_fix: review.as_ref().map(|r| r.must_fix),
+            must_fix: dir.as_deref().map_or_else(Vec::new, review::saved_must_fix),
             outcome,
             stops: Vec::new(),
             idle_before: None,
@@ -4707,7 +4709,7 @@ fn work(
                         worker_s: None,
                         reviewer_s: None,
                         rounds: None,
-                        must_fix: None,
+                        must_fix: Vec::new(),
                         outcome: format!("stopped at {stage}: sign-in"),
                         stops,
                         idle_before: idle_from.map(|end| started.saturating_sub(end)),
@@ -4738,7 +4740,7 @@ fn work(
                         worker_s: None,
                         reviewer_s: None,
                         rounds: None,
-                        must_fix: None,
+                        must_fix: Vec::new(),
                         outcome: format!("stopped at {stage}: usage limit"),
                         stops,
                         idle_before: idle_from.map(|end| started.saturating_sub(end)),
@@ -4815,10 +4817,7 @@ fn work(
                 .as_ref()
                 .and_then(|r| r.review.as_ref())
                 .map(|r| r.round),
-            must_fix: rec
-                .as_ref()
-                .and_then(|r| r.review.as_ref())
-                .map(|r| r.must_fix),
+            must_fix: review::saved_must_fix(&lp.task_dir(issue)),
             outcome: outcome.clone(),
             stops,
             idle_before: idle_from.map(|end| started.saturating_sub(end)),

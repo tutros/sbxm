@@ -320,6 +320,14 @@ fn write_record(base: &Path, issue: u32, stage: Stage, must_fix: Option<u32>, pr
         rec.pr = Some(format!("https://github.com/{REPO}/pull/{pr}"));
     }
     record::write(&dir, &rec).unwrap();
+    // As a real task saves its round's review, which the log row reads (issue 697).
+    if let Some(must_fix) = must_fix {
+        fs::write(
+            dir.join("review-1.md"),
+            format!("Reviewer: claude\n\nMust-fix findings: {must_fix}\n"),
+        )
+        .unwrap();
+    }
 }
 
 struct Fixture {

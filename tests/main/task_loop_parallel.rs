@@ -20,7 +20,7 @@ fn row(issue: u32, slot: Option<Location>) -> Row {
         worker_s: None,
         reviewer_s: None,
         rounds: None,
-        must_fix: None,
+        must_fix: Vec::new(),
         outcome: "parked at working".into(),
         stops: Vec::new(),
         idle_before: None,
