@@ -45,27 +45,118 @@ fn sandbox_side() -> Vec<PathBuf> {
     files
 }
 
-/// `line` without its `//` comment and without the text of its string literals (a naive cut:
-/// enough for import paths, which never sit inside a string).
-fn code_of(line: &str) -> String {
+/// The code of each line of `text`. The whole file is read as one, so a comment (`//`, a nested
+/// `/* */`) or a literal (a string, raw string or char, over any number of lines) leaves only its
+/// line breaks; a literal becomes `""` where it starts.
+fn code_lines(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
     let mut code = String::new();
-    let mut in_string = false;
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' if in_string => {
-                chars.next();
+    let mut i = 0;
+    while i < chars.len() {
+        match skipped(&chars, i) {
+            Some((end, literal)) => {
+                if literal {
+                    code.push_str("\"\"");
+                }
+                code.extend(chars[i..end].iter().filter(|c| **c == '\n'));
+                i = end;
             }
-            '"' => {
-                in_string = !in_string;
-                code.push('"');
+            None => {
+                code.push(chars[i]);
+                i += 1;
             }
-            '/' if !in_string && chars.peek() == Some(&'/') => break,
-            _ if in_string => {}
-            _ => code.push(c),
         }
     }
-    code
+    code.split('\n').map(str::to_owned).collect()
+}
+
+/// For a comment or literal starting at `at`: the index past its end, and whether it is a
+/// literal. `None` for anything else (a lifetime's `'` included).
+fn skipped(chars: &[char], at: usize) -> Option<(usize, bool)> {
+    let get = |i: usize| chars.get(i).copied();
+    let after_ident = at > 0 && (chars[at - 1].is_alphanumeric() || chars[at - 1] == '_');
+    let find = |from: usize, close: &dyn Fn(usize) -> bool| {
+        (from..chars.len())
+            .find(|i| close(*i))
+            .unwrap_or(chars.len())
+    };
+    match (chars[at], get(at + 1)) {
+        ('/', Some('/')) => Some((find(at, &|i| chars[i] == '\n'), false)),
+        ('/', Some('*')) => Some((block_comment_end(chars, at), false)),
+        ('"', _) => {
+            let close = find(at + 1, &|i| chars[i] == '"' && !escaped(chars, i));
+            Some(((close + 1).min(chars.len()), true))
+        }
+        ('r', Some('"' | '#')) if !after_ident => {
+            let hashes = chars[at + 1..].iter().take_while(|c| **c == '#').count();
+            if get(at + 1 + hashes) != Some('"') {
+                return None;
+            }
+            let close = find(at + 2 + hashes, &|i| {
+                chars[i] == '"' && (1..=hashes).all(|h| get(i + h) == Some('#'))
+            });
+            Some(((close + 1 + hashes).min(chars.len()), true))
+        }
+        ('\'', Some('\\')) => {
+            let close = find(at + 3, &|i| chars[i] == '\'');
+            Some(((close + 1).min(chars.len()), true))
+        }
+        ('\'', Some(_)) if get(at + 2) == Some('\'') => Some((at + 3, true)),
+        _ => None,
+    }
+}
+
+/// Whether the char at `at` follows an odd run of backslashes (an escaped quote).
+fn escaped(chars: &[char], at: usize) -> bool {
+    chars[..at].iter().rev().take_while(|c| **c == '\\').count() % 2 == 1
+}
+
+/// The index past the `*/` closing the block comment that opens at `at`, nested ones counted.
+fn block_comment_end(chars: &[char], at: usize) -> usize {
+    let mut depth = 0;
+    let mut i = at;
+    while i + 1 < chars.len() {
+        match (chars[i], chars[i + 1]) {
+            ('/', '*') => {
+                depth += 1;
+                i += 2;
+            }
+            ('*', '/') => {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    chars.len()
+}
+
+/// `line` with each run of whitespace made one space, and none around `::`, `{`, `}` and `,`,
+/// so `crate :: task` reads as `crate::task` while `task as tasks` keeps its words apart.
+fn normalized(line: &str) -> String {
+    let spaced = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::new();
+    for part in spaced.split(' ') {
+        let joins = |c: Option<char>| matches!(c, Some(':' | '{' | '}' | ','));
+        if !out.is_empty() && !joins(out.chars().last()) && !joins(part.chars().next()) {
+            out.push(' ');
+        }
+        out.push_str(part);
+    }
+    out
+}
+
+/// Whether `line` has the path `crate::task` itself, not a longer name (`crate::tasks`).
+fn names_task_path(line: &str) -> bool {
+    line.match_indices("crate::task").any(|(at, path)| {
+        line[at + path.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+    })
 }
 
 /// Whether `group`, the inside of a `crate::{...}` import, names `task` at its top.
@@ -92,19 +183,19 @@ fn group_names_task(group: &str) -> bool {
 /// The lines (1-based) of `text` whose code names `crate::task`, directly or in a
 /// `use crate::{.., task, ..}` group.
 fn naming_task(text: &str) -> Vec<usize> {
-    let code: Vec<String> = text.lines().map(code_of).collect();
+    let code: Vec<String> = code_lines(text).iter().map(|l| normalized(l)).collect();
     let mut found = Vec::new();
     for (i, line) in code.iter().enumerate() {
-        let squeezed: String = line.split_whitespace().collect();
-        if squeezed.contains("crate::task") {
+        if names_task_path(line) {
             found.push(i + 1);
             continue;
         }
-        if let Some(at) = squeezed.find("crate::{") {
-            let mut group = squeezed[at + "crate::{".len()..].to_owned();
+        if let Some(at) = line.find("crate::{") {
+            let mut group = line[at + "crate::{".len()..].to_owned();
             let mut next = i + 1;
             while group.matches('{').count() >= group.matches('}').count() && next < code.len() {
-                group.extend(code[next].split_whitespace());
+                group.push(' ');
+                group.push_str(&code[next]);
                 next += 1;
             }
             if let Some(end) = closing(&group) {
@@ -184,9 +275,49 @@ fn task_boundary_ignores_comments_strings_and_other_paths() {
                 let x = 1; // crate::task::record\n\
                 let s = \"crate::task::x\";\n\
                 use crate::{tasks, retask, run::task};\n\
-                use crate::shared::task_like;\n";
+                use crate::shared::task_like;\n\
+                use crate::tasks::x;\n";
 
     assert!(naming_task(text).is_empty(), "{:?}", naming_task(text));
+}
+
+#[test]
+fn task_boundary_flags_a_task_alias_in_a_crate_group() {
+    let text = r"use crate::{config, task as tasks};
+use crate::{
+    config,
+    task as tasks,
+};
+";
+
+    assert_eq!(naming_task(text), [1, 2]);
+}
+
+#[test]
+fn task_boundary_ignores_strings_and_comments_over_several_lines() {
+    let text = r###"let message = "help:
+crate::task::record
+";
+let raw = r#"a "quoted" crate::task::x
+crate::task::y "#;
+/* a block comment
+   crate::task::z */
+let quote = '"';
+let lifetime: &'static str = "crate::task::w";
+"###;
+
+    assert!(naming_task(text).is_empty(), "{:?}", naming_task(text));
+}
+
+#[test]
+fn task_boundary_flags_an_import_after_a_closing_string() {
+    let text = r###"let raw = r#"a "quoted"
+line"#; use crate::task::record;
+let s = "x
+"; crate::task::lock::token();
+"###;
+
+    assert_eq!(naming_task(text), [2, 4]);
 }
 
 #[test]
