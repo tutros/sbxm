@@ -4,11 +4,12 @@
 use crate::common;
 
 use std::fs;
+use std::sync::{Arc, Mutex};
 
 use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, backend, ctx, fixture, issue_text, ok, play_tasks, source,
 };
-use sbxm::backend::FakeBackend;
+use sbxm::backend::{ExecOutput, FakeBackend};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::headless::RunStatus;
 use sbxm::task::pipeline;
@@ -24,9 +25,28 @@ fn what() -> Play {
 }
 
 fn playing(f: &Fixture) -> FakeBackend {
-    backend()
-        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
-        .with_exec_hook(play_tasks(&f.env.base_dir(), "main", what()))
+    playing_printing(f, ok(CLAUDE_DONE)).0
+}
+
+/// What each sandbox's agent command printed, kept for a failure message (issue 693): the task
+/// keeps the worker's stdout as its transcript but drops its stderr when it succeeds.
+type Streams = Arc<Mutex<Vec<(String, ExecOutput)>>>;
+
+/// Like [`playing`], with the agent command printing `printed`; also returns what it printed.
+fn playing_printing(f: &Fixture, printed: ExecOutput) -> (FakeBackend, Streams) {
+    let streams = Streams::default();
+    let kept = Arc::clone(&streams);
+    let backend = backend()
+        .with_exec_responder(move |sandbox, spec| {
+            spec.argv.iter().any(|a| a.contains("claude")).then(|| {
+                kept.lock()
+                    .unwrap()
+                    .push((sandbox.to_owned(), printed.clone()));
+                printed.clone()
+            })
+        })
+        .with_exec_hook(play_tasks(&f.env.base_dir(), "main", what()));
+    (backend, streams)
 }
 
 fn github_with(numbers: &[u32]) -> FakeGitHub {
@@ -39,10 +59,49 @@ fn meta(f: &Fixture, number: u32) -> std::path::PathBuf {
     record::task_dir(&f.env.base_dir(), &format!("issue-{number}"))
 }
 
+/// What one pick's start said (its warnings, events, result and gates, which hold the stdout and
+/// stderr of a step that failed), what its agent command printed, and its task's `run.log` and
+/// `gates.log`, for a failure message (issue 693).
+fn said(f: &Fixture, report: &pipeline::TaskReport, streams: &Streams) -> String {
+    let meta = meta(f, report.number);
+    let sandbox = format!("sbxm-task-issue-{}-claude", report.number);
+    let printed: String = streams
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(name, _)| *name == sandbox)
+        .map(|(_, out)| {
+            format!(
+                "agent command in {sandbox}: exit {:?}\nstdout (last 40 lines):\n{}\n\
+                 stderr (last 40 lines):\n{}\n",
+                out.exit_code,
+                common::text_tail(&out.stdout, 40),
+                common::text_tail(&out.stderr, 40),
+            )
+        })
+        .collect();
+    let printed = if printed.is_empty() {
+        format!("no agent command ran in {sandbox}\n")
+    } else {
+        printed
+    };
+    format!(
+        "warnings: {:?}\nevents: {:?}\nresult: {:#?}\ngates: {:#?}\n{printed}\
+         run.log (last 40 lines):\n{}\ngates.log (last 40 lines):\n{}",
+        report.warnings,
+        report.events,
+        report.result,
+        report.gates,
+        common::file_tail(&meta.join("run.log"), 40),
+        common::file_tail(&meta.join("gates.log"), 40),
+    )
+}
+
 #[test]
 fn each_pick_gets_its_own_task_sandbox_and_collected_commits() {
     let f = fixture();
-    let (backend, github) = (playing(&f), github_with(&[1, 2, 3]));
+    let (backend, streams) = playing_printing(&f, ok(CLAUDE_DONE));
+    let github = github_with(&[1, 2, 3]);
     let source = source(&f);
 
     let reports = pipeline::start(&ctx(&f, &source, &backend, &github), &[1, 2, 3]);
@@ -52,28 +111,40 @@ fn each_pick_gets_its_own_task_sandbox_and_collected_commits() {
         [1, 2, 3]
     );
     for report in &reports {
-        let worked = report.result.as_ref().unwrap();
-        assert_eq!(worked.status, RunStatus::Completed, "#{}", report.number);
-        assert_eq!(worked.commits, 1, "#{}", report.number);
-        let task = record::read(&meta(&f, report.number).join("task.json")).unwrap();
+        let n = report.number;
+        // Failed once under load (#104): each message holds what the command said and did.
+        let said = said(&f, report, &streams);
+        let worked = report
+            .result
+            .as_ref()
+            .unwrap_or_else(|e| panic!("#{n}: {e:#}\n{said}"));
+        assert_eq!(worked.status, RunStatus::Completed, "#{n}\n{said}");
+        assert_eq!(worked.commits, 1, "#{n}\n{said}");
+        let task = record::read(&meta(&f, n).join("task.json"))
+            .unwrap_or_else(|e| panic!("#{n}: {e:#}\n{said}"));
         // The worker finished and its gates (the fixture's defaults, in the fake sandbox) passed.
-        assert_eq!((task.stage, task.status), (Stage::Gating, Status::Passed));
         assert_eq!(
-            task.worker.unwrap().sandbox,
-            format!("sbxm-task-issue-{}-claude", report.number)
+            (task.stage, task.status),
+            (Stage::Gating, Status::Passed),
+            "#{n}\n{said}"
         );
         assert_eq!(
-            repo::commits_ahead(
-                &meta(&f, report.number).join("repo.git"),
-                "main",
-                &format!("issue-{}", report.number)
-            )
-            .unwrap(),
-            1
+            task.worker
+                .unwrap_or_else(|| panic!("#{n}: no worker in task.json\n{said}"))
+                .sandbox,
+            format!("sbxm-task-issue-{n}-claude"),
+            "#{n}\n{said}"
         );
+        // A git step's error holds git's stderr.
+        let ahead =
+            repo::commits_ahead(&meta(&f, n).join("repo.git"), "main", &format!("issue-{n}"))
+                .unwrap_or_else(|e| panic!("#{n}: git: {e:#}\n{said}"));
+        assert_eq!(ahead, 1, "#{n}\n{said}");
         assert_eq!(
-            fs::read_to_string(meta(&f, report.number).join("result.md")).unwrap(),
-            "done\n"
+            fs::read_to_string(meta(&f, n).join("result.md"))
+                .unwrap_or_else(|e| panic!("#{n}: result.md: {e}\n{said}")),
+            "done\n",
+            "#{n}\n{said}"
         );
     }
     let mut created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
@@ -86,6 +157,29 @@ fn each_pick_gets_its_own_task_sandbox_and_collected_commits() {
             "sbxm-task-issue-3-claude"
         ]
     );
+}
+
+// ---- issue 693: the failure message of the test above ----------------------------------------
+
+#[test]
+fn each_pick_failure_message_holds_the_workers_stdout_and_stderr() {
+    let f = fixture();
+    let printed = ExecOutput {
+        stdout: CLAUDE_DONE.replace("PONG", "STDOUT_MARKER_693"),
+        stderr: "STDERR_MARKER_693\n".into(),
+        exit_code: Some(0),
+    };
+    let (backend, streams) = playing_printing(&f, printed);
+    let github = github_with(&[1, 2]);
+    let source = source(&f);
+
+    let reports = pipeline::start(&ctx(&f, &source, &backend, &github), &[1, 2]);
+
+    for report in &reports {
+        let said = said(&f, report, &streams);
+        assert!(said.contains("STDOUT_MARKER_693"), "{said}");
+        assert!(said.contains("STDERR_MARKER_693"), "{said}");
+    }
 }
 
 #[test]

@@ -170,7 +170,14 @@ fn result_json_records_status_usage_and_identity() {
     assert_eq!(result["usage"]["input_tokens"], 27651);
     assert_eq!(result["usage"]["output_tokens"], 44);
     assert!(result["usage"]["cost_usd"].as_f64().unwrap() > 0.0);
-    assert_eq!(result["diff"]["status"], "ok");
+    // Failed once under load (#104): the message names the diff record and the run's log.
+    assert_eq!(
+        result["diff"]["status"],
+        "ok",
+        "diff: {}\nrun.log (last 40 lines):\n{}",
+        result["diff"],
+        common::file_tail(&meta(&env, &id).join("run.log"), 40)
+    );
     assert!(result["error"].is_null());
 }
 
