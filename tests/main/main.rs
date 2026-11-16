@@ -116,6 +116,7 @@ mod status_loop_blocked;
 mod status_loop_jobs;
 mod status_loop_list;
 mod status_loop_outcomes;
+mod status_queue_tasks;
 mod status_runs;
 mod status_sandboxes;
 mod status_task_failed_time;
