@@ -113,6 +113,17 @@ impl Env {
     }
 }
 
+/// The last `lines` lines of `path`, for a failure message (issue 693): `no <file name>` when it
+/// can't be read, so building the message never panics.
+pub fn file_tail(path: &Path, lines: usize) -> String {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        return format!("no {name}");
+    };
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(lines)..].join("\n")
+}
+
 /// Plain `git` for building fixtures; returns trimmed stdout.
 /// A [`sbxm::disk::Guard`] that finds 1 GiB free on the drive of an existing sandbox state
 /// folder in `env`, under the default threshold of 10 GiB (issue 210), and never really sleeps.

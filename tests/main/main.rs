@@ -38,6 +38,7 @@ mod eval_judge;
 mod eval_judge_run;
 mod eval_score;
 mod factory_files;
+mod file_tail;
 mod git_trace;
 mod github_arm;
 mod github_commit_status_state;
