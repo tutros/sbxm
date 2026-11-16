@@ -262,7 +262,8 @@ impl Running for Started {
 /// (decision 322) rather than its bare pid, and once it is gone its task's `outcome.json` says
 /// how it ended, as for the loop's own child.
 pub(super) struct Adopted<'a> {
-    pub process: Process,
+    /// None for one that ended normally, which clears it (issue 680): ended already.
+    pub process: Option<Process>,
     pub probe: &'a dyn ProcessProbe,
     /// Its task folder, where it writes its outcome.
     pub dir: PathBuf,
@@ -278,7 +279,7 @@ pub(super) struct Adopted<'a> {
 
 impl super::Started for Adopted<'_> {
     fn poll(&mut self, out: &mut dyn std::io::Write) -> Option<super::PhaseEnd> {
-        if self.process.alive(self.probe) {
+        if self.process.as_ref().is_some_and(|p| p.alive(self.probe)) {
             // A first Ctrl-C reaches its slot wait through the stop file, as for the loop's own
             // child ([`STOP_FILE_ENV`]).
             if (self.stop_asked)() && !exists(&self.stop_file) {

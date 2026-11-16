@@ -1484,6 +1484,148 @@ fn a_dead_loops_task_at_ready_whose_outcome_says_failed_after_its_resume_is_park
     }
 }
 
+// --- issue 680: a dead loop's task that ended cleanly, its recorded process cleared ---
+
+/// Issue `issue`'s task as [`ended_under`] leaves it, with no recorded process: a child that
+/// ends normally clears it.
+fn ended_with_no_process(base: &Path, issue: u32, act: Act, end: Option<Outcome>, owner: Process) {
+    ended_under(base, issue, act, end, owner);
+    let mut rec = read(base, issue);
+    rec.process = None;
+    record::write(&record::task_dir(base, &format!("issue-{issue}")), &rec).unwrap();
+}
+
+#[test]
+fn a_dead_loops_task_at_ready_with_no_recorded_process_is_finished_with_one_row() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        ended_with_no_process(
+            &f.base(),
+            3,
+            Act::Ready,
+            Some(Outcome::new(Kind::Ready, None, "")),
+            Process::new(DEAD_LOOP, 0),
+        );
+        let gh = github(&[]);
+
+        let run = run_loop(&f, &gh, &[], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert_eq!(run.events, ["finish 3"], "{cloud_slots:?}\n{}", run.out);
+        let rec = read(&f.base(), 3);
+        assert_eq!(rec.stage, Stage::Finished);
+        assert!(rec.pr.is_some());
+        let rows = rows(&f, 3);
+        assert_eq!(rows.len(), 1, "{cloud_slots:?}\n{}", f.log_text());
+        assert!(rows[0].contains("| cloud | 09:00:00 |"), "{}", rows[0]);
+        assert!(rows[0].contains("PR #103, clean"), "{}", rows[0]);
+        assert!(run.handed.is_empty(), "{:?}", run.handed);
+    }
+}
+
+#[test]
+fn a_dead_loops_task_at_ready_whose_recorded_process_is_alive_is_adopted_not_finished_at_start() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        ended_ready(&f.base(), 3);
+        let mut rec = read(&f.base(), 3);
+        rec.process = Some(Process::new(CHILD, 0));
+        record::write(&record::task_dir(&f.base(), "issue-3"), &rec).unwrap();
+        let gh = github(&[]);
+
+        let run = run_loop(&f, &gh, &[(CHILD, 3, 60, Act::Ready)], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert!(
+            run.out.contains("outlived the loop that started it"),
+            "{cloud_slots:?}\n{}",
+            run.out
+        );
+        assert_eq!(run.handed, [Process::new(CHILD, 0)], "{cloud_slots:?}");
+        // Finished once its child ends, not at the start.
+        assert!(run.at("end 3 adopted") < run.at("finish 3"), "{}", run.out);
+        assert_eq!(rows(&f, 3).len(), 1, "{cloud_slots:?}\n{}", f.log_text());
+    }
+}
+
+#[test]
+fn a_dead_loops_task_with_no_recorded_process_and_no_outcome_is_not_finished() {
+    for status in [Status::Failed, Status::Running] {
+        let f = fixture(Some(2), true);
+        ended_with_no_process(&f.base(), 3, Act::Crash, None, Process::new(DEAD_LOOP, 0));
+        let mut rec = read(&f.base(), 3);
+        rec.status = status;
+        record::write(&record::task_dir(&f.base(), "issue-3"), &rec).unwrap();
+        let gh = github(&[]);
+
+        let run = run_loop(&f, &gh, &[], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert!(
+            run.events.is_empty(),
+            "{status:?}: {:?}\n{}",
+            run.events,
+            run.out
+        );
+        let rec = read(&f.base(), 3);
+        assert_eq!(rec.stage, Stage::Working);
+        assert!(rec.pr.is_none());
+        assert!(rows(&f, 3).is_empty(), "{}", f.log_text());
+    }
+}
+
+#[test]
+fn a_task_at_ready_with_no_recorded_process_owned_by_another_loop_or_none_is_left_alone() {
+    for owner in [Some(SECOND_LOOP), Some(HAND), None] {
+        let f = fixture(Some(2), true);
+        ended_with_no_process(
+            &f.base(),
+            3,
+            Act::Ready,
+            Some(Outcome::new(Kind::Ready, None, "")),
+            Process::new(DEAD_LOOP, 0),
+        );
+        let mut rec = read(&f.base(), 3);
+        rec.loop_owner = owner.map(|pid| Process::new(pid, 0));
+        record::write(&record::task_dir(&f.base(), "issue-3"), &rec).unwrap();
+        let gh = github(&[]);
+
+        let run = run_loop(&f, &gh, &[], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert!(
+            run.events.is_empty(),
+            "{owner:?}: {:?}\n{}",
+            run.events,
+            run.out
+        );
+        assert_eq!(read(&f.base(), 3).stage, Stage::Ready);
+        assert!(rows(&f, 3).is_empty(), "{}", f.log_text());
+    }
+}
+
+#[test]
+fn a_dead_loops_task_at_ready_with_no_recorded_process_whose_outcome_says_failed_is_resumed_once() {
+    for cloud_slots in [Some(2), None] {
+        let f = fixture(cloud_slots, true);
+        ready_but_failed(&f.base(), 3);
+        let mut rec = read(&f.base(), 3);
+        rec.process = None;
+        record::write(&record::task_dir(&f.base(), "issue-3"), &rec).unwrap();
+        let gh = github(&[]);
+
+        let run = run_loop(&f, &gh, &[], &[], &never);
+
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert_eq!(run.events, ["finish 3"], "{cloud_slots:?}\n{}", run.out);
+        assert!(run.out.contains("resuming it once"), "{}", run.out);
+        let rec = read(&f.base(), 3);
+        assert_eq!(rec.hooks[RESUMED_HOOK], serde_json::json!(true));
+        assert_eq!(rec.stage, Stage::Finished);
+        assert_eq!(rows(&f, 3).len(), 1, "{cloud_slots:?}\n{}", f.log_text());
+    }
+}
+
 // --- `sbxm status` lists an adopted child as the loop's ---
 
 /// A probe for which the pids in `.0` are gone.

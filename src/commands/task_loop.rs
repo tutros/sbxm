@@ -684,8 +684,9 @@ struct Adopted {
     started: u64,
     /// Where it runs, as its record says.
     slot: Location,
-    /// Its process, as its record names it.
-    process: Process,
+    /// Its process, as its record names it: none for one that ended normally, which clears it
+    /// (issue 680).
+    process: Option<Process>,
     /// The failures in a row it had already: 1 when it is the one resume a loop took after a
     /// cut-off ([`RESUMED_HOOK`], decision 310), so a failure of it parks it.
     failures: u32,
@@ -1884,7 +1885,8 @@ impl Loop<'_> {
 
     /// The issues of `dead`'s children that ended with an `outcome.json` `dead` never acted on
     /// (issue 657): this repo's issue tasks, not finished and with no PR, that `dead` owns
-    /// ([`dead_owns`]), whose recorded process has ended and that have an `outcome.json`, whose
+    /// ([`dead_owns`]), whose recorded process has ended, or that record none (issue 680: a child
+    /// that ends normally clears it), and that have an `outcome.json`, whose
     /// issue has no row in a log `dead` wrote: one with a row there was acted on (parked, say)
     /// before `dead` died. None taken over: none. Read only, before anything is written.
     fn ended_under(
@@ -1909,7 +1911,7 @@ impl Loop<'_> {
                 && rec.stage != Stage::Finished
                 && rec.pr.is_none()
                 && dead_owns(dead, &rec)
-                && rec.process.as_ref().is_some_and(|p| !p.alive(self.probe))
+                && rec.process.as_ref().is_none_or(|p| !p.alive(self.probe))
                 && !matches!(outcome::read(&dir), outcome::Read::Missing);
             if ours {
                 found.push(rec.number);
@@ -1986,13 +1988,10 @@ impl Loop<'_> {
                 && rec.pr.is_none()
                 && dead_owns(dead, &rec);
             let gone = ended.contains(&rec.number);
-            let Some(process) = rec
-                .process
-                .clone()
-                .filter(|p| ours && (gone || p.alive(self.probe)))
-            else {
+            let alive = rec.process.as_ref().is_some_and(|p| p.alive(self.probe));
+            if !ours || !(gone || alive) {
                 continue;
-            };
+            }
             let Some(owner) = rec.owner().cloned() else {
                 continue;
             };
@@ -2007,27 +2006,28 @@ impl Loop<'_> {
                 failures: u32::from(matches!(Owed::of(&rec), Owed::Taken)),
                 owner,
                 title: rec.title,
-                process,
+                process: rec.process,
                 ended: gone,
             });
         }
         found.sort_by_key(|a| a.issue);
         for a in &found {
             let named = crate::title::named(&format!("#{}", a.issue), &a.title);
+            let child = a.process.as_ref().map_or("its child".to_owned(), |p| {
+                format!("its child (process {})", p.pid)
+            });
             if a.ended {
                 writeln!(
                     out,
-                    "{named}: its child (process {}) ended and the loop that started it never \
-                     acted on its outcome; adopted, to act on it now",
-                    a.process.pid
+                    "{named}: {child} ended and the loop that started it never acted on its \
+                     outcome; adopted, to act on it now"
                 )?;
                 continue;
             }
             writeln!(
                 out,
-                "{named}: its child (process {}) outlived the loop that started it; adopted, in \
-                 its {} slot until it ends",
-                a.process.pid,
+                "{named}: {child} outlived the loop that started it; adopted, in its {} slot \
+                 until it ends",
                 a.slot.as_str()
             )?;
         }
@@ -2060,11 +2060,12 @@ impl Loop<'_> {
 
     /// An adopted child that cut its task off ([`Self::adopted_was_cut_off`]): interrupted, under
     /// the rule [`Self::cut_off`] applies at a restart. One whose resume a loop took already is
-    /// parked; otherwise its resume is marked as owed, for `process`, before anything else runs.
+    /// parked; otherwise its resume is marked as owed, for `process` (none recorded: unmarked),
+    /// before anything else runs.
     fn adopted_cut_off(
         &mut self,
         issue: u32,
-        process: &Process,
+        process: Option<&Process>,
         ended: &PhaseEnd,
         out: &mut dyn Write,
     ) -> Result<CutOff> {
@@ -2085,7 +2086,10 @@ impl Loop<'_> {
                 "parked at {stage}: cut off again after its resume"
             )));
         }
-        if let Err(e) = self.mark_resume(issue, serde_json::to_value(process)?) {
+        // None recorded (issue 680): no process to owe it for; its resume is taken as any other's.
+        if let Some(process) = process
+            && let Err(e) = self.mark_resume(issue, serde_json::to_value(process)?)
+        {
             let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
                 return Err(e);
             };
@@ -4298,7 +4302,9 @@ fn run_loop(
         // with an outcome (issue 657).
         let adopted = lp.adopt(dead.as_ref(), &ended, out)?;
         for a in adopted.iter().filter(|a| !a.ended) {
-            lp.steps.adopted(&a.process);
+            if let Some(process) = &a.process {
+                lp.steps.adopted(process);
+            }
         }
         let named = adopted.iter().map(|a| queue::AdoptedChild {
             issue: a.issue,
@@ -4448,7 +4454,7 @@ fn work(
             };
             let mut stops = Vec::new();
             let ended = if lp.adopted_was_cut_off(a.issue, &ended) {
-                match lp.adopted_cut_off(a.issue, &a.process, &ended, out)? {
+                match lp.adopted_cut_off(a.issue, a.process.as_ref(), &ended, out)? {
                     CutOff::Owed => {
                         note(lock, lp, warn, |p| {
                             if p.current == Some(a.issue) {
