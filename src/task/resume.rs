@@ -191,7 +191,7 @@ pub fn check_can_resume_with(
         return Ok(());
     }
     match task.stage {
-        Stage::Ready if should_fix => Err(should_fix_unclean(task)),
+        Stage::Ready if should_fix => Err(should_fix_refusal(task)),
         Stage::Ready => Err(stopped_refusal(task)),
         Stage::Finished => bail!(
             "task {id} is already finished; to work on what its review found, file the findings \
@@ -222,15 +222,14 @@ pub fn check_should_fix(task: &Record, meta: &Path, rounds: Option<u32>) -> Resu
             task.status.name()
         );
     }
-    if task.stopped.is_some() || task.review.as_ref().is_some_and(|r| r.must_fix > 0) {
-        return Err(should_fix_unclean(task));
-    }
-    if task.should_fix_round {
-        bail!(
-            "task {id} already had its should-fix round, and a task gets at most one; finish it \
-             with `sbxm task finish {flag}`, and what is left is filed with `sbxm task \
-             file-findings`"
-        );
+    // The record's rules are the table's `ResumeShouldFix` row (issue 513); this is also asked
+    // on its own, without a process probe (the loop's `should_fix_due`), so the gone process is
+    // taken as given and `tests/main/task_machine_should_fix.rs` checks the two still agree.
+    if task.stopped.is_some()
+        || task.review.as_ref().is_some_and(|r| r.must_fix > 0)
+        || task.should_fix_round
+    {
+        return Err(should_fix_refusal(task));
     }
     let path = meta.join("review.md");
     let text = fs::read_to_string(&path)
@@ -362,9 +361,19 @@ fn stopped_refusal(task: &Record) -> anyhow::Error {
     }
 }
 
-/// Why `--should-fix` refuses a task that stopped or has must-fix findings left (issue 510).
-fn should_fix_unclean(task: &Record) -> anyhow::Error {
+/// Why `--should-fix` refuses a `ready` task the table's `ResumeShouldFix` row refuses (issue
+/// 510): it stopped or has must-fix findings left, or it already had its should-fix round.
+fn should_fix_refusal(task: &Record) -> anyhow::Error {
     let must_fix = task.review.as_ref().map_or(0, |r| r.must_fix);
+    if task.stopped.is_none() && must_fix == 0 {
+        return anyhow::anyhow!(
+            "task {} already had its should-fix round, and a task gets at most one; finish it \
+             with `sbxm task finish {}`, and what is left is filed with `sbxm task \
+             file-findings`",
+            task.id,
+            next::record_flag(task)
+        );
+    }
     anyhow::anyhow!(
         "--should-fix is for a clean task (0 must-fix, no stop); task {} stopped ready ({}) with \
          {must_fix} must-fix finding(s), so resume it without --should-fix",

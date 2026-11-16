@@ -225,7 +225,7 @@ kept here as the design for issues #117-121 to build toward.
 | ready ok (issue/spec/fix), no live process, stopped with rounds left | task resume | fixing | a fix round from the recorded review |
 | ready ok (issue/spec/fix), no live process, stopped | task resume --rounds N | fixing | add N fix rounds to the budget, then a fix round from the recorded review |
 | ready ok (fix), no live process, not stopped | task resume | finished | push the branch onto the PR's own branch, a fast-forward or nothing |
-| ready ok (issue/spec/fix), no live process, not stopped | task resume --rounds 1 --should-fix | fixing | one fix round for the review's should-fix findings sized S, once per task |
+| ready ok (issue/spec/fix), no live process, not stopped, no must-fix, should-fix round unused | task resume --rounds 1 --should-fix | fixing | one fix round for the review's should-fix findings sized S |
 | any completed/timed-out/failed/passed/gates-failed/ok | task rm | removed | remove the task's folders and sandboxes |
 | any running, interrupted | task rm | removed | remove the task's folders and sandboxes |
 
@@ -327,12 +327,14 @@ and the checks cannot drift from it: the recorded-PR rule (`task finish` needs n
 retry needs one: `no recorded PR` / `with a recorded PR`), `resume`'s process check (refused while the recorded
 process is alive whatever the status: `no live process`), and a `ready` task's stop and budget: plain `resume` needs
 a stop with rounds left (`stopped with rounds left`), `--rounds N` any stop (its own `task resume --rounds N` row,
-`stopped`), `--rounds 1 --should-fix` no stop (`not stopped`), and a clean fix task resumes to its push. A table
-state carries the recorded PR, whether the recorded process is alive and the stop (`machine::Stop`: not stopped,
-stopped with rounds left, stopped with its rounds used), and is built from a task record only by
+`stopped`), `--rounds 1 --should-fix` no stop, no must-fix left and no should-fix round yet (`not stopped, no
+must-fix, should-fix round unused`), and a clean fix task resumes to its push. A table
+state carries the recorded PR, whether the recorded process is alive, the stop (`machine::Stop`: not stopped,
+stopped with rounds left, stopped with its rounds used) and the should-fix round (`machine::ShouldFixRound`: open,
+must-fix left, used), and is built from a task record only by
 `machine::State::of`. Still checked outside the table, since they are about a flag's value or more than the record:
-a `--rounds` value of 0, too large, or other than 1 with `--should-fix`; what the review holds for `--should-fix`
-(its must-fix count, should-fix findings sized S, one should-fix round per task); an ambiguous cloud create; and
+a `--rounds` value of 0, too large, or other than 1 with `--should-fix`; whether the review file has should-fix
+findings sized S for `--should-fix`; an ambiguous cloud create; and
 the PR's head for `task review --pr`.
 
 `resume` is refused while the recorded process is alive (pid and start time, as `interrupted` is decided today).

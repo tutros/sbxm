@@ -188,7 +188,8 @@ fn task_states_lists_the_stop_rules() {
         "task resume --rounds N",
     );
     has(
-        "ready ok (issue/spec/fix), no live process, not stopped",
+        "ready ok (issue/spec/fix), no live process, not stopped, no must-fix, should-fix round \
+         unused",
         "task resume --rounds 1 --should-fix",
     );
 }

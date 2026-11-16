@@ -215,6 +215,7 @@ mod task_loop_stop_before_phase;
 mod task_loop_trial;
 mod task_machine;
 mod task_machine_rules;
+mod task_machine_should_fix;
 mod task_machine_stops;
 mod task_merged;
 mod task_merged_remove;

@@ -11,12 +11,20 @@
 use std::collections::BTreeSet;
 
 use sbxm::task::finish::{check_can_finish, check_can_retry_summaries, plan_removal};
-use sbxm::task::machine::{Event, STAGES, State, Stop, dead_ends, matching, states, verdict};
+use sbxm::task::machine::{
+    Event, STAGES, ShouldFixRound, State, Stop, dead_ends, matching, states, verdict,
+};
 use sbxm::task::pipeline::{check_can_gate, check_can_review, check_can_review_pr};
-use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record, Stopped};
-use sbxm::task::resume::{check_can_resume, check_can_resume_with};
+use sbxm::task::record::{
+    self, Kind, NewTask, Process, ProcessProbe, Record, ReviewResult, Stopped,
+};
+use sbxm::task::resume::{check_can_resume, check_can_resume_with, check_should_fix};
 
 const T0: u64 = 1_790_000_000;
+
+/// A review with one should-fix finding sized S and no must-fix.
+const S_ONE: &str = "Must-fix findings: 0\n\n## Should fix\n\n\
+    ### S-1 - a.txt:2 a small slip.\n\n**Where:** a.txt:2\n**Size:** S (one line)\n";
 
 struct Probe(Option<u64>);
 
@@ -60,6 +68,16 @@ fn record_in(state: &State) -> Record {
         Stop::RoundsLeft => (Some(Stopped::RepeatFinding), 1),
         Stop::RoundsUsed => (Some(Stopped::RoundsExhausted), 2),
     };
+    match state.should_fix {
+        ShouldFixRound::Open => {}
+        ShouldFixRound::MustFixLeft => {
+            record.review = Some(ReviewResult {
+                must_fix: 1,
+                ..ReviewResult::default()
+            });
+        }
+        ShouldFixRound::Used => record.should_fix_round = true,
+    }
     record
 }
 
@@ -86,7 +104,14 @@ fn guard(state: &State, event: Event) -> bool {
         }
         Event::Resume => check_can_resume(&record, &probe, None).is_ok(),
         Event::ResumeRounds => check_can_resume(&record, &probe, Some(1)).is_ok(),
-        Event::ResumeShouldFix => check_can_resume_with(&record, &probe, Some(1), true).is_ok(),
+        // The command's own checks, `check_should_fix` too, with a review that has one
+        // should-fix finding sized S: what the review file holds is not part of a state.
+        Event::ResumeShouldFix => {
+            let meta = tempfile::tempdir().unwrap();
+            std::fs::write(meta.path().join("review.md"), S_ONE).unwrap();
+            check_can_resume_with(&record, &probe, Some(1), true).is_ok()
+                && check_should_fix(&record, meta.path(), Some(1)).is_ok()
+        }
         Event::Advance(to) => {
             let mut record = record;
             record.advance(to, T0 + 1, Process::new(1234, T0)).is_ok()
@@ -111,7 +136,7 @@ fn events() -> Vec<Event> {
 
 fn key(state: &State, event: Event) -> String {
     format!(
-        "{:?} {:?}/{:?}{}{}{} {:?} {:?}",
+        "{:?} {:?}/{:?}{}{}{} {:?} {:?} {:?}",
         state.kind,
         state.stage,
         state.status,
@@ -127,6 +152,7 @@ fn key(state: &State, event: Event) -> String {
         },
         if state.has_pr { "+pr" } else { "" },
         state.stop,
+        state.should_fix,
         event
     )
 }

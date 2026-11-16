@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use crate::task::machine::{self, Event, Row, Stop};
+use crate::task::machine::{self, Event, Row, ShouldFixRound, Stop};
 use crate::task::record::Kind;
 
 fn stage_cell(stages: &[crate::task::record::Stage]) -> String {
@@ -53,9 +53,19 @@ fn stop_suffix(stops: &[Stop]) -> &'static str {
     }
 }
 
+fn should_fix_suffix(rounds: &[ShouldFixRound]) -> &'static str {
+    match rounds {
+        [ShouldFixRound::Open] => ", no must-fix, should-fix round unused",
+        [ShouldFixRound::MustFixLeft] => ", must-fix left",
+        [ShouldFixRound::Used] => ", should-fix round used",
+        // Every value: the row doesn't look at it.
+        _ => "",
+    }
+}
+
 fn from_cell(row: &Row) -> String {
     format!(
-        "{} {}{}{}{}{}",
+        "{} {}{}{}{}{}{}",
         stage_cell(row.stages),
         status_cell(row.statuses),
         kind_suffix(row.kinds),
@@ -70,6 +80,7 @@ fn from_cell(row: &Row) -> String {
             machine::RecordedPr::No => ", no recorded PR",
         },
         stop_suffix(row.stops),
+        should_fix_suffix(row.should_fix),
     )
 }
 
