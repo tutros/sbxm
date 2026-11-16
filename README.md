@@ -994,12 +994,15 @@ The Task Scheduler job `sbxm task loop` runs at the logon of the current user, o
 Desktop and `sbx` run in your session), one instance at a time, with no time limit. Each start refuses a loop checkout
 with local changes (`git status --porcelain`), saying why and overwriting nothing; otherwise it runs `git fetch` and
 `git checkout --detach origin/main` there, waits up to 10 minutes for `sbx ls` to succeed (every 30 seconds), and runs
-the loop through the wrapper given (`-Sbxm`), never a build. After an exit other than 0 or 3 it starts the loop again
-10 minutes later, at most 3 times in an hour; `sbx ls` still failing counts as such an exit. Exit 0 (`sbxm task loop
---stop`) or 3 (a stop that needs you), or a 4th failure within the hour, leaves it down until the next logon or a start
-by hand (`./scripts/loop-trigger.ps1`). A loop started by hand meanwhile is refused by the loop lock. Remove the job
-with `./scripts/loop-trigger.ps1 -Unregister` (it says so when none is registered); a loop running then keeps running
-until `--stop`.
+the loop through the wrapper given (`-Sbxm`), never a build. It waits for the loop's own process only, so a loop that
+dies is restarted on time even while its task processes still run (issue 676). The loop's output is not in a window:
+each start writes `<UTC yyyyMMdd-HHmmss>-loop.out.log` and `...-loop.err.log` in `-LogDir` (default
+`H:\sbxm-e2e\loop-trigger-logs`, created if missing) and prints both paths. After an exit other than 0 or 3 it starts
+the loop again 10 minutes later, at most 3 times in an hour; `sbx ls` still failing counts as such an exit. Exit 0
+(`sbxm task loop --stop`) or 3 (a stop that needs you), or a 4th failure within the hour, leaves it down until the next
+logon or a start by hand (`./scripts/loop-trigger.ps1`). A loop started by hand meanwhile is refused by the loop lock.
+Remove the job with `./scripts/loop-trigger.ps1 -Unregister` (it says so when none is registered); a loop running then
+keeps running until `--stop`.
 
 ### Filing review findings as issues
 
