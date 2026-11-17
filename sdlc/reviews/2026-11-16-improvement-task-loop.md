@@ -43,7 +43,7 @@ They have drifted in the log row of a task stopped by a sign-in or a usage limit
 - `work` writes `worker_s: None, reviewer_s: None, rounds: None` (4702-4718, 4733-4749).
 - `task_ended` builds the same row with its `row` closure (1106-1126), which fills those three columns from the record.
 
-The same issue stopped at `reviewing: sign-in` therefore logs its worker time and rounds with `cloud_slots` set, and blanks without. The slot column comes from `lp.slot_of(issue)` in one and from `t.slot` in the other. Since 2026-11-01, `work`'s lines changed in 41 commits and `task_ended`'s in 4 (`git log -L`), so a change made to one copy only is the expected case. The loop log is what the retros read (`sdlc/retros/2026-11-16-retro.md`, patterns 3 and 4).
+The same issue stopped at `reviewing: sign-in` therefore logs its worker time and rounds with `cloud_slots` set, and blanks without. The slot column comes from `lp.slot_of(issue)` in one and from `t.slot` in the other. Since 2026-11-01, `work`'s lines changed in 41 commits and `task_ended`'s in 4 (`git log -L`), so a change made to one copy only is the expected case. The retros read the loop log (`sdlc/retros/2026-11-16-retro.md`, pattern 3).
 **Why it matters:** this is kinds 1 and 2: one fact (what a task's end means for the progress, the log row and the loop's stop) computed twice and already differing. `work` at 387 lines is the second-largest function in scope.
 **Fix:** split along the seam both copies already share. One `Loop` method takes the task's `End` or `Halt`, plus what the row needs (issue, title, size, slot, started, stops, idle), and returns what the caller does next: go on, hold, skip, or stop with this error. It writes the progress note and the one row, built by one `Loop::task_row` used by every issue-task row. `work` and `task_ended` keep only their own bookkeeping (`due`/`held` against `pass`, `continue` against `return`).
 **Size:** M (two loop modes and their tests; no state or format change)
@@ -67,7 +67,7 @@ The same issue stopped at `reviewing: sign-in` therefore logs its worker time an
 - `medium::size_refusal` (`medium.rs:54-82`) has its own rule. It fetches the issue again as `gh issue view` text (`github.issue`), parses the `labels:` header itself (`medium.rs:85-98`, a copy of the header reader in `gh.rs:607-611`), and refuses more than one size: `_ => Some(format!("its issue #{issue} has more than one size label ({})", ..))`.
 
 For an issue labelled `size:S` and `size:L`, the queue ranks it S, `--check` passes it and the log shows S. A medium-risk PR from it is refused for "more than one size label". With the labels in the other order, the queue says L. The test fixture shows the double source: `github_medium` (`task_loop_arm.rs:583-600`) has to script the labels twice, once as `labels:\t{labels}` text and once as `open_issue(3, &[READY, "size:S"], "")`.
-**Why it matters:** this is kind 1 (one fact, two rules that disagree on a reachable input) and kind 3 (`medium.rs` re-parses a `gh` output format that `src/github/` owns). The sizing rule ("Every issue gets a size", `AGENTS.md`) means one size per issue.
+**Why it matters:** this is kind 1 (one fact, two rules that disagree on a reachable input) and kind 3 (`medium.rs` re-parses a `gh` output format that `src/github/` owns). The sizing rule in `AGENTS.md` gives an issue one label: "give it a `size:S`, `size:M` or `size:L` label".
 **Fix:** one `queue::size` rule that returns the size, or an error for none and for more than one. Every caller uses it; the loop's check names a doubly-sized issue as blocked. `medium::size_refusal` gets the labels from `Issue::labels` (`issues_open`, or one structured read added to `GitHubBackend`) instead of parsing `IssueText::text`.
 **Size:** S (one module's rule and its callers; the `GitHubBackend` read is optional)
 **Depends on:** none known
@@ -110,27 +110,6 @@ The first also covers a kill, at the cost of one lock field.
 - [ ] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass
 - [ ] Docs: `docs/workflow.md`'s restart notes, if they describe the take-over
 
-### IMP-5 - The medium trial's merges and breaks are counted only by the loop process that armed the PR, so a restart before the merge loses them
-
-**Where:** `src/commands/task_loop.rs:851-856`, `src/commands/task_loop.rs:4310-4325`, `src/commands/task_loop/waiting.rs:233-235`, `src/commands/task_loop.rs:3213-3223`, `src/commands/task_loop.rs:3361-3363`, `src/task/trial.rs:1-6`, `src/task/trial.rs:105-108`
-**What happens:** the trial's record is the comments on the `medium-trial` issue: "sbxm keeps no state of its own for it" (`trial.rs:1-6`). It counts merges from those comments and stops at `SIZE` = 10 (`trial.rs:15`, 105-108). But the comments are written from state that lives only in the loop's memory, empty at each start (`task_loop.rs:4310-4325`):
-- `arm_medium` puts an armed medium PR into `medium_armed` (`waiting.rs:235`) and `armed`.
-- `check_main` posts the merge comment only for a PR still in `self.armed`/`medium_armed` (`task_loop.rs:3214-3223`).
-- `pause` posts a break only for a PR in `medium_merged` (3361-3363).
-
-A loop restarted between arming a medium PR and its merge (logon, `--stop` and restart, an error restart under decision 310(3)) therefore posts no merge comment for it. The trial undercounts and can arm more than 10 medium PRs. A red `main` after that merge is never recorded as the trial's break. `tests/main/task_loop_trial.rs` runs each case in one process. None restarts the loop between the arming and the merge.
-**Why it matters:** kind 4: a restart leaves the trial half-recorded, with no test. Decision 316(4) fixes the trial at 10 medium auto-merges, judged on its breaks; both numbers come from these comments.
-**Fix:** derive the trial's merges from durable facts at each pass instead of the in-memory sets. A medium PR armed by the loop is known from GitHub: auto-merge armed, review risk medium in its task record, or a `Medium trial: armed` line the window comment already posts. When a merge of such a PR has no merge comment yet (`trial::has_merge_of`), post it, whoever armed it. Watch its merge commit for a break the same way.
-**Size:** M (the trial's merge and break detection, with restart tests; no new state file if the facts are read from GitHub and the task records)
-**Depends on:** none known
-**Related:** IMP-4 (both are restart gaps in the loop's start)
-**Acceptance criteria:**
-- [ ] A medium PR armed by one loop process and merged while a second runs gets its `Medium trial: merge` comment, once
-- [ ] A red run on that merge commit seen by the second process posts the trial's break comment
-- [ ] A test covering it fails before the fix and passes after (a new file, e.g. `tests/main/task_loop_trial_restart.rs`)
-- [ ] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass
-- [ ] Docs: no user-visible change beyond the comments posted
-
 ### IMP-6 - `prepare_source_with` is 415 lines and changes in nearly every pipeline feature; its rollback is a seam of its own
 
 **Where:** `src/task/pipeline.rs:1426-1840`, `src/task/pipeline.rs:1437-1520`, `src/task/pipeline.rs:1549-1722`, `src/task/pipeline.rs:1735-1838`
@@ -139,7 +118,7 @@ A loop restarted between arming a medium PR and its merge (logon, `--stop` and r
 - 1549-1722: the build closure (clone, plan, files, record, sandbox create)
 - 1735-1838: the rollback on failure, about 100 lines, with a local branch (1739-1758) and a cloud branch (1759-1838)
 
-`git log -L1426,1840:src/task/pipeline.rs --since=2026-10-16` lists 48 commits; 12 since 2026-11-01 (for example `bbd7545` archive before rollback, `fd6c13f` per-task sbx lines, `9db0020` keep a failed warm-up, `a2160f3` cloud shapes). Most of them touched the rollback or the checks, and each had to be read inside the whole function.
+`git log -L1426,1840:src/task/pipeline.rs --since=2026-10-16` lists 48 commits; 12 since 2026-11-01 (for example `bbd7545` archive before rollback, `fd6c13f` per-task sbx lines, `9db0020` keep a failed warm-up, `a2160f3` cloud shapes). Every one of them changed lines of this one function, so each was read and reviewed inside all 415 of them.
 **Why it matters:** kind 2: the function every new start goes through has grown past what one change can hold in view. The rollback holds the decision-268 and review-M-1 rules (only the sandbox this start created, the record kept while a sandbox may exist) in 100 lines of nested branches.
 **Fix:** split at the existing seams, with no behavior change: `check_source(..) -> Checked` (1437-1520), the build closure as a function taking `&mut Started` (1549-1722), and `undo_failed_start(local | cloud, ..) -> anyhow::Error` (1735-1838).
 **Size:** M (one function in one module, a pure refactor, with the existing tests as the net)
@@ -154,7 +133,7 @@ A loop restarted between arming a medium PR and its merge (logon, `--stop` and r
 
 **Where:** `src/task/record.rs:944-960`, `src/task/finish.rs:95-102`, `src/task/finish.rs:141-169`, `src/task/pipeline.rs:2237`, `src/task/pipeline.rs:4375`, `src/task/pipeline.rs:5274`, `src/task/pipeline.rs:1435`, `src/commands/task_loop.rs:1804-1808`, `src/commands/task_loop.rs:1910-1914`, `src/commands/task_loop.rs:1986-1990`, `src/task/queue.rs:77`
 **What happens:** `record.rs` defines which ids are valid (`is_valid_id`, 944-960) and builds `spec_id`, `fix_id`, `task_dir` and `sandbox_name`. It has no constructor for `issue-<n>` or `pr-<n>`, nor for the workspace and clone folders.
-- `format!("issue-{…}")` appears 56 times in `src/`. In scope: 15 times in `task_loop.rs`, plus `parallel.rs:196`, `task_loop/jobs.rs:291, 1089, 1202`, `queue.rs:77` and `pipeline.rs:555, 1045, 1152`.
+- `format!("issue-{…}")` appears 56 times in `src/`. In scope: 16 times in `task_loop.rs`, plus `parallel.rs:196`, `task_loop/jobs.rs:291, 1089, 1202`, `queue.rs:77` and `pipeline.rs:555, 1045, 1152`.
 - Two private helpers outside the scope do the same mapping: `main.rs:21` and `task_status.rs:14`.
 - The predicate "this repo's issue task, not finished, no PR, id `issue-<number>`" is written three times in `task_loop.rs` (1804-1808, 1910-1914, 1986-1990).
 - The workspace `<base>/tasks/<id>` is joined by hand at `pipeline.rs:233, 490, 1047, 1244, 1396, 1435` and `merged.rs:248`.
@@ -219,21 +198,28 @@ That is about 10 `gh` calls per PR, of which 4 identical `pr_merge_state` reads 
 
 ## Questions
 
-### IMP-10 - Should a queued review or fix job run on a PR sbxm only pushed a fix to?
+### IMP-5 - The medium trial's merges and breaks are counted only by the loop process that armed the PR, so a restart before the merge loses them: where should an arming be recorded?
 
-**Where:** `src/task/jobs.rs:497-502`, `src/task/jobs.rs:507-511`, `src/commands/task_loop/jobs.rs:1045-1058`, `src/task/finish.rs:2652`
-**What happens:** a queued `review`/`fix` job runs "only of a PR sbxm opened (answer 4)" (`task_loop/jobs.rs:1045-1058`). Three predicates in scope answer "did sbxm open this PR?" differently:
-- `jobs::opener` (`jobs.rs:497-502`), which the job gate uses, accepts any record whose `pr` names the PR (`named_by(.., |_| true)`). That includes a fix task's record: `finish_fix` sets `record.pr` to the PR it pushed to (`finish.rs:2652`).
-- `jobs::first_opener` (507-511) accepts only issue and spec tasks that didn't continue a PR (issue 600).
-- `queue::loop_prs` adds the loop's hook.
+**Where:** `src/commands/task_loop.rs:851-856`, `src/commands/task_loop.rs:4310-4325`, `src/commands/task_loop/waiting.rs:228-237`, `src/commands/task_loop/waiting.rs:243-258`, `src/commands/task_loop/waiting.rs:403-421`, `src/commands/task_loop.rs:3213-3223`, `src/commands/task_loop.rs:3361-3363`, `src/commands/task_loop.rs:3737-3751`, `src/task/window.rs:217-219`, `src/task/trial.rs:1-6`, `src/task/trial.rs:33-40`, `src/task/trial.rs:105-108`
+**What happens:** the trial's record is the comments on the `medium-trial` issue: "sbxm keeps no state of its own for it" (`trial.rs:1-6`). It counts merges from those comments and stops at `SIZE` = 10 (`trial.rs:15`, 105-108). But the comments are written from state that lives only in the loop's memory, empty at each start (`task_loop.rs:4310-4325`):
+- `arm_medium` arms through `arm_head` (`waiting.rs:243-258`), which adds the PR to `armed`; it then adds the PR's `trial::Armed` (how it was armed, `late_min`, `review_at`; `trial.rs:33-40`) to `medium_armed` (`waiting.rs:233-235`).
+- `check_main` posts the merge comment only for a PR still in `self.armed`/`medium_armed` (`task_loop.rs:3214-3223`).
+- `pause` posts a break only for a PR in `medium_merged` (3361-3363).
 
-For a PR #77 opened by hand, on which the user once ran `sbxm task fix --pr 77`, the job gate passes. Its own refusal text says it applies when "sbxm didn't open it".
-**Why it matters:** kind 1, three versions of one fact. It is a question because answer 4 may have meant "a PR sbxm has a record of", which a fix's record satisfies. The question names answer 4 of the queued-jobs issue (decision 309), and the evidence is that its words and `first_opener` (issue 600) both say "opened".
+A loop restarted between arming a medium PR and its merge (logon, `--stop` and restart, an error restart under decision 310(3)) therefore posts no merge comment for it. The trial undercounts and can arm more than 10 medium PRs, and a red `main` after that merge is never recorded as the trial's break. `tests/main/task_loop_trial.rs` runs each case in one process; none restarts the loop between the arming and the merge.
+
+What exists on disk or on GitHub after a restart doesn't settle which PRs the loop armed:
+- **The window comment** (`window.rs:217-219`: "Medium risk: auto-merge will be armed at … unless labelled `hold`") announces a window. It is posted whether or not the arming happens later (a `hold`, a moved head, a pause), so it doesn't prove an arming.
+- **A medium review risk in the task record, or auto-merge armed on GitHub,** doesn't say who armed it: the user can arm a PR by hand.
+- **The loop's log row** is the only existing record of the arming itself: `arm_row` (`waiting.rs:403-421`) appends a row whose outcome is `auto-merge armed (medium, labelled `go`)` or `auto-merge armed (medium, its veto window ended)` to the loop's log file under the base dir (`log_row`, `task_loop.rs:3737-3751`). But a failed append only warns, so the row can be missing; the row holds neither `late_min` nor `review_at`, which the merge comment reports; and reading it back would make the log (decision 305) a source of state.
+**Why it matters:** kind 4: a restart leaves the trial half-recorded, with no test. Decision 316(4) fixes the trial at 10 medium auto-merges, judged on its breaks; both numbers come from these comments. It is a question because fixing it means choosing where an arming is recorded, and every durable choice is new state or a new reading of an existing file.
 **Recommendation:**
-- (a) the job gate uses `first_opener`, so only a PR an sbxm issue or spec task opened gets a queued job, and the refusal text stays true. Recommended: it matches the message and issue 600's rule, and a fixed hand-made PR can still be reviewed by hand.
-- (b) keep `opener` as it is and reword the refusal ("no task record of … names PR #N").
-**Size:** S (one predicate or one message, and a test)
+- (a) Record the arming in the PR's own task record when the loop arms it: `trial::Armed` (how, `late_min`, `review_at`) under a new key in `task.json`, written right after `pr_arm_auto_merge` succeeds. A new loop rebuilds `armed` and `medium_armed` from the records of the open loop PRs, and posts a missing merge comment (`trial::has_merge_of`) and watches the merge commit as the arming loop would. Recommended: it is complete (all three fields), survives any restart, and tells an arming from an announced window.
+- (b) Rebuild from the earlier loop logs' `auto-merge armed (medium, …)` rows. No new state, but a row can be missing, `late_min` and `review_at` would be reported as unknown, and the log becomes something the loop reads.
+- (c) Leave it, and document that a restart between arming and merge loses the trial's comment for that PR, to be counted by hand at the retro.
+**Size:** M (for (a): one record field, the loop's start, restart tests)
 **Depends on:** none known
+**Related:** IMP-4 (both are restart gaps in the loop's start)
 
 ## Summary
 
@@ -253,19 +239,20 @@ Findings per kind (a finding counted under its main kind):
 
 | Kind | Findings |
 |---|---|
-| 1. Duplicated logic that drifted or could | 4 (IMP-1, IMP-2, IMP-3, IMP-10) |
+| 1. Duplicated logic that drifted or could | 3 (IMP-1, IMP-2, IMP-3) |
 | 2. Too large to change safely | 1 (IMP-6; IMP-2 is also `work`'s split) |
 | 3. Hidden coupling | 2 (IMP-7, IMP-8) |
-| 4. Half-done after a stop, kill or restart | 2 (IMP-4, IMP-5) |
+| 4. Half-done after a stop, kill or restart | 2 (IMP-4; IMP-5, a question) |
 | 5. Tests that pin implementation details | 0 |
 | 6. Work done more often than needed | 1 (IMP-9) |
 
 Looked at and found nothing worth a change:
-- **State files:** `task.json`, `outcome.json`, the loop lock's rewrite, the pause file and the running job file are all written through a temp file and a rename, so a kill leaves no torn state file. The four copies of that pattern (`record.rs:1108`, `loop_pause.rs:143`, `task_loop.rs:534`, `jobs.rs:406`) differ only in temp-file cleanup.
+- **State files:** `task.json`, `outcome.json`, the loop lock's rewrite, the pause file and the running job file are all written through a temp file and a rename, so a kill leaves no torn state file. The four copies of that pattern (`record.rs:1108`, `loop_pause.rs:144`, `task_loop.rs:534`, `jobs.rs:405`) differ in small details (removing the temp file after a failed rename, a trailing newline, creating the folder), none of which loses state.
 - **Risk and history risk:** one rule (`queue::history_risk`, `queue::awaiting_rank`), shared by the loop and `sbxm status`.
 - **`machine.rs`'s state table:** the one place for stage and status transitions.
 - **The review-comment format between `review.rs` and `pr_fix.rs`:** its round trip is covered by the `task_fix*` tests, which build comments with the real writers.
 - **`finish` killed between its push and the PR's create:** a retry adopts the pushed branch (issue 598), except when the review didn't cover the tip, which is refused by design.
 - **`jobs::end`, which writes `done/` then removes `running/`:** a kill between the two would report the job twice. The window is two calls wide, too small to be worth a change.
 - **Kind 5:** the call-order assertions found (`tests/main/task_finish.rs:1466` asserting which GitHub call came first, the `"room"` filters in `tests/main/task_loop.rs:502` and `:705`) are mild. None has broken on a refactor that I could find, so none is worth an issue.
+- **Who opened a PR, for a queued `review` or `fix` job:** `jobs::opener` (`jobs.rs:497-502`) accepts any task record of the repo, live or archived, whose `pr` is that PR, which is decision 309(4)'s definition of "a PR sbxm opened" word for word; `first_opener` (507-511) is issue 600's narrower rule for a different purpose. Different on purpose, so no finding. Nit: the job's refusal (`task_loop/jobs.rs:1050-1057`) says "so sbxm didn't open it", where the rule is about a task record naming the PR.
 - **`sbx ls`:** never called inside a loop in scope.
