@@ -267,5 +267,5 @@ Looked at and found nothing worth a change:
 - **The review-comment format between `review.rs` and `pr_fix.rs`:** its round trip is covered by the `task_fix*` tests, which build comments with the real writers.
 - **`finish` killed between its push and the PR's create:** a retry adopts the pushed branch (issue 598), except when the review didn't cover the tip, which is refused by design.
 - **`jobs::end`, which writes `done/` then removes `running/`:** a kill between the two would report the job twice. The window is two calls wide, too small to be worth a change.
-- **Kind 5:** the call-order assertions found (`tests/main/task_finish.rs:1466` asserting `calls()[0]`, the `"room"` filters in `tests/main/task_loop.rs:502` and `:705`) are mild. None has broken on a refactor that I could find, so none is worth an issue.
+- **Kind 5:** the call-order assertions found (`tests/main/task_finish.rs:1466` asserting which GitHub call came first, the `"room"` filters in `tests/main/task_loop.rs:502` and `:705`) are mild. None has broken on a refactor that I could find, so none is worth an issue.
 - **`sbx ls`:** never called inside a loop in scope.
