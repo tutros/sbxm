@@ -6,7 +6,8 @@ use crate::common;
 use common::task_fixture::open_issue;
 use sbxm::commands::task_ready_check;
 use sbxm::github::fake::{FakeGitHub, GhCall};
-use sbxm::github::{Issue, LabelEvent, MergedPr, PrFile, PrFiles};
+use sbxm::github::gh::{GhBackend, GhRunner};
+use sbxm::github::{Issue, IssueText, LabelEvent, MergedPr, PrFile, PrFiles};
 use sbxm::task::ready::{self, Status, Verdict};
 
 /// A body every rule passes, for a test that changes one part of it.
@@ -558,6 +559,24 @@ fn staleness_a_read_that_fails_warns() {
 
 // The command: `sbxm task ready-check --issue N [--json]`.
 
+/// `gh` with issue `issue` readable by number as `gh issue view` prints it, in state `state`, and
+/// its labels; it is in no open-issue listing, so a command that looked there would not find it.
+fn with_issue(gh: FakeGitHub, issue: &Issue, state: &str) -> FakeGitHub {
+    let labels: Vec<&str> = issue.labels.iter().map(String::as_str).collect();
+    gh.with_issue_text(IssueText {
+        number: issue.number,
+        title: issue.title.clone(),
+        state: state.to_owned(),
+        text: format!(
+            "title:\t{}\nstate:\t{state}\nlabels:\t{}\n--\n{}",
+            issue.title,
+            labels.join(", "),
+            issue.body
+        ),
+    })
+    .with_issue_label_names(issue.number, &labels)
+}
+
 fn command(gh: &FakeGitHub, issue: u32, json: bool) -> (anyhow::Result<bool>, String) {
     let opts = task_ready_check::Options {
         repo_root: std::env::temp_dir(),
@@ -572,11 +591,12 @@ fn command(gh: &FakeGitHub, issue: u32, json: bool) -> (anyhow::Result<bool>, St
 
 #[test]
 fn command_prints_one_line_per_rule_and_passes_a_ready_issue() {
-    let gh = FakeGitHub::default()
-        .with_repo_files(&[("src/cli.rs", "")])
-        .with_open_issues(vec![ready_issue(&format!(
-            "{READY_BODY}\nChange `src/cli.rs`.\n"
-        ))]);
+    let issue = ready_issue(&format!("{READY_BODY}\nChange `src/cli.rs`.\n"));
+    let gh = with_issue(
+        FakeGitHub::default().with_repo_files(&[("src/cli.rs", "")]),
+        &issue,
+        "OPEN",
+    );
 
     let (result, out) = command(&gh, 7, false);
 
@@ -586,16 +606,24 @@ fn command_prints_one_line_per_rule_and_passes_a_ready_issue() {
     assert!(lines[0].starts_with("pass size: "), "{out}");
     assert!(lines[2].starts_with("skip real-check: "), "{out}");
     assert!(lines[5].starts_with("pass paths: "), "{out}");
+    // Read by number, never looked for in the open-issue listing (review M-1).
+    assert!(
+        !gh.calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::IssuesOpen(_))),
+        "{:?}",
+        gh.calls()
+    );
 }
 
 #[test]
 fn command_fails_an_issue_that_fails_a_rule_but_not_one_that_only_warns() {
     let failing = open_issue(7, &["size:M"], "**Size:** M\n**Depends on:** none\n");
-    let warning = ready_issue(&format!("{READY_BODY}\n`src/gone.rs`\n"));
-    let gh = FakeGitHub::default()
-        .with_repo_files(&[("src/cli.rs", "")])
-        .with_open_issues(vec![failing]);
-
+    let gh = with_issue(
+        FakeGitHub::default().with_repo_files(&[("src/cli.rs", "")]),
+        &failing,
+        "OPEN",
+    );
     let (result, out) = command(&gh, 7, false);
     assert!(!result.unwrap(), "{out}");
     assert!(
@@ -603,7 +631,12 @@ fn command_fails_an_issue_that_fails_a_rule_but_not_one_that_only_warns() {
         "{out}"
     );
 
-    gh.set_open_issues(vec![warning]);
+    let warning = ready_issue(&format!("{READY_BODY}\n`src/gone.rs`\n"));
+    let gh = with_issue(
+        FakeGitHub::default().with_repo_files(&[("src/cli.rs", "")]),
+        &warning,
+        "OPEN",
+    );
     let (result, out) = command(&gh, 7, false);
     assert!(result.unwrap(), "{out}");
     assert!(out.contains("warn paths: "), "{out}");
@@ -611,9 +644,11 @@ fn command_fails_an_issue_that_fails_a_rule_but_not_one_that_only_warns() {
 
 #[test]
 fn command_json_gives_every_rule_with_its_status_and_reason() {
-    let gh = FakeGitHub::default()
-        .with_repo_files(&[("src/cli.rs", "")])
-        .with_open_issues(vec![open_issue(7, &[], READY_BODY)]);
+    let gh = with_issue(
+        FakeGitHub::default().with_repo_files(&[("src/cli.rs", "")]),
+        &open_issue(7, &[], READY_BODY),
+        "OPEN",
+    );
 
     let (result, out) = command(&gh, 7, true);
 
@@ -634,12 +669,24 @@ fn command_json_gives_every_rule_with_its_status_and_reason() {
 }
 
 #[test]
-fn command_refuses_an_issue_that_isnt_open() {
-    let gh = FakeGitHub::default().with_open_issues(vec![ready_issue(READY_BODY)]);
+fn command_refuses_a_closed_issue() {
+    let gh = with_issue(FakeGitHub::default(), &ready_issue(READY_BODY), "CLOSED");
+    let (result, out) = command(&gh, 7, false);
+    let err = result.unwrap_err();
+    assert!(
+        format!("{err:#}").contains("#7 isn't an open issue of o/r (it is CLOSED)"),
+        "{err:#}"
+    );
+    assert!(out.is_empty(), "{out}");
+}
+
+#[test]
+fn command_refuses_a_missing_issue() {
+    let gh = with_issue(FakeGitHub::default(), &ready_issue(READY_BODY), "OPEN");
     let (result, out) = command(&gh, 8, false);
     let err = result.unwrap_err();
     assert!(
-        format!("{err:#}").contains("#8 isn't an open issue"),
+        format!("{err:#}").contains("cannot read issue #8 of o/r"),
         "{err:#}"
     );
     assert!(out.is_empty(), "{out}");
@@ -655,15 +702,19 @@ fn command_refuses_issue_0() {
 
 #[test]
 fn command_only_reads() {
-    let gh =
-        stale_repo().with_open_issues(vec![ready_issue(&format!("{READY_BODY}\n`src/cli.rs`\n"))]);
+    let gh = with_issue(
+        stale_repo(),
+        &ready_issue(&format!("{READY_BODY}\n`src/cli.rs`\n")),
+        "OPEN",
+    );
     let (result, _) = command(&gh, 7, false);
     assert!(result.unwrap());
     for call in gh.calls() {
         assert!(
             matches!(
                 call,
-                GhCall::IssuesOpen(_)
+                GhCall::Issue(..)
+                    | GhCall::IssueLabelNames(..)
                     | GhCall::DefaultBranch(_)
                     | GhCall::RepoPaths(..)
                     | GhCall::LabelEvents(..)
@@ -673,4 +724,62 @@ fn command_only_reads() {
             "{call:?}"
         );
     }
+}
+
+/// Plays `gh` as GitHub does for a repository with 201 open issues: `gh issue list` honours its
+/// `--limit`, newest first, so issue 1 is not in a listing of 200 (review M-1).
+struct ManyOpen;
+
+impl GhRunner for ManyOpen {
+    fn run(&self, args: &[String], _stdin: Option<&str>) -> anyhow::Result<String> {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let body = "**Size:** M\n\n**Depends on:** none\n\n## Acceptance criteria\n\n- [ ] It works\n\nIn `src/cli.rs`.\n";
+        Ok(match args.as_slice() {
+            ["issue", "list", .., "--limit", limit, "--json", _] => {
+                let limit: u32 = limit.parse().unwrap();
+                let issues: Vec<String> = (1..=201u32)
+                    .rev()
+                    .take(limit as usize)
+                    .map(|n| {
+                        format!(
+                            r#"{{"number":{n},"title":"T{n}","state":"OPEN","labels":[],"body":""}}"#
+                        )
+                    })
+                    .collect();
+                format!("[{}]", issues.join(","))
+            }
+            ["issue", "view", "1", "--repo", "o/r"] => format!(
+                "title:\tOldest\nstate:\tOPEN\nlabels:\tready-for-worker, size:M\n--\n{body}"
+            ),
+            ["api", "repos/o/r/issues/1/labels", "--paginate"] => {
+                r#"[{"name":"ready-for-worker"},{"name":"size:M"}]"#.to_owned()
+            }
+            ["repo", "view", ..] => r#"{"defaultBranchRef":{"name":"main"}}"#.to_owned(),
+            ["api", "repos/o/r/git/trees/main?recursive=1"] => {
+                r#"{"tree":[{"path":"src","type":"tree"},{"path":"src/cli.rs","type":"blob"}],"truncated":false}"#.to_owned()
+            }
+            ["api", "repos/o/r/issues/1/events", "--paginate"] => "[]".to_owned(),
+            _ => anyhow::bail!("unexpected gh call {args:?}"),
+        })
+    }
+}
+
+#[test]
+fn command_checks_an_open_issue_older_than_the_newest_200() {
+    let gh = GhBackend::with_runner(Box::new(ManyOpen));
+    let opts = task_ready_check::Options {
+        repo_root: std::env::temp_dir(),
+        repo: Some("o/r".into()),
+        issue: 1,
+        json: false,
+    };
+    let mut out = Vec::new();
+
+    let ready = task_ready_check::run(&opts, &gh, &mut out).unwrap();
+
+    let out = String::from_utf8(out).unwrap();
+    assert!(ready, "{out}");
+    assert_eq!(out.lines().count(), 8, "{out}");
+    assert!(out.contains("pass size: "), "{out}");
+    assert!(out.contains("pass paths: "), "{out}");
 }

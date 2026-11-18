@@ -6,11 +6,11 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use super::task_start::resolve_repo;
-use crate::github::GitHubBackend;
+use crate::github::{GitHubBackend, Issue};
 use crate::task::ready::{self, Status, Verdict};
 
 pub struct Options {
@@ -37,11 +37,8 @@ pub fn run(opts: &Options, github: &dyn GitHubBackend, out: &mut dyn Write) -> R
         bail!("issue numbers start at 1; pass --issue <n>");
     }
     let repo = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
-    let open = github.issues_open(&repo)?;
-    let Some(issue) = open.iter().find(|i| i.number == number) else {
-        bail!("#{number} isn't an open issue of {repo}");
-    };
-    let verdicts = ready::check(&repo, github, issue);
+    let issue = open_issue(&repo, github, number)?;
+    let verdicts = ready::check(&repo, github, &issue);
     let ready = verdicts.iter().all(|v| v.status != Status::Fail);
     if opts.json {
         let report = Report {
@@ -56,4 +53,38 @@ pub fn run(opts: &Options, github: &dyn GitHubBackend, out: &mut dyn Write) -> R
         }
     }
     Ok(ready)
+}
+
+/// Issue `number` read by itself (review M-1): its text from `gh issue view`, the body after its
+/// `--` line, and its labels, every page. Never looked for in the open-issue listing, which holds
+/// only the newest open issues. Refused when it is closed or can't be read.
+fn open_issue(repo: &str, github: &dyn GitHubBackend, number: u32) -> Result<Issue> {
+    let text = github
+        .issue(repo, number)
+        .with_context(|| format!("cannot read issue #{number} of {repo}"))?;
+    if !text.state.eq_ignore_ascii_case("open") {
+        bail!(
+            "#{number} isn't an open issue of {repo} (it is {})",
+            text.state
+        );
+    }
+    let labels = github
+        .issue_label_names(repo, number)
+        .with_context(|| format!("cannot read the labels of issue #{number} of {repo}"))?;
+    let body = match text.text.lines().position(|line| line.trim_end() == "--") {
+        Some(at) => text
+            .text
+            .lines()
+            .skip(at + 1)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => text.text.clone(),
+    };
+    Ok(Issue {
+        number,
+        open: true,
+        title: text.title,
+        labels,
+        body,
+    })
 }
