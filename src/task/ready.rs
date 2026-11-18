@@ -322,16 +322,9 @@ fn files(lines: &[&str]) -> Verdict {
     let Some(value) = field(lines, "**Files:**") else {
         return Verdict::new(RULE, Status::Skip, "no **Files:** line");
     };
-    let entries: Vec<&str> = value.split(',').map(str::trim).collect();
-    let well_formed = entries.iter().all(|entry| {
-        let entry = entry.strip_suffix("(new)").map_or(*entry, str::trim_end);
-        entry.len() > 2
-            && entry.starts_with('`')
-            && entry.ends_with('`')
-            && !entry[1..entry.len() - 1].contains('`')
-    });
-    if well_formed {
-        Verdict::new(RULE, Status::Pass, format!("{} paths", entries.len()))
+    if files_well_formed(value) {
+        let count = value.split(',').count();
+        Verdict::new(RULE, Status::Pass, format!("{count} paths"))
     } else {
         Verdict::new(
             RULE,
@@ -339,6 +332,18 @@ fn files(lines: &[&str]) -> Verdict {
             format!("**Files:** `{value}` is not a comma-separated list of backticked paths"),
         )
     }
+}
+
+/// Whether `value`, a `**Files:**` line's text, is a comma-separated list of backticked paths,
+/// each maybe marked `(new)`.
+pub fn files_well_formed(value: &str) -> bool {
+    value.split(',').map(str::trim).all(|entry| {
+        let entry = entry.strip_suffix("(new)").map_or(entry, str::trim_end);
+        entry.len() > 2
+            && entry.starts_with('`')
+            && entry.ends_with('`')
+            && !entry[1..entry.len() - 1].contains('`')
+    })
 }
 
 /// A repository path the body names in backticks, and whether it is marked `(new)`.
