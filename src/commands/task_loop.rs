@@ -2894,35 +2894,16 @@ impl Loop<'_> {
     /// Whether every resolve already pushed onto PR `number` (a finished fix task of it other
     /// than `current`) passed [`Self::arm`]'s checks, as its own task must: a narrow review of a
     /// later merge doesn't clear the risk an earlier one left (review M-1). Read from the fix
-    /// tasks' records, so a restarted loop sees them too; one that can't be read counts as not
-    /// passing.
+    /// tasks' records by [`queue::fixes_pass`]'s rule, so a restarted loop sees them too; one that
+    /// can't be read counts as not passing.
     fn earlier_resolves_pass(&self, number: u32, current: &str) -> bool {
-        let Ok(folders) = record::task_folders(&self.base_dir) else {
-            return false;
-        };
-        let prefix = format!("fix-{number}-");
-        folders.iter().all(|dir| {
-            let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
-                return true;
-            };
-            if !id.starts_with(&prefix) || id == current {
-                return true;
-            }
-            if check_own_folder(&self.base_dir, dir).is_err() {
-                return false;
-            }
-            match record::read(&dir.join("task.json")) {
-                Ok(rec) if rec.kind != Kind::Fix || rec.repo != self.repo => true,
-                // A log-fix that isn't clean left the PR to the user, whatever came after it
-                // (review M-2): it passes only finished and clean.
-                Ok(rec) if dir.join(pr_fix::CHECK_LOG).is_file() => {
-                    log_fix_left(dir, Some(&rec)).is_none() && passes_arm_checks(&rec)
-                }
-                Ok(rec) if rec.stage != Stage::Finished => true,
-                Ok(rec) => passes_arm_checks(&rec),
-                Err(_) => false,
-            }
-        })
+        queue::fixes_pass(
+            &self.base_dir,
+            &self.repo,
+            number,
+            Some(current),
+            passes_arm_checks,
+        )
     }
 
     /// Disarms PR `number`'s auto-merge for one of the loop's own reasons (a push, a pause, a
@@ -3663,7 +3644,7 @@ impl Loop<'_> {
         let clean = match (&result, &dir) {
             (Err(e), _) => Err(format!("failed: {}", first_line(&format!("{e:#}")))),
             (Ok(()), None) => Err("has no task folder".to_owned()),
-            (Ok(()), Some(dir)) => match log_fix_left(dir, fix.as_ref()) {
+            (Ok(()), Some(dir)) => match queue::log_fix_left(dir, fix.as_ref()) {
                 Some(why) => Err(why),
                 None => review
                     .as_ref()
@@ -3960,34 +3941,6 @@ fn not_armed(reason: &str, also: Option<&str>) -> String {
 
 /// Why a PR isn't armed while the loop is paused on a red `main` (decision 299).
 const PAUSED_REASON: &str = "paused on a red main";
-
-/// Why the log-fix task in `dir`, recorded as `rec`, didn't end clean (decision 300), in words
-/// that follow "its log-fix"; `None` when it did: finished, no stop, a review with 0 must-fix and
-/// no question handed back in its `result.md`. The one rule for the log-fix's own outcome and for
-/// every later re-arm that looks back at it (review M-2).
-fn log_fix_left(dir: &Path, rec: Option<&Record>) -> Option<String> {
-    let Some(rec) = rec else {
-        return Some("has no readable record".to_owned());
-    };
-    if rec.stopped.is_some() {
-        return Some("stopped before its review was clean".to_owned());
-    }
-    let Some(review) = &rec.review else {
-        return Some("has no review result".to_owned());
-    };
-    if review.must_fix > 0 {
-        return Some(format!("left {} must-fix", review.must_fix));
-    }
-    let handed_back =
-        fs::read_to_string(dir.join("result.md")).is_ok_and(|text| finish::hands_back(&text));
-    if handed_back {
-        return Some("handed a question back".to_owned());
-    }
-    if rec.stage != Stage::Finished {
-        return Some(format!("stopped at {}", rec.stage.name()));
-    }
-    None
-}
 
 /// The line saying the loop is paused on a red `main`.
 fn paused_line(pause: &Pause) -> String {
