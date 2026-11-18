@@ -8,7 +8,7 @@
 use anyhow::{Result, anyhow};
 
 use crate::github::GitHubBackend;
-use crate::run::results::parse_timestamp;
+use crate::run::results::parse_day;
 
 /// The folder of the retro records on the default branch.
 pub const DIR: &str = "sdlc/retros";
@@ -93,20 +93,15 @@ pub fn day_of(secs: u64) -> String {
 }
 
 /// The end date of the first `Window: <start> to <end>` line of `text`; `None` when there is
-/// none or its end isn't a `YYYY-MM-DD` date.
+/// none or its end isn't a `YYYY-MM-DD` calendar date.
 pub fn window_end(text: &str) -> Option<String> {
     let line = text
         .lines()
         .find_map(|l| l.trim_start().strip_prefix("Window:"))?;
     let (_, rest) = line.split_once(" to ")?;
     let end = rest.trim_start().get(..10)?;
-    day_start(end)?;
+    parse_day(end)?;
     Some(end.to_owned())
-}
-
-/// The first second of day `day` (`YYYY-MM-DD`, UTC).
-fn day_start(day: &str) -> Option<u64> {
-    parse_timestamp(&format!("{day}T00:00:00Z"))
 }
 
 /// Whether a retro is due for `repo`, read from its default branch and its merged PRs: `None`
@@ -126,7 +121,7 @@ pub fn check(github: &dyn GitHubBackend, repo: &str) -> Result<Option<Due>> {
     let Some(end) = window_end(&github.file_text(repo, &branch, &file)?) else {
         return Ok(Some(Due::NoWindow { file }));
     };
-    let after = day_start(&end).ok_or_else(|| anyhow!("{end} isn't a day"))? + DAY;
+    let after = parse_day(&end).ok_or_else(|| anyhow!("{end} isn't a day"))? + DAY;
     let prs = github
         .prs_merged_since(repo, &end)?
         .iter()

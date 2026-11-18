@@ -22,6 +22,7 @@ use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::notify::FakeNotifier;
 use sbxm::run::results::parse_timestamp;
 use sbxm::task::queue::{LockFile, lock_path};
+use sbxm::task::retro;
 
 const REPO: &str = "o/r";
 const DAY: u64 = 24 * 60 * 60;
@@ -406,6 +407,57 @@ fn task_loop_retro_due_a_window_line_whose_end_isnt_a_date_is_due() {
     let posted = comments(&gh);
     assert_eq!(posted.len(), 1, "{posted:?}");
     assert!(posted[0].1.contains(RETRO), "{}", posted[0].1);
+}
+
+// --- Calendar dates in the window's end ---
+
+/// What `retro::check` says of a newest record whose window ends on `end`, with 12 PRs merged
+/// long after any of the ends tried.
+fn due_for_end(end: &str) -> Option<retro::Due> {
+    let gh = FakeGitHub::default()
+        .with_default_branch("main")
+        .with_repo_files(&[(RETRO, &format!("Window: 2024-01-01 to {end}\n"))])
+        .with_merged_prs(merged(12, at("2027-06-01T00:00:00Z")));
+    retro::check(&gh, REPO).unwrap()
+}
+
+#[test]
+fn task_loop_retro_due_a_window_end_that_isnt_a_calendar_day_counts_as_no_window() {
+    for end in [
+        "2026-02-30",
+        "2026-02-29",
+        "2026-04-31",
+        "2026-13-01",
+        "2026-11-00",
+    ] {
+        assert_eq!(
+            due_for_end(end),
+            Some(retro::Due::NoWindow {
+                file: RETRO.to_owned()
+            }),
+            "{end}"
+        );
+    }
+}
+
+#[test]
+fn task_loop_retro_due_month_ends_and_a_leap_day_are_window_ends() {
+    for end in [
+        "2026-01-31",
+        "2026-02-28",
+        "2024-02-29",
+        "2026-04-30",
+        "2026-12-31",
+    ] {
+        assert_eq!(
+            due_for_end(end),
+            Some(retro::Due::Prs {
+                prs: 12,
+                end: end.to_owned()
+            }),
+            "{end}"
+        );
+    }
 }
 
 // --- Restarts and days ---

@@ -79,6 +79,7 @@ fn github_retro_a_day_that_isnt_a_date_is_refused_before_any_call() {
     let (gh, script) = backend("[]", None);
 
     assert!(gh.prs_merged_since("o/r", "2026-11-16 is:open").is_err());
+    assert!(gh.prs_merged_since("o/r", "2026-02-30").is_err());
     assert!(script.calls.lock().unwrap().is_empty());
 }
 

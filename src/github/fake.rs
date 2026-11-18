@@ -1090,7 +1090,7 @@ impl GitHubBackend for FakeGitHub {
     /// lists them.
     fn prs_merged_since(&self, repo: &str, day: &str) -> Result<Vec<MergedPr>> {
         self.retro_read(GhCall::PrsMergedSince(repo.to_owned(), day.to_owned()))?;
-        let from = crate::run::results::parse_timestamp(&format!("{day}T00:00:00Z"))
+        let from = crate::run::results::parse_day(day)
             .ok_or_else(|| anyhow!("FakeGitHub: {day:?} isn't a day"))?;
         Ok(self
             .merged_prs

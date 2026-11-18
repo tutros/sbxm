@@ -1204,7 +1204,7 @@ impl GitHubBackend for GhBackend {
 
     fn prs_merged_since(&self, repo: &str, day: &str) -> Result<Vec<MergedPr>> {
         // The day goes into a search query: only a date is accepted.
-        if crate::run::results::parse_timestamp(&format!("{day}T00:00:00Z")).is_none() {
+        if crate::run::results::parse_day(day).is_none() {
             bail!("{day:?} isn't a YYYY-MM-DD day, so merged PRs since it can't be listed");
         }
         let limit = MERGED_LIMIT.to_string();
