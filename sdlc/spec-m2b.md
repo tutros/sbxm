@@ -120,7 +120,8 @@ A task whose medium-risk PR `task loop` armed by its veto window or `go` (issue 
 merge comment records of the arming (issue 712). The loop writes it right after the arming succeeds, drops it when it
 disarms the PR or once the merge is recorded (the comment posted and the merge commit no longer watched), and a
 loop's start rebuilds from it the PRs it watches for a merge, so a restart neither loses the merge comment nor posts
-it twice (`has_merge_of`). Absent for a PR armed by hand, which the trial doesn't count, and for every other task.
+it twice (`has_merge_of`). While it is there, `task rm --merged` (the loop's own cleanup too) leaves the task alone
+and lists why, so the record outlives the merge until the loop is done with it. Absent for a PR armed by hand, which the trial doesn't count, and for every other task.
 
 Stages and statuses:
 

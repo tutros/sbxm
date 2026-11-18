@@ -487,7 +487,7 @@ pub struct Record {
     /// How the loop armed the task's medium-risk PR, as the medium trial records it (issue 712):
     /// written when `task loop` arms it, dropped when the loop disarms it or is done with its
     /// merge (comment posted, merge commit no longer watched). A restarted loop rebuilds what it
-    /// watches from it. Absent for a PR the loop didn't arm (one armed by hand isn't counted) and
+    /// watches from it, and `task rm --merged` leaves the task alone while it is set. Absent for a PR the loop didn't arm (one armed by hand isn't counted) and
     /// in older records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub medium_armed: Option<crate::task::trial::Armed>,

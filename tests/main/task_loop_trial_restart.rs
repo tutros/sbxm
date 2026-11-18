@@ -2,12 +2,25 @@
 //! loop started later still posts the trial's merge comment (once, with the arming loop's
 //! `late_min` and `review_at`), watches the merge for a break, and counts toward the trial's 10.
 //! A PR armed by hand has no such record and isn't counted. Most tests run two loops one after
-//! the other on the same GitHub, as a restart does; the helpers are `task_loop_trial`'s.
+//! the other on the same GitHub, as a restart does; the helpers are `task_loop_trial`'s. Until
+//! the loop is done with the merge, `task rm --merged` leaves the task alone (review M-1), so the
+//! record outlives the loop's own cleanup of merged tasks.
 
+use crate::common;
+
+use std::io::Write;
+use std::path::PathBuf;
+
+use anyhow::{Result, anyhow};
+use common::fix_task::yes_on_a_terminal;
+use common::task_fixture::{Probe, backend};
+use sbxm::commands::task_loop::Steps;
+use sbxm::commands::task_rm;
 use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{RunStatus, WorkflowRun};
 use sbxm::notify::FakeNotifier;
 use sbxm::task::loop_pause;
+use sbxm::task::merged;
 use sbxm::task::record::{self, Record};
 use sbxm::task::risk::Level;
 use sbxm::task::trial::{self, Armed, How, Merge};
@@ -276,4 +289,220 @@ fn task_loop_trial_restart_the_tenth_merge_counted_after_a_restart_arms_no_eleve
         ran.out
     );
     assert!(arms(&gh).is_empty(), "{}", ran.out);
+}
+
+// --- With the loop's real cleanup of merged tasks (review M-1) ---
+
+/// The phases of [`Script`], but the loop's cleanup of merged tasks is the real `task rm
+/// --merged --yes`.
+struct Cleaning<'a> {
+    config_dir: PathBuf,
+    repo_root: PathBuf,
+    gh: &'a FakeGitHub,
+}
+
+impl Cleaning<'_> {
+    fn of<'a>(f: &Fixture, gh: &'a FakeGitHub) -> Cleaning<'a> {
+        Cleaning {
+            config_dir: f.env.config_dir(),
+            repo_root: f.repo_root.clone(),
+            gh,
+        }
+    }
+}
+
+impl Steps for Cleaning<'_> {
+    fn run(&self, issue: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected run of {issue}"))
+    }
+    fn resume(&self, issue: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected resume of {issue}"))
+    }
+    fn finish(&self, issue: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected finish of {issue}"))
+    }
+    fn file_findings(&self, _: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Ok(())
+    }
+    fn fix_pr(&self, pr: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected fix of PR #{pr}"))
+    }
+    fn fix_check(&self, pr: u32, _: u64, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected log-fix of PR #{pr}"))
+    }
+    fn rm_merged(&self, out: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        task_rm::run(
+            &self.config_dir,
+            &task_rm::Options {
+                target: task_rm::Target::Merged,
+                yes: true,
+                force: false,
+                repo_root: self.repo_root.clone(),
+                dry_run: false,
+                forget_ambiguous: false,
+            },
+            &backend(),
+            self.gh,
+            &Probe,
+            &yes_on_a_terminal(),
+            out,
+        )
+    }
+    fn room(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn task_dir(f: &Fixture, issue: u32) -> PathBuf {
+    record::task_dir(&f.base(), &format!("issue-{issue}"))
+}
+
+#[test]
+fn task_loop_trial_restart_task_rm_merged_leaves_a_task_whose_arming_is_kept() {
+    let f = fixture();
+    f.medium_pr();
+    set_medium_armed(&f, 20, ARMED);
+    let gh = github(&[20], HEAD, 0, REVIEW_AT);
+    gh.set_merged(PR, MERGED);
+
+    let plan = merged::plan(&f.base(), &gh, &Probe).unwrap();
+
+    assert!(plan.candidates.is_empty(), "{}", plan.listing());
+    assert_eq!(plan.left_alone.len(), 1, "{}", plan.listing());
+    assert_eq!(plan.left_alone[0].id, "issue-20");
+    assert!(
+        plan.left_alone[0].reason.contains("medium trial"),
+        "{}",
+        plan.left_alone[0].reason
+    );
+}
+
+#[test]
+fn task_loop_trial_restart_a_tenth_merge_left_pending_survives_the_cleanup_and_a_restart() {
+    let f = fixture();
+    f.medium_pr();
+    let gh = github(&[20, 21], HEAD, 9, REVIEW_AT);
+    let steps = Cleaning::of(&f, &gh);
+    // The first loop arms #120; it merges, and the merge comment can't be posted.
+    let ran = run_from(
+        START,
+        &f,
+        &gh,
+        &FakeNotifier::default(),
+        2,
+        &|pass| {
+            if pass == 1 {
+                gh.set_merged(PR, MERGED);
+                gh.set_merged_at(PR, START + 600);
+                gh.set_issue_comments_failing(TRIAL, true);
+            }
+        },
+        &steps,
+    );
+    ran.result.unwrap();
+    assert_eq!(
+        trial::merges(&gh.issue_comments_now(TRIAL)),
+        9,
+        "{}",
+        ran.out
+    );
+    assert!(task_dir(&f, 20).exists(), "{}", ran.out);
+    gh.set_issue_comments_failing(TRIAL, false);
+    // #121's task finished meanwhile, its window over.
+    f.loop_pr(21, Level::Medium, "Do it too.\n");
+
+    let ran = run_from(LATER, &f, &gh, &FakeNotifier::default(), 1, &|_| {}, &steps);
+
+    ran.result.unwrap();
+    let comments = gh.issue_comments_now(TRIAL);
+    assert_eq!(trial::merges(&comments), 10, "{}", ran.out);
+    assert_eq!(comments[9], merge_comment(START + 600));
+    assert_eq!(arms(&gh), [armed(PR)], "{}", ran.out);
+}
+
+#[test]
+fn task_loop_trial_restart_a_break_after_the_cleanup_and_a_restart_is_posted_once() {
+    let f = fixture();
+    f.medium_pr();
+    let gh = github(&[20], HEAD, 0, REVIEW_AT);
+    let steps = Cleaning::of(&f, &gh);
+    // The first loop arms #120, it merges, the merge comment is posted; its CI still runs.
+    let ran = run_from(
+        START,
+        &f,
+        &gh,
+        &FakeNotifier::default(),
+        3,
+        &|pass| {
+            if pass == 1 {
+                gh.set_merged(PR, MERGED);
+                gh.set_merged_at(PR, START + 600);
+                gh.set_runs(MERGED, run(77, 1, RunStatus::Going));
+            }
+        },
+        &steps,
+    );
+    ran.result.unwrap();
+    assert_eq!(
+        gh.issue_comments_now(TRIAL),
+        [merge_comment(START + 600)],
+        "{}",
+        ran.out
+    );
+    assert!(task_dir(&f, 20).exists(), "{}", ran.out);
+
+    // Restarted: `main` moved on, and the merge commit's run fails again after its re-run.
+    let ran = run_from(
+        LATER,
+        &f,
+        &gh,
+        &FakeNotifier::default(),
+        2,
+        &|pass| {
+            if pass == 1 {
+                gh.set_branch_head("main", "cccccccccccccccccccccccccccccccccccccccc");
+                gh.set_runs(MERGED, run(77, 2, RunStatus::Failed));
+            }
+        },
+        &steps,
+    );
+
+    ran.result.unwrap();
+    assert!(loop_pause::read(&f.base()).paused(), "{}", ran.out);
+    let comments = gh.issue_comments_now(TRIAL);
+    assert_eq!(comments.len(), 2, "{comments:?}\n{}", ran.out);
+    assert!(
+        comments[1].starts_with(
+            "Medium trial: break\n\nmain went red after the medium auto-merge of PR #120"
+        ),
+        "{comments:?}"
+    );
+}
+
+#[test]
+fn task_loop_trial_restart_the_cleanup_removes_the_task_once_the_trial_is_done_with_it() {
+    let f = fixture();
+    f.medium_pr();
+    let gh = github(&[20], HEAD, 0, REVIEW_AT);
+    let steps = Cleaning::of(&f, &gh);
+
+    let ran = run_from(
+        START,
+        &f,
+        &gh,
+        &FakeNotifier::default(),
+        3,
+        &|pass| {
+            if pass == 1 {
+                gh.set_merged(PR, MERGED);
+                gh.set_merged_at(PR, START + 600);
+                gh.set_runs(MERGED, run(78, 1, RunStatus::Passed));
+            }
+        },
+        &steps,
+    );
+
+    ran.result.unwrap();
+    assert_eq!(gh.issue_comments_now(TRIAL).len(), 1, "{}", ran.out);
+    assert!(!task_dir(&f, 20).exists(), "{}", ran.out);
 }

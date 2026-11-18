@@ -74,8 +74,8 @@ impl Steps for Script {
 }
 
 pub(super) struct Fixture {
-    env: TestEnv,
-    repo_root: PathBuf,
+    pub(super) env: TestEnv,
+    pub(super) repo_root: PathBuf,
 }
 
 pub(super) fn fixture() -> Fixture {
