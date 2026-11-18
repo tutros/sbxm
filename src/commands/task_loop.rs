@@ -1832,25 +1832,20 @@ impl Loop<'_> {
                         "{named}: cut off at {stage} again after the loop resumed it once; \
                          parked, see `sbxm task status --issue {issue}`"
                     )?;
-                    let now = self.now();
-                    self.append(
-                        &Row {
+                    let row = self.task_row(
+                        &TaskRun {
                             issue,
-                            title: rec.title.clone(),
+                            title: &rec.title,
                             size: None,
                             slot: Some(rec.location),
-                            started: now,
-                            ready: None,
-                            worker_s: None,
-                            reviewer_s: None,
-                            rounds: None,
-                            must_fix: review::saved_must_fix(&self.task_dir(issue)),
-                            outcome: format!("parked at {stage}: cut off again after its resume"),
-                            stops: Vec::new(),
+                            started: self.now(),
+                            stops: &[],
                             idle_before: None,
                         },
-                        warn,
-                    )?;
+                        format!("parked at {stage}: cut off again after its resume"),
+                        None,
+                    );
+                    self.append(&row, warn)?;
                     continue;
                 }
                 Owed::Due(_) => {}
@@ -4609,103 +4604,193 @@ fn work(
                 (issue, title, size, started, stops, ended, None)
             }
         };
+        let task = TaskRun {
+            issue,
+            title: &title,
+            size: size.as_deref(),
+            slot: lp.slot_of(issue),
+            started,
+            stops: &stops,
+            idle_before: idle_from.map(|end| started.saturating_sub(end)),
+        };
+        let next = lp.task_end(
+            lock,
+            ended,
+            &task,
+            retried.as_ref(),
+            "",
+            &mut parked_in_row,
+            out,
+            warn,
+        )?;
+        match next {
+            Next::Logged {
+                idle_from: from,
+                stop,
+            } => {
+                due.extend(held.drain(..));
+                tasks_run += 1;
+                idle_from = Some(from);
+                if let Some(stop) = stop {
+                    return Err(stop);
+                }
+            }
+            Next::Skipped(skipped) => refused.push(skipped),
+            Next::Taken => {}
+            Next::Held(retry) => held.push(Held {
+                issue,
+                title,
+                size,
+                started,
+                stops,
+                retry,
+                cut_off: false,
+            }),
+            Next::Stopped(again) => {
+                if let Some((retry, cut_off)) = again {
+                    due.push_front(Held {
+                        issue,
+                        title,
+                        size,
+                        started,
+                        stops,
+                        retry,
+                        cut_off,
+                    });
+                }
+                writeln!(out, "stopped on request")?;
+                left(&held, &due, out)?;
+                return Ok("stopped on request".to_owned());
+            }
+            Next::NeedsUser(cause, e) => {
+                if cause == Cause::SignIn {
+                    left(&held, &due, out)?;
+                }
+                return Err(e);
+            }
+            Next::Error(e) => return Err(e),
+        }
+    }
+}
+
+/// What an issue task's log row takes from the loop that ran it (issue 708); the rest comes from
+/// its record and its saved reviews.
+struct TaskRun<'a> {
+    issue: u32,
+    title: &'a str,
+    size: Option<&'a str>,
+    slot: Option<Location>,
+    started: u64,
+    stops: &'a [(String, u64)],
+    idle_before: Option<u64>,
+}
+
+/// A retried task's retry, whether it was cut off, and the resume it owed before it was taken
+/// (put back if a stop comes before its resume runs).
+type Retried = (Retry, bool, Option<serde_json::Value>);
+
+/// What the loop does after a task's end (issue 708), [`Loop::task_end`]'s answer to either
+/// scheduler.
+enum Next {
+    /// Its row written and counted. Idle runs from `idle_from` to the next start (decision 249,
+    /// review S-1); `stop`: the second task parked in a row.
+    Logged {
+        idle_from: u64,
+        stop: Option<anyhow::Error>,
+    },
+    /// Refused before any write: skipped, kept for the queue's report.
+    Skipped(Skipped),
+    /// Taken by a command run by hand: nothing more to do.
+    Taken,
+    /// Its lock held by a command run by hand: tried again after the loop's next task.
+    Held(Retry),
+    /// Stopped on request before any phase of it ran: no row. `Some`: a retried task, put back
+    /// first among the due tasks.
+    Stopped(Option<(Retry, bool)>),
+    /// A stop that needs the user, its row written.
+    NeedsUser(Cause, anyhow::Error),
+    /// Any other error: nothing written.
+    Error(anyhow::Error),
+}
+
+impl Loop<'_> {
+    /// Acts on a task's end in either scheduler (issue 708): says it, records the loop's progress,
+    /// writes its one row, and applies the stop rules; what the caller's own bookkeeping does next
+    /// is the answer. `tag`: what the line saying its outcome starts with.
+    #[allow(clippy::too_many_arguments)]
+    fn task_end(
+        &mut self,
+        lock: &mut LoopLock,
+        ended: std::result::Result<End, Halt>,
+        task: &TaskRun,
+        retried: Option<&Retried>,
+        tag: &str,
+        parked_in_row: &mut u32,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Next> {
+        let issue = task.issue;
         let end = match ended {
             Ok(end) => end,
-            Err(Halt::Error(e)) => return Err(e),
+            Err(Halt::Error(e)) => return Ok(Next::Error(e)),
             // Stopped before any phase of it ran (review M-2 of issue 570): no row, and it is left
             // as it was, a cut-off task's resume still owed to the next loop.
             Err(Halt::Stopped) => {
                 match retried {
                     Some((retry, cut_off, owed)) => {
                         if let Some(owed) = owed
-                            && let Err(e) = lp.mark_resume(issue, owed)
+                            && let Err(e) = self.mark_resume(issue, owed.clone())
                         {
                             writeln!(
                                 warn,
                                 "warning: {}'s resume could not be marked as owed again ({e:#}); \
                                  continue it with `sbxm task resume --issue {issue}`",
-                                lp.issue_named(issue)
+                                self.issue_named(issue)
                             )?;
                         }
-                        due.push_front(Held {
-                            issue,
-                            title,
-                            size,
-                            started,
-                            stops,
-                            retry,
-                            cut_off,
-                        });
+                        return Ok(Next::Stopped(Some((*retry, *cut_off))));
                     }
-                    None if lp.record(issue).is_some() => {
-                        writeln!(out, "{}", lp.stopped_line(issue))?;
+                    None if self.record(issue).is_some() => {
+                        writeln!(out, "{}", self.stopped_line(issue))?;
                     }
                     None => {}
                 }
-                writeln!(out, "stopped on request")?;
-                left(&held, &due, out)?;
-                return Ok("stopped on request".to_owned());
+                return Ok(Next::Stopped(None));
             }
             Err(Halt::SignIn(e)) => {
-                let rec = lp.record(issue);
+                let rec = self.record(issue);
                 let stage = rec
                     .as_ref()
                     .map_or("no record".to_owned(), |r| r.stage.name().to_owned());
-                lp.append(
-                    &Row {
-                        issue,
-                        title,
-                        size,
-                        slot: lp.slot_of(issue),
-                        started,
-                        ready: None,
-                        worker_s: None,
-                        reviewer_s: None,
-                        rounds: None,
-                        must_fix: review::saved_must_fix(&lp.task_dir(issue)),
-                        outcome: format!("stopped at {stage}: sign-in"),
-                        stops,
-                        idle_before: idle_from.map(|end| started.saturating_sub(end)),
-                    },
-                    warn,
-                )?;
-                left(&held, &due, out)?;
-                return Err(needs_user(
+                let row = self.task_row(task, format!("stopped at {stage}: sign-in"), None);
+                self.append(&row, warn)?;
+                return Ok(Next::NeedsUser(
                     Cause::SignIn,
-                    sign_in_stop(
-                        e,
-                        rec.is_some()
-                            .then(|| format!("sbxm task resume --issue {issue}")),
+                    needs_user(
+                        Cause::SignIn,
+                        sign_in_stop(
+                            e,
+                            rec.is_some()
+                                .then(|| format!("sbxm task resume --issue {issue}")),
+                        ),
                     ),
                 ));
             }
             Err(Halt::UsageLimit(total)) => {
-                let rec = lp.record(issue);
-                let stage = rec.map_or("no record".to_owned(), |r| r.stage.name().to_owned());
-                lp.append(
-                    &Row {
-                        issue,
-                        title,
-                        size,
-                        slot: lp.slot_of(issue),
-                        started,
-                        ready: None,
-                        worker_s: None,
-                        reviewer_s: None,
-                        rounds: None,
-                        must_fix: review::saved_must_fix(&lp.task_dir(issue)),
-                        outcome: format!("stopped at {stage}: usage limit"),
-                        stops,
-                        idle_before: idle_from.map(|end| started.saturating_sub(end)),
-                    },
-                    warn,
-                )?;
-                return Err(needs_user(
+                let stage = self
+                    .record(issue)
+                    .map_or("no record".to_owned(), |r| r.stage.name().to_owned());
+                let row = self.task_row(task, format!("stopped at {stage}: usage limit"), None);
+                self.append(&row, warn)?;
+                return Ok(Next::NeedsUser(
                     Cause::UsageLimit,
-                    anyhow!(
-                        "the usage limit held through {} of waits in a row; the loop stops; continue \
-                     with `sbxm task resume --issue {issue}` once it resets",
-                        queue::span(total.as_secs())
+                    needs_user(
+                        Cause::UsageLimit,
+                        anyhow!(
+                            "the usage limit held through {} of waits in a row; the loop stops; \
+                             continue with `sbxm task resume --issue {issue}` once it resets",
+                            queue::span(total.as_secs())
+                        ),
                     ),
                 ));
             }
@@ -4716,8 +4801,10 @@ fn work(
             End::Refused(_) | End::Taken(_) => Outcome::Skipped,
             End::Held(_) => Outcome::Held,
         };
-        note(lock, lp, warn, |p| {
-            p.current = None;
+        note(lock, self, warn, |p| {
+            if p.current == Some(issue) {
+                p.current = None;
+            }
             p.set(issue, recorded);
             if matches!(recorded, Outcome::Done | Outcome::Parked) {
                 p.counted += 1;
@@ -4727,42 +4814,51 @@ fn work(
             End::Refused(reason) => {
                 // The line before named the issue with its title already.
                 writeln!(out, "skipped #{issue}: refused before any write: {reason}")?;
-                refused.push(Skipped {
+                return Ok(Next::Skipped(Skipped {
                     issue,
                     reason: format!("refused before any write: {reason}"),
-                });
-                continue;
+                }));
             }
             End::Taken(line) => {
                 writeln!(out, "{line}")?;
-                continue;
+                return Ok(Next::Taken);
             }
-            End::Held(retry) => {
-                held.push(Held {
-                    issue,
-                    title,
-                    size,
-                    started,
-                    stops,
-                    retry,
-                    cut_off: false,
-                });
-                continue;
-            }
+            End::Held(retry) => return Ok(Next::Held(retry)),
             End::Done { ready, outcome } => (Some(ready), outcome, false),
             End::Parked { ready, outcome } => (ready, outcome, true),
             End::Stopped(outcome) => (None, outcome, false),
         };
-        due.extend(held.drain(..));
-        tasks_run += 1;
-        let rec = lp.record(issue);
+        let row = self.task_row(task, outcome.clone(), ready);
+        writeln!(out, "{tag}{}: {outcome}", self.issue_named(issue))?;
+        self.append(&row, warn)?;
+        // A task that never got ready idles the loop from its end; one that did, from its ready,
+        // so the loop's own finish and findings filing count, a failed finish too.
+        let idle_from = ready.unwrap_or_else(|| self.now());
+        *parked_in_row = if parked { *parked_in_row + 1 } else { 0 };
+        let stop = (*parked_in_row >= 2).then(|| {
+            needs_user(
+                Cause::Parked,
+                anyhow!(
+                    "two tasks parked in a row; the loop stops; see `sbxm task status` for what \
+                     each left"
+                ),
+            )
+        });
+        Ok(Next::Logged { idle_from, stop })
+    }
+
+    /// An issue task's log row (issue 708): every such row is built here, its times and rounds
+    /// read from the task's record and its must-fix counts from its saved reviews.
+    fn task_row(&self, task: &TaskRun, outcome: String, ready: Option<u64>) -> Row {
+        let issue = task.issue;
+        let rec = self.record(issue);
         let duration = |agent: Option<&record::Agent>| agent?.run.as_ref().map(|r| r.duration_s);
-        let row = Row {
+        Row {
             issue,
-            title,
-            size,
-            slot: lp.slot_of(issue),
-            started,
+            title: task.title.to_owned(),
+            size: task.size.map(str::to_owned),
+            slot: task.slot,
+            started: task.started,
             ready,
             worker_s: rec.as_ref().and_then(|r| duration(r.worker.as_ref())),
             reviewer_s: rec.as_ref().and_then(|r| duration(r.reviewer.as_ref())),
@@ -4770,30 +4866,10 @@ fn work(
                 .as_ref()
                 .and_then(|r| r.review.as_ref())
                 .map(|r| r.round),
-            must_fix: review::saved_must_fix(&lp.task_dir(issue)),
-            outcome: outcome.clone(),
-            stops,
-            idle_before: idle_from.map(|end| started.saturating_sub(end)),
-        };
-        writeln!(out, "{}: {outcome}", lp.issue_named(issue))?;
-        lp.append(&row, warn)?;
-        // Idle runs from a task's ready to the next start (decision 249, review S-1), so the
-        // loop's own finish and findings filing count, a failed finish too; a task that never got
-        // ready, from its end.
-        idle_from = Some(ready.unwrap_or_else(|| lp.now()));
-        if parked {
-            parked_in_row += 1;
-            if parked_in_row >= 2 {
-                return Err(needs_user(
-                    Cause::Parked,
-                    anyhow!(
-                        "two tasks parked in a row; the loop stops; see `sbxm task status` for what \
-                     each left"
-                    ),
-                ));
-            }
-        } else {
-            parked_in_row = 0;
+            must_fix: review::saved_must_fix(&self.task_dir(issue)),
+            outcome,
+            stops: task.stops.to_vec(),
+            idle_before: task.idle_before,
         }
     }
 }

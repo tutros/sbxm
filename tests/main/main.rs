@@ -197,6 +197,7 @@ mod task_loop_checks;
 mod task_loop_child;
 mod task_loop_child_env;
 mod task_loop_child_output;
+mod task_loop_end_rows;
 mod task_loop_fixes_pass;
 mod task_loop_job_children;
 mod task_loop_jobs;

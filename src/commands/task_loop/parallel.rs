@@ -26,20 +26,20 @@ use std::collections::{HashSet, VecDeque};
 use std::io::Write;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
 use super::{
-    Adopted, Cause, CutOff, End, Halt, Held, Loop, LoopLock, Options, PAUSE_POLL, PR_CAP, Phase,
-    RESUMED_HOOK, Retry, Started, first_line, jobs as queued, needs_user, note, sign_in_stop,
+    Adopted, Cause, CutOff, End, Halt, Held, Loop, LoopLock, Next, Options, PAUSE_POLL, PR_CAP,
+    Phase, RESUMED_HOOK, Retry, Started, TaskRun, first_line, jobs as queued, needs_user, note,
     wait_idle,
 };
 use crate::backend::Location;
 use crate::config::Placement;
 use crate::harness::Harness;
 use crate::task::outcome;
-use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
-use crate::task::record::{self, Process, Stage};
-use crate::task::{jobs, location, lock, review};
+use crate::task::queue::{self, Outcome, READY_LABEL, Report, Skipped};
+use crate::task::record::{Process, Stage};
+use crate::task::{jobs, location, lock};
 
 /// How often the running children are looked at.
 pub const TICK: Duration = Duration::from_secs(2);
@@ -1103,31 +1103,53 @@ fn task_ended(
         }
         return Ok(());
     }
-    let row = |outcome: String, ready: Option<u64>, t: &Live, lp: &Loop| {
-        let rec = lp.record(issue);
-        let duration = |agent: Option<&record::Agent>| agent?.run.as_ref().map(|r| r.duration_s);
-        Row {
-            issue,
-            title: t.title.clone(),
-            size: t.size.clone(),
-            slot: Some(t.slot),
-            started: t.started,
-            ready,
-            worker_s: rec.as_ref().and_then(|r| duration(r.worker.as_ref())),
-            reviewer_s: rec.as_ref().and_then(|r| duration(r.reviewer.as_ref())),
-            rounds: rec
-                .as_ref()
-                .and_then(|r| r.review.as_ref())
-                .map(|r| r.round),
-            must_fix: review::saved_must_fix(&lp.task_dir(issue)),
-            outcome,
-            stops: t.stops.clone(),
-            idle_before: t.idle_before,
-        }
+    let task = TaskRun {
+        issue,
+        title: &t.title,
+        size: t.size.as_deref(),
+        slot: Some(t.slot),
+        started: t.started,
+        stops: &t.stops,
+        idle_before: t.idle_before,
     };
-    let end = match end {
-        Ok(end) => end,
-        Err(Halt::Error(e)) => {
+    let tag = format!("[issue-{issue} {}] ", t.slot.as_str());
+    let next = lp.task_end(
+        lock,
+        end,
+        &task,
+        t.retried.as_ref(),
+        &tag,
+        &mut pass.parked_in_row,
+        out,
+        warn,
+    )?;
+    match next {
+        Next::Logged { idle_from, stop } => {
+            pass.due.extend(pass.held.drain(..));
+            pass.tasks_run += 1;
+            if last {
+                pass.idle_from = Some(idle_from);
+            }
+            if let Some(stop) = stop
+                && pass.halt.is_none()
+            {
+                lp.draining = true;
+                pass.halt = Some(stop);
+            }
+        }
+        Next::Skipped(skipped) => pass.refused.push(skipped),
+        Next::Taken => {}
+        Next::Held(retry) => pass.held.push(t.held(retry, false)),
+        Next::Stopped(again) => {
+            if let Some((retry, cut_off)) = again {
+                pass.due.push_front(t.held(retry, cut_off));
+            }
+        }
+        Next::NeedsUser(_, e) => {
+            lp.draining = true;
+            pass.halt.get_or_insert(e);
+        }
+        Next::Error(e) => {
             lp.draining = true;
             note(lock, lp, warn, |p| {
                 if p.current == Some(issue) {
@@ -1135,130 +1157,7 @@ fn task_ended(
                 }
             })?;
             pass.halt.get_or_insert(e);
-            return Ok(());
         }
-        // Stopped before any phase of it ran: no row, left as it was (review M-2 of issue 570).
-        Err(Halt::Stopped) => {
-            match &t.retried {
-                Some((retry, cut_off, owed)) => {
-                    if let Some(owed) = owed
-                        && let Err(e) = lp.mark_resume(issue, owed.clone())
-                    {
-                        writeln!(
-                            warn,
-                            "warning: {}'s resume could not be marked as owed again ({e:#}); \
-                             continue it with `sbxm task resume --issue {issue}`",
-                            lp.issue_named(issue)
-                        )?;
-                    }
-                    pass.due.push_front(t.held(*retry, *cut_off));
-                }
-                None if lp.record(issue).is_some() => {
-                    writeln!(out, "{}", lp.stopped_line(issue))?;
-                }
-                None => {}
-            }
-            return Ok(());
-        }
-        Err(Halt::SignIn(e)) => {
-            let rec = lp.record(issue);
-            let stage = rec
-                .as_ref()
-                .map_or("no record".to_owned(), |r| r.stage.name().to_owned());
-            let row = row(format!("stopped at {stage}: sign-in"), None, &t, lp);
-            lp.append(&row, warn)?;
-            lp.draining = true;
-            pass.halt.get_or_insert(needs_user(
-                Cause::SignIn,
-                sign_in_stop(
-                    e,
-                    rec.is_some()
-                        .then(|| format!("sbxm task resume --issue {issue}")),
-                ),
-            ));
-            return Ok(());
-        }
-        Err(Halt::UsageLimit(total)) => {
-            let stage = lp
-                .record(issue)
-                .map_or("no record".to_owned(), |r| r.stage.name().to_owned());
-            let row = row(format!("stopped at {stage}: usage limit"), None, &t, lp);
-            lp.append(&row, warn)?;
-            lp.draining = true;
-            pass.halt.get_or_insert(needs_user(
-                Cause::UsageLimit,
-                anyhow!(
-                    "the usage limit held through {} of waits in a row; the loop stops; continue \
-                     with `sbxm task resume --issue {issue}` once it resets",
-                    queue::span(total.as_secs())
-                ),
-            ));
-            return Ok(());
-        }
-    };
-    let recorded = match &end {
-        End::Done { .. } => Outcome::Done,
-        End::Parked { .. } | End::Stopped(_) => Outcome::Parked,
-        End::Refused(_) | End::Taken(_) => Outcome::Skipped,
-        End::Held(_) => Outcome::Held,
-    };
-    note(lock, lp, warn, |p| {
-        if p.current == Some(issue) {
-            p.current = None;
-        }
-        p.set(issue, recorded);
-        if matches!(recorded, Outcome::Done | Outcome::Parked) {
-            p.counted += 1;
-        }
-    })?;
-    let (ready, outcome, parked) = match end {
-        End::Refused(reason) => {
-            writeln!(out, "skipped #{issue}: refused before any write: {reason}")?;
-            pass.refused.push(Skipped {
-                issue,
-                reason: format!("refused before any write: {reason}"),
-            });
-            return Ok(());
-        }
-        End::Taken(line) => {
-            writeln!(out, "{line}")?;
-            return Ok(());
-        }
-        End::Held(retry) => {
-            pass.held.push(t.held(retry, false));
-            return Ok(());
-        }
-        End::Done { ready, outcome } => (Some(ready), outcome, false),
-        End::Parked { ready, outcome } => (ready, outcome, true),
-        End::Stopped(outcome) => (None, outcome, false),
-    };
-    pass.due.extend(pass.held.drain(..));
-    pass.tasks_run += 1;
-    let row = row(outcome.clone(), ready, &t, lp);
-    writeln!(
-        out,
-        "[issue-{issue} {}] {}: {outcome}",
-        t.slot.as_str(),
-        lp.issue_named(issue)
-    )?;
-    lp.append(&row, warn)?;
-    if last {
-        pass.idle_from = Some(ready.unwrap_or_else(|| lp.now()));
-    }
-    if parked {
-        pass.parked_in_row += 1;
-        if pass.parked_in_row >= 2 && pass.halt.is_none() {
-            lp.draining = true;
-            pass.halt = Some(needs_user(
-                Cause::Parked,
-                anyhow!(
-                    "two tasks parked in a row; the loop stops; see `sbxm task status` for what \
-                     each left"
-                ),
-            ));
-        }
-    } else {
-        pass.parked_in_row = 0;
     }
     Ok(())
 }
