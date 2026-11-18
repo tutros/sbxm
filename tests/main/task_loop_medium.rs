@@ -96,13 +96,13 @@ fn no_labels_at_all_is_refused() {
 }
 
 #[test]
-fn an_issue_that_is_not_open_is_refused() {
+fn an_issue_not_among_the_open_issues_is_refused() {
     let gh = FakeGitHub::default()
         .with_open_issues(vec![open_issue(ISSUE + 1, &["size:S"], "")])
         .with_pr_files(PR, plain());
     assert_eq!(
         reasons(&gh, Source::Issue(ISSUE)),
-        ["its issue #20 is not open, so its labels could not be read"]
+        ["its issue #20 is not among the open issues, so its labels could not be read"]
     );
 }
 

@@ -68,7 +68,7 @@ fn size_refusal(github: &dyn GitHubBackend, repo: &str, source: Source) -> Optio
     };
     let Some(found) = open.iter().find(|i| i.number == issue) else {
         return Some(format!(
-            "its issue #{issue} is not open, so its labels could not be read"
+            "its issue #{issue} is not among the open issues, so its labels could not be read"
         ));
     };
     match queue::size(&found.labels) {
