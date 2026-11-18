@@ -218,6 +218,74 @@ pub fn fixes_of(base_dir: &Path, repo: &str, number: u32) -> Vec<Record> {
         .collect()
 }
 
+/// Whether every fix task already pushed onto PR `number` of `repo` (`fix-<n>-<head>`, other
+/// than `except`) passes, by the one rule the loop's re-arms and its re-check of waiting PRs
+/// share (issue 707): a folder that isn't sbxm's own or a record that can't be read doesn't pass;
+/// a log-fix (its folder holds `check-log.md`) passes only when it ended clean
+/// ([`log_fix_left`]) and `check` holds for it, whatever came after it (review M-2 of decision
+/// 300's issue); any other fix task passes unfinished, and finished only when `check` holds. Read
+/// from the records, so a restarted loop sees them too.
+pub fn fixes_pass(
+    base_dir: &Path,
+    repo: &str,
+    number: u32,
+    except: Option<&str>,
+    check: impl Fn(&Record) -> bool,
+) -> bool {
+    let Ok(folders) = record::task_folders(base_dir) else {
+        return false;
+    };
+    let prefix = format!("fix-{number}-");
+    folders.iter().all(|dir| {
+        let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
+            return true;
+        };
+        if !id.starts_with(&prefix) || Some(id) == except {
+            return true;
+        }
+        if check_own_folder(base_dir, dir).is_err() {
+            return false;
+        }
+        match record::read(&dir.join("task.json")) {
+            Ok(rec) if rec.kind != Kind::Fix || rec.repo != repo => true,
+            Ok(rec) if dir.join(crate::task::pr_fix::CHECK_LOG).is_file() => {
+                log_fix_left(dir, Some(&rec)).is_none() && check(&rec)
+            }
+            Ok(rec) if rec.stage != record::Stage::Finished => true,
+            Ok(rec) => check(&rec),
+            Err(_) => false,
+        }
+    })
+}
+
+/// Why the log-fix task in `dir`, recorded as `rec`, didn't end clean (decision 300), in words
+/// that follow "its log-fix"; `None` when it did: finished, no stop, a review with 0 must-fix and
+/// no question handed back in its `result.md`. The one rule for the log-fix's own outcome and for
+/// every later re-arm that looks back at it (review M-2).
+pub fn log_fix_left(dir: &Path, rec: Option<&Record>) -> Option<String> {
+    let Some(rec) = rec else {
+        return Some("has no readable record".to_owned());
+    };
+    if rec.stopped.is_some() {
+        return Some("stopped before its review was clean".to_owned());
+    }
+    let Some(review) = &rec.review else {
+        return Some("has no review result".to_owned());
+    };
+    if review.must_fix > 0 {
+        return Some(format!("left {} must-fix", review.must_fix));
+    }
+    let handed_back = fs::read_to_string(dir.join("result.md"))
+        .is_ok_and(|text| crate::task::finish::hands_back(&text));
+    if handed_back {
+        return Some("handed a question back".to_owned());
+    }
+    if rec.stage != record::Stage::Finished {
+        return Some(format!("stopped at {}", rec.stage.name()));
+    }
+    None
+}
+
 /// The highest risk of PR `number`'s review history after the path rules (decision 298(3)): the
 /// reviews of `own` (the task or tasks that opened it) and of every finished fix pushed onto it
 /// ([`fixes_of`]), ranked by [`awaiting_rank`]; `None` with no review. A later narrow review
