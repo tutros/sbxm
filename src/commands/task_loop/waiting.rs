@@ -5,7 +5,8 @@
 //! `--pause-medium`), or the `medium-trial` issue holds its 10 merges; a PR of any risk held only
 //! for its real check is armed once `sbxm/real-check` = `success` is on its head (#547 answer 3),
 //! under every other rule of [`Loop::arm`]. A medium PR this run armed that merges gets a merge
-//! comment on the trial's issue; a red `main` after one gets a break comment.
+//! comment on the trial's issue; a red `main` after one gets a break comment. Each arming is kept
+//! in the PR's task record too, so a loop started later does the same for it (issue 712).
 
 use std::io::Write;
 
@@ -14,7 +15,7 @@ use anyhow::Result;
 use super::{Loop, medium_source, not_armed, not_run_reason, real_check_of};
 use crate::github::PrState;
 use crate::task::queue::{self, Row};
-use crate::task::record::{Record, Stage};
+use crate::task::record::{self, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::trial::{self, Armed, How, Merge, Trial};
 use crate::task::window::{self, Window, Zone};
@@ -233,8 +234,94 @@ impl Loop<'_> {
         let note = self.arm_head(number, head, &format!("medium, {by}"), out, warn)?;
         if self.armed.contains(&number) {
             self.medium_armed.insert(number, armed);
+            self.record_arming(number, Some(armed), warn)?;
         }
         Ok(note)
+    }
+
+    /// Writes `armed` into the task record of loop PR `number` (issue 712), or drops it with
+    /// `None`, so a restarted loop knows which merges are the trial's. A record gone (its task
+    /// removed once merged) is left gone. `false`, said once, when one can't be written.
+    pub(super) fn record_arming(
+        &mut self,
+        number: u32,
+        armed: Option<Armed>,
+        warn: &mut dyn Write,
+    ) -> Result<bool> {
+        let written = queue::loop_prs(&self.base_dir, &self.repo).and_then(|prs| {
+            for pr in prs.iter().filter(|pr| pr.number == Some(number)) {
+                let dir = record::task_dir(&self.base_dir, &pr.task);
+                let Ok(mut rec) = record::read(&dir.join("task.json")) else {
+                    continue;
+                };
+                if rec.medium_armed != armed {
+                    rec.medium_armed = armed;
+                    record::write(&dir, &rec)?;
+                }
+            }
+            Ok(())
+        });
+        let Err(e) = written else {
+            return Ok(true);
+        };
+        let what = if armed.is_some() {
+            "isn't recorded in its task's task.json, so a loop started later won't record its \
+             merge on the medium trial's issue"
+        } else {
+            "can't be dropped from its task's task.json, so a loop started later may watch its \
+             merge for the medium trial again"
+        };
+        self.warn_once(
+            warn,
+            format!(
+                "{pr_named}'s medium arming {what} ({e:#})",
+                pr_named = self.pr_named(number)
+            ),
+        )?;
+        Ok(false)
+    }
+
+    /// Rebuilds, at the loop's start, the medium PRs an earlier loop armed from their task
+    /// records (issue 712): watched for their merge like the ones this run arms, so the merge
+    /// comment and a break after it are still recorded. A PR armed by hand has none.
+    pub(super) fn rebuild_trial(&mut self, warn: &mut dyn Write) -> Result<()> {
+        let prs = match queue::loop_prs(&self.base_dir, &self.repo) {
+            Ok(prs) => prs,
+            Err(e) => {
+                return self.warn_once(
+                    warn,
+                    format!(
+                        "the task records can't be listed ({e:#}); medium PRs an earlier loop \
+                         armed aren't watched for the medium trial"
+                    ),
+                );
+            }
+        };
+        for pr in prs {
+            let Some(number) = pr.number else {
+                continue;
+            };
+            if let Some(armed) = self.record_of(&pr.task).and_then(|rec| rec.medium_armed) {
+                self.armed.insert(number);
+                self.medium_armed.insert(number, armed);
+            }
+        }
+        Ok(())
+    }
+
+    /// Drops the record of each medium PR whose merge the trial is done with (issue 712): its
+    /// merge commit no longer watched and nothing of it left to post.
+    pub(super) fn drop_done_trial_records(&mut self, warn: &mut dyn Write) -> Result<()> {
+        let mut merged: Vec<u32> = self.medium_merged.iter().copied().collect();
+        merged.sort_unstable();
+        for number in merged {
+            let watched = self.watched.iter().any(|w| w.pr == Some(number));
+            let pending = self.trial_pending.iter().any(|p| p.pr() == number);
+            if !watched && !pending && self.record_arming(number, None, warn)? {
+                self.medium_merged.remove(&number);
+            }
+        }
+        Ok(())
     }
 
     /// Arms PR `number` on `head` for the reason `why` (said in brackets), and says so. Returns
@@ -443,7 +530,7 @@ impl Loop<'_> {
         if window::find_label(&labels, window::HOLD_LABEL).is_none() {
             return Ok(());
         }
-        match self.disarm(number) {
+        match self.disarm(number, warn) {
             Ok(()) => {
                 writeln!(
                     out,
@@ -585,4 +672,13 @@ pub(super) enum Pending {
     Merge(u32, Armed),
     /// A red `main` after one's merge: the PR and the comment.
     Break(u32, String),
+}
+
+impl Pending {
+    /// The PR it is about.
+    fn pr(&self) -> u32 {
+        match self {
+            Self::Merge(number, _) | Self::Break(number, _) => *number,
+        }
+    }
 }

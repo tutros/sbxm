@@ -1,7 +1,8 @@
 //! `task rm --merged` (issue 202, decision 195): finds every task whose work is merged, shows what
 //! it would remove and why, and removes it after one confirmation. Never touches a task whose PR
 //! is open or closed without merging, nor one whose result isn't safely elsewhere yet (decision
-//! 178's protection).
+//! 178's protection), nor one whose record still keeps its PR's medium arming for `task loop`
+//! (issue 712).
 
 use std::fs;
 use std::io::Write;
@@ -122,15 +123,29 @@ impl MergedPlan {
 
 /// [`finish::plan_removal`] for a task already known to be merged: a task that can't be planned
 /// (most likely because it is running) is left alone instead of stopping the whole scan, with the
-/// reason [`finish::plan_removal`] gave.
+/// reason [`finish::plan_removal`] gave. So is one whose record still keeps its PR's medium arming
+/// (issue 712, review M-1): `task loop` reads it to record the merge on the medium trial's issue
+/// and drops it once done.
 fn add_merged(
     base_dir: &Path,
-    id: &str,
+    task: &Record,
     reason: String,
     local_cleanup: Option<[String; 2]>,
     probe: &dyn ProcessProbe,
     out: &mut MergedPlan,
 ) {
+    let id = task.id.as_str();
+    if task.medium_armed.is_some() {
+        out.left_alone.push(LeftAlone {
+            id: id.to_owned(),
+            reason: format!(
+                "{reason}, but `sbxm task loop` hasn't recorded the merge on the medium trial's \
+                 issue yet (`medium_armed` in its task.json); it is removed once the loop has, or \
+                 now by `sbxm task rm` naming the task"
+            ),
+        });
+        return;
+    }
     let planned = finish::plan_removal_forgetting(base_dir, id, probe, out.forget_ambiguous)
         .and_then(|plan| Ok((plan, archive_target(base_dir, id)?)));
     match planned {
@@ -169,7 +184,7 @@ fn check_pr_number(
     }
     add_merged(
         base_dir,
-        &task.id,
+        task,
         format!("PR #{number} is merged"),
         None,
         probe,
@@ -263,7 +278,7 @@ fn check_fix(
     }
     add_merged(
         base_dir,
-        &task.id,
+        task,
         format!("PR #{number} is merged"),
         None,
         probe,
@@ -357,7 +372,7 @@ fn check_spec(
     }
     add_merged(
         base_dir,
-        &task.id,
+        task,
         format!("branch {} is merged into {}", task.branch, task.base),
         Some(local_cleanup_commands(&task.branch)),
         probe,

@@ -30,21 +30,21 @@ use sbxm::task::record::{self, Kind, NewTask, Process, Record, ReviewResult, Sta
 use sbxm::task::risk::Level;
 use sbxm::task::trial::{self, Armed, How, Merge};
 
-const REPO: &str = "o/r";
-const START: u64 = 1_793_613_600;
+pub(super) const REPO: &str = "o/r";
+pub(super) const START: u64 = 1_793_613_600;
 /// The PRs' heads, the commit every review covered.
-const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+pub(super) const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 /// A PR's head after a push no review covered.
 const PUSHED: &str = "1111111111111111111111111111111111111111";
 const MAIN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const MERGED: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-const WINDOW: u64 = 2 * 3_600;
-const TRIAL: u32 = 568;
+pub(super) const MERGED: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+pub(super) const WINDOW: u64 = 2 * 3_600;
+pub(super) const TRIAL: u32 = 568;
 /// The medium PR of the tests, issue 20's.
-const PR: u32 = 120;
+pub(super) const PR: u32 = 120;
 
 /// No task runs in these tests: the queue is empty.
-struct Script;
+pub(super) struct Script;
 
 impl Steps for Script {
     fn run(&self, issue: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
@@ -73,12 +73,12 @@ impl Steps for Script {
     }
 }
 
-struct Fixture {
-    env: TestEnv,
-    repo_root: PathBuf,
+pub(super) struct Fixture {
+    pub(super) env: TestEnv,
+    pub(super) repo_root: PathBuf,
 }
 
-fn fixture() -> Fixture {
+pub(super) fn fixture() -> Fixture {
     let env = TestEnv::new();
     let repo_root = env.tmp.path().join("repo");
     fs::create_dir_all(&repo_root).unwrap();
@@ -91,7 +91,7 @@ fn fixture() -> Fixture {
 }
 
 impl Fixture {
-    fn base(&self) -> PathBuf {
+    pub(super) fn base(&self) -> PathBuf {
         self.env.base_dir()
     }
 
@@ -108,7 +108,7 @@ impl Fixture {
 
     /// A task of issue `issue` a loop finished into PR `100 + issue`, its clean review of
     /// [`HEAD`] at `risk`, its issue text `body`.
-    fn loop_pr(&self, issue: u32, risk: Level, body: &str) {
+    pub(super) fn loop_pr(&self, issue: u32, risk: Level, body: &str) {
         let id = format!("issue-{issue}");
         let dir = record::task_dir(&self.base(), &id);
         let mut rec = Record::new(
@@ -145,7 +145,7 @@ impl Fixture {
         .unwrap();
     }
 
-    fn medium_pr(&self) {
+    pub(super) fn medium_pr(&self) {
         self.loop_pr(PR - 100, Level::Medium, "Do it.\n");
     }
 }
@@ -187,7 +187,7 @@ fn reviewed_at(at: u64) -> Vec<PostedStatus> {
 /// GitHub with PR `100 + issue` open at `head` for each of `issues` (each size M, changing one
 /// source file), the trial's issue open with `merges` merge comments, and the review of [`HEAD`]
 /// posted at `review_at`.
-fn github(issues: &[u32], head: &str, merges: usize, review_at: u64) -> FakeGitHub {
+pub(super) fn github(issues: &[u32], head: &str, merges: usize, review_at: u64) -> FakeGitHub {
     let files = PrFiles {
         changed_files: 1,
         files: vec![PrFile {
@@ -227,15 +227,15 @@ fn github(issues: &[u32], head: &str, merges: usize, review_at: u64) -> FakeGitH
     gh.with_issue_comments(TRIAL, &refs)
 }
 
-struct Ran {
-    result: Result<()>,
-    out: String,
-    warn: String,
+pub(super) struct Ran {
+    pub(super) result: Result<()>,
+    pub(super) out: String,
+    pub(super) warn: String,
 }
 
 /// Runs the loop with `--wait` for `passes` steps; `between(n)` runs after the `n`-th pass
 /// (1-based), as the world moves meanwhile.
-fn run_passes(
+pub(super) fn run_passes(
     f: &Fixture,
     gh: &FakeGitHub,
     notifier: &FakeNotifier,
@@ -254,7 +254,20 @@ fn run_with(
     between: &dyn Fn(usize),
     steps: &dyn Steps,
 ) -> Ran {
-    let clock = Cell::new(START);
+    run_from(START, f, gh, notifier, passes, between, steps)
+}
+
+/// [`run_with`] with the clock starting at `start` (issue 712: a restarted loop starts later).
+pub(super) fn run_from(
+    start: u64,
+    f: &Fixture,
+    gh: &FakeGitHub,
+    notifier: &FakeNotifier,
+    passes: usize,
+    between: &dyn Fn(usize),
+    steps: &dyn Steps,
+) -> Ran {
+    let clock = Cell::new(start);
     let sleeps = Cell::new(0usize);
     let now = || clock.get();
     let sleep = |d: Duration| {
@@ -295,18 +308,18 @@ fn run_with(
 }
 
 /// One step of the loop.
-fn run_once(f: &Fixture, gh: &FakeGitHub) -> Ran {
+pub(super) fn run_once(f: &Fixture, gh: &FakeGitHub) -> Ran {
     run_passes(f, gh, &FakeNotifier::default(), 1, &|_| {})
 }
 
-fn arms(gh: &FakeGitHub) -> Vec<GhCall> {
+pub(super) fn arms(gh: &FakeGitHub) -> Vec<GhCall> {
     gh.calls()
         .into_iter()
         .filter(|c| matches!(c, GhCall::PrArmAutoMerge(..)))
         .collect()
 }
 
-fn armed(number: u32) -> GhCall {
+pub(super) fn armed(number: u32) -> GhCall {
     GhCall::PrArmAutoMerge(REPO.into(), number, HEAD.into())
 }
 
