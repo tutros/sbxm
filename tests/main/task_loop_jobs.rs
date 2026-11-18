@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, anyhow, bail};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState};
@@ -600,7 +600,7 @@ fn a_run_of_an_issue_not_labeled_ready_is_refused() {
     f.queue_job("r.json", r#"{"kind": "run", "issue": 521}"#, 10);
     let gh = github(&[])
         .with_issue_text(issue_text(521))
-        .with_open_issues(vec![open_issue(521, &["size:S"], "")]);
+        .with_open_issues(vec![ready_open_issue(521, &["size:S"], "")]);
     let script = Script::new(&f.base());
     run_loop(&f, &script, &gh, None).result.unwrap();
     assert!(script.calls().is_empty(), "{:?}", script.calls());
@@ -622,7 +622,7 @@ fn a_run_of_a_ready_issue_is_taken_to_its_pr() {
     let gh = github(&[])
         .with_issue_text(issue_text(521))
         .with_pr(pr(621, PrState::Open))
-        .with_open_issues(vec![open_issue(521, &[READY, "size:S"], "")]);
+        .with_open_issues(vec![ready_open_issue(521, &[READY, "size:S"], "")]);
     let script = Script::new(&f.base());
     let run = run_loop(&f, &script, &gh, None);
     run.result.unwrap();

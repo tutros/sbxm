@@ -893,7 +893,7 @@ fn a_spec_and_a_template_job_run_before_the_next_issue_oldest_first() {
     f.queue_job("s.json", &spec_job("retro.md"), 100);
     let gh = github(&[SPEC_PR, 621])
         .with_issue_text(common::task_fixture::issue_text(521))
-        .with_open_issues(vec![common::task_fixture::open_issue(
+        .with_open_issues(vec![common::task_fixture::ready_open_issue(
             521,
             &[READY, "size:S"],
             "",

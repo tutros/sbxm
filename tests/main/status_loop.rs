@@ -105,7 +105,8 @@ fn issue(number: u32, title: &str, labels: &[&str]) -> Issue {
         open: true,
         title: title.into(),
         labels: labels.iter().map(|l| (*l).to_owned()).collect(),
-        body: String::new(),
+        // What the readiness rules ask of a body (issue 725).
+        body: common::task_fixture::ready_open_issue(number, labels, "").body,
     }
 }
 

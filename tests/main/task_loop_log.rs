@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{Issue, IssueRequest};
@@ -218,11 +218,11 @@ fn tree(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 fn loop_log_issue(number: u32) -> Issue {
-    open_issue(number, &["loop-log"], "")
+    ready_open_issue(number, &["loop-log"], "")
 }
 
 fn github(mut issues: Vec<Issue>) -> FakeGitHub {
-    issues.insert(0, open_issue(3, &[READY, "size:S"], ""));
+    issues.insert(0, ready_open_issue(3, &[READY, "size:S"], ""));
     FakeGitHub::default()
         .with_user("me")
         .with_default_branch("main")
@@ -365,7 +365,7 @@ fn with_two_open_loop_log_issues_the_log_goes_to_the_lower_number() {
     let f = fixture();
     let gh = github(vec![
         loop_log_issue(52),
-        open_issue(7, &["bug"], ""),
+        ready_open_issue(7, &["bug"], ""),
         loop_log_issue(41),
     ]);
 
@@ -418,8 +418,8 @@ fn a_loop_that_stops_on_an_error_still_posts_and_keeps_its_error() {
     let mut gh = github(vec![loop_log_issue(40)]);
     gh = gh.with_issue_text(issue_text(4));
     gh.set_open_issues(vec![
-        open_issue(3, &[READY, "size:S"], ""),
-        open_issue(4, &[READY, "size:S"], ""),
+        ready_open_issue(3, &[READY, "size:S"], ""),
+        ready_open_issue(4, &[READY, "size:S"], ""),
         loop_log_issue(40),
     ]);
     let script = Script::new(START);
@@ -465,7 +465,7 @@ fn two_loops_in_a_row_write_two_files_each_numbered_from_1() {
     run_loop(&f, &Script::new(START), &gh).result.unwrap();
     // The first task's record stays; the second loop takes another issue.
     gh.set_open_issues(vec![
-        open_issue(5, &[READY, "size:S"], ""),
+        ready_open_issue(5, &[READY, "size:S"], ""),
         loop_log_issue(40),
     ]);
     let gh = gh.with_issue_text(issue_text(5));
@@ -936,7 +936,7 @@ fn with_999_1000_or_1001_other_issues_logs_are_still_recovered_once() {
         let unposted = plant_earlier(&f, 3_600, 1);
         let many: Vec<_> = (1..=total)
             .map(|n| {
-                let mut issue = open_issue(1_000 + n, &["bug"], "");
+                let mut issue = ready_open_issue(1_000 + n, &["bug"], "");
                 issue.open = n % 2 == 0;
                 issue
             })
@@ -1090,7 +1090,7 @@ fn a_loop_starting_in_the_second_of_an_earlier_log_takes_the_next_free_name() {
     let gh = github(vec![loop_log_issue(40)]);
     run_loop(&f, &Script::new(START), &gh).result.unwrap();
     gh.set_open_issues(vec![
-        open_issue(5, &[READY, "size:S"], ""),
+        ready_open_issue(5, &[READY, "size:S"], ""),
         loop_log_issue(40),
     ]);
     let gh = gh.with_issue_text(issue_text(5));
@@ -1128,7 +1128,7 @@ fn a_loop_that_runs_no_task_never_posts_an_earlier_loops_log() {
     let gh = github(vec![loop_log_issue(40)]);
     run_loop(&f, &Script::new(START), &gh).result.unwrap();
     gh.set_open_issues(vec![
-        open_issue(5, &[READY, "size:S"], ""),
+        ready_open_issue(5, &[READY, "size:S"], ""),
         loop_log_issue(40),
     ]);
     let gh = gh.with_issue_text(issue_text(5));

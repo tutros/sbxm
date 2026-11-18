@@ -92,6 +92,7 @@ decision 166). A ranking is computed in code from the judge's scores.
 
 ```
 sbxm task init                         # writes sbxm-task.toml: worker, reviewer, profile, gates
+sbxm task ready-check --issue 63       # is the issue ready for a worker? one line per rule; exit 1 on a fail
 sbxm task start --issue 63             # worker in its own sandbox; commits collected; gates run
 sbxm task status                       # stage, status, commits ahead, result/review present
 sbxm status --watch                    # a live dashboard over every task (decision 171, part 4 of 6):
@@ -112,6 +113,16 @@ sbxm task run --spec idea.md           # the same for a spec task; no GitHub cal
 sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one after another
 ```
 
+- **Ready for a worker (issue 725):** `sbxm task ready-check --issue N` checks an issue against the readiness rules
+  before you label it `ready-for-worker`, and the loop checks them again before it starts the issue. They fail an
+  issue without exactly one `size:*` label and a `**Size:**` line naming the same size, without a `**Depends on:**`
+  line (`none`, or `#N` numbers then any text), with an empty `**Real check:**` line, with something left open (an
+  `**Open:**` line, a `## Open points` heading, or "to decide" anywhere), or without an `Acceptance criteria` heading (or
+  `**Acceptance criteria:**` label) holding a `- [ ]` box. They warn, never fail, on a backticked path the body names that isn't on the default branch
+  (mark one the change adds with `(new)`), on a `**Files:**` line that isn't a comma-separated list of backticked
+  paths, and on the PRs merged since the label was added that changed a path the body names (decision 295: re-check
+  the issue against them). `task loop` and `task loop --check` pass over an issue that fails a rule with the rule's
+  reason, and say its warns without holding it back; `--json` gives the verdicts as one object.
 - **Stages:** `prepared`, `working`, `gating`, `reviewing`, `fixing`, `ready`, `finished`. A failed gate shows as
   `gates-failed`; a killed run shows as `interrupted` in `task status`, and `task resume --issue N` continues a
   failed or interrupted task from its stage, keeping its clone and commits.

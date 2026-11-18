@@ -1179,6 +1179,27 @@ fn run() -> anyhow::Result<()> {
             )
         }
         Command::Task {
+            command: TaskCommand::ReadyCheck { issue, json },
+        } => {
+            // Read-only (issue 725), like `task facts`: no `task_writers`/`RunLog`, no lock.
+            let ready = commands::task_ready_check::run(
+                &commands::task_ready_check::Options {
+                    repo_root: std::env::current_dir()?,
+                    repo: None,
+                    issue,
+                    json,
+                },
+                &sbxm::github::gh::GhBackend::default(),
+                &mut screen::stdout(),
+            )?;
+            // A failed rule is exit 1 with no error of its own: its line said why.
+            if !ready {
+                let _ = screen::stdout().flush();
+                exit(1);
+            }
+            Ok(())
+        }
+        Command::Task {
             command: TaskCommand::Facts { since, until, json },
         } => {
             // Read-only (issue 593), like `task logs`: no `task_writers`/`RunLog`, no lock.

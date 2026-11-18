@@ -383,7 +383,7 @@ mod play {
     use sbxm::task::record::{self, NewTask, Process, Record, ReviewResult, Stage, Status};
 
     use super::common;
-    use super::common::task_fixture::{Probe, issue_text, open_issue};
+    use super::common::task_fixture::{Probe, issue_text, ready_open_issue};
 
     pub const REPO: &str = "o/r";
     const READY: &str = "ready-for-worker";
@@ -854,7 +854,7 @@ mod play {
             gh = gh.with_issue_text(issue_text(*n));
             let mut labels = vec![READY, "size:S"];
             labels.extend_from_slice(extra);
-            open.push(open_issue(*n, &labels, "Why\n"));
+            open.push(ready_open_issue(*n, &labels, "Why\n"));
         }
         gh.with_open_issues(open)
     }

@@ -27,7 +27,7 @@ use sbxm::task::record::{
 };
 
 use crate::common;
-use crate::common::task_fixture::{issue_text, open_issue};
+use crate::common::task_fixture::{issue_text, ready_open_issue};
 
 const REPO: &str = "o/r";
 const READY: &str = "ready-for-worker";
@@ -391,7 +391,7 @@ fn github(issues: &[u32]) -> FakeGitHub {
     let mut open = Vec::new();
     for &n in issues {
         gh = gh.with_issue_text(issue_text(n));
-        open.push(open_issue(n, &[READY, "size:S"], "Why\n"));
+        open.push(ready_open_issue(n, &[READY, "size:S"], "Why\n"));
     }
     for n in 101..=110 {
         gh = gh.with_pr(pr(n)).with_auto_merge(n);
@@ -1127,7 +1127,7 @@ fn labeled_github(issues: &[(u32, &[&str])]) -> FakeGitHub {
     let mut open = Vec::new();
     for &(n, labels) in issues {
         gh = gh.with_issue_text(issue_text(n));
-        open.push(open_issue(n, labels, "Why\n"));
+        open.push(ready_open_issue(n, labels, "Why\n"));
     }
     gh.with_open_issues(open)
 }

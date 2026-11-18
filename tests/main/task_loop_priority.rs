@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use common::Env as TestEnv;
-use common::task_fixture::open_issue;
+use common::task_fixture::ready_open_issue;
 use sbxm::backend::FakeBackend;
 use sbxm::commands::status::{self, Env, LoopSource};
 use sbxm::github::fake::FakeGitHub;
@@ -18,13 +18,13 @@ use sbxm::task::record::{Process, ProcessProbe};
 #[test]
 fn task_loop_priority_high_issues_come_first_by_size_then_oldest() {
     let open = vec![
-        open_issue(9, &["ready-for-worker", "size:M"], ""),
-        open_issue(4, &["ready-for-worker", "size:L", "priority:high"], ""),
-        open_issue(7, &["ready-for-worker", "size:S"], ""),
-        open_issue(6, &["ready-for-worker", "size:M", "priority:high"], ""),
-        open_issue(5, &["ready-for-worker", "size:M", "priority:high"], ""),
-        open_issue(8, &["ready-for-worker", "priority:high"], ""),
-        open_issue(1, &["ready-for-worker", "size:S"], ""),
+        ready_open_issue(9, &["ready-for-worker", "size:M"], ""),
+        ready_open_issue(4, &["ready-for-worker", "size:L", "priority:high"], ""),
+        ready_open_issue(7, &["ready-for-worker", "size:S"], ""),
+        ready_open_issue(6, &["ready-for-worker", "size:M", "priority:high"], ""),
+        ready_open_issue(5, &["ready-for-worker", "size:M", "priority:high"], ""),
+        ready_open_issue(8, &["ready-for-worker", "priority:high"], ""),
+        ready_open_issue(1, &["ready-for-worker", "size:S"], ""),
     ];
     // High first (M oldest first, then L, then unsized), then the rest as before.
     assert_eq!(queue_order(&open), [5, 6, 4, 8, 1, 7, 9]);
@@ -33,8 +33,8 @@ fn task_loop_priority_high_issues_come_first_by_size_then_oldest() {
 #[test]
 fn task_loop_priority_high_without_the_ready_label_is_not_queued() {
     let open = vec![
-        open_issue(3, &["size:S", "priority:high"], ""),
-        open_issue(9, &["ready-for-worker", "size:L"], ""),
+        ready_open_issue(3, &["size:S", "priority:high"], ""),
+        ready_open_issue(9, &["ready-for-worker", "size:L"], ""),
     ];
     assert_eq!(queue_order(&open), [9]);
 }
@@ -42,8 +42,8 @@ fn task_loop_priority_high_without_the_ready_label_is_not_queued() {
 #[test]
 fn task_loop_priority_other_priority_labels_do_not_move_an_issue() {
     let open = vec![
-        open_issue(9, &["ready-for-worker", "size:S", "priority:low"], ""),
-        open_issue(2, &["ready-for-worker", "size:S"], ""),
+        ready_open_issue(9, &["ready-for-worker", "size:S", "priority:low"], ""),
+        ready_open_issue(2, &["ready-for-worker", "size:S"], ""),
     ];
     assert_eq!(queue_order(&open), [2, 9]);
 }
@@ -51,10 +51,10 @@ fn task_loop_priority_other_priority_labels_do_not_move_an_issue() {
 #[test]
 fn task_loop_priority_high_comes_first_for_a_cloud_slot_too() {
     let open = vec![
-        open_issue(9, &["ready-for-worker", "size:L"], ""),
-        open_issue(4, &["ready-for-worker", "size:S", "priority:high"], ""),
-        open_issue(7, &["ready-for-worker", "size:M", "priority:high"], ""),
-        open_issue(2, &["ready-for-worker", "size:S"], ""),
+        ready_open_issue(9, &["ready-for-worker", "size:L"], ""),
+        ready_open_issue(4, &["ready-for-worker", "size:S", "priority:high"], ""),
+        ready_open_issue(7, &["ready-for-worker", "size:M", "priority:high"], ""),
+        ready_open_issue(2, &["ready-for-worker", "size:S"], ""),
     ];
     // Largest first within the high ones, then within the rest.
     assert_eq!(largest_first(&open), [7, 4, 9, 2]);
@@ -113,11 +113,11 @@ fn task_loop_priority_status_shows_the_high_issues_first() {
     let issues = vec![
         Issue {
             title: "Four".into(),
-            ..open_issue(4, &["ready-for-worker", "size:S"], "")
+            ..ready_open_issue(4, &["ready-for-worker", "size:S"], "")
         },
         Issue {
             title: "Nine".into(),
-            ..open_issue(9, &["ready-for-worker", "size:M", "priority:high"], "")
+            ..ready_open_issue(9, &["ready-for-worker", "size:M", "priority:high"], "")
         },
     ];
     let mut gh = FakeGitHub::default();

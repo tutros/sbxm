@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::task::record::Stopped;
@@ -208,7 +208,7 @@ fn github() -> FakeGitHub {
         .with_user("me")
         .with_default_branch("main")
         .with_issue_text(issue_text(7))
-        .with_open_issues(vec![open_issue(7, &[READY, "size:S"], "")])
+        .with_open_issues(vec![ready_open_issue(7, &[READY, "size:S"], "")])
 }
 
 fn run_loop(f: &Fixture, script: &Script) -> (Result<()>, String) {

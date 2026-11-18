@@ -20,7 +20,7 @@ use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::location::{self, NEEDS_CLOUD_SLOTS, RUN_CLOUD_LABEL, RUN_LOCAL_LABEL};
 use sbxm::task::record::{self, Kind, NewTask, Process, Record};
 
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 
 const REPO: &str = "o/r";
 const READY: &str = "ready-for-worker";
@@ -154,7 +154,7 @@ fn with_no_record_a_fix_follows_its_issues_label() {
     let env = common::Env::new();
     let gh = FakeGitHub::default()
         .with_pr(pr7_closing(vec![41]))
-        .with_open_issues(vec![open_issue(41, &[RUN_CLOUD_LABEL], "")]);
+        .with_open_issues(vec![ready_open_issue(41, &[RUN_CLOUD_LABEL], "")]);
 
     assert_eq!(
         location::of_pr(&env.base_dir(), REPO, 7, &gh).unwrap(),
@@ -163,7 +163,7 @@ fn with_no_record_a_fix_follows_its_issues_label() {
 
     let gh = FakeGitHub::default()
         .with_pr(pr7_closing(vec![41]))
-        .with_open_issues(vec![open_issue(41, &[RUN_LOCAL_LABEL], "")]);
+        .with_open_issues(vec![ready_open_issue(41, &[RUN_LOCAL_LABEL], "")]);
     assert_eq!(
         location::of_pr(&env.base_dir(), REPO, 7, &gh).unwrap(),
         Some(Location::Local)
@@ -174,9 +174,9 @@ fn with_no_record_a_fix_follows_its_issues_label() {
 fn with_no_record_and_no_label_a_fix_has_no_location_of_its_own() {
     let env = common::Env::new();
     for issue in [
-        open_issue(41, &["size:S"], ""),
+        ready_open_issue(41, &["size:S"], ""),
         // Both labels pin nothing: the default stands.
-        open_issue(41, &[RUN_CLOUD_LABEL, RUN_LOCAL_LABEL], ""),
+        ready_open_issue(41, &[RUN_CLOUD_LABEL, RUN_LOCAL_LABEL], ""),
     ] {
         let gh = FakeGitHub::default()
             .with_pr(pr7_closing(vec![41]))
@@ -189,7 +189,7 @@ fn with_no_record_and_no_label_a_fix_has_no_location_of_its_own() {
     // A hand-made PR that closes no issue.
     let gh = FakeGitHub::default()
         .with_pr(pr7_closing(vec![]))
-        .with_open_issues(vec![open_issue(41, &[RUN_CLOUD_LABEL], "")]);
+        .with_open_issues(vec![ready_open_issue(41, &[RUN_CLOUD_LABEL], "")]);
     assert_eq!(
         location::of_pr(&env.base_dir(), REPO, 7, &gh).unwrap(),
         None
@@ -284,7 +284,7 @@ fn ready_issue(extra: &[&str]) -> FakeGitHub {
         .with_user("me")
         .with_default_branch("main")
         .with_issue_text(issue_text(3))
-        .with_open_issues(vec![open_issue(3, &names, "Why\n")])
+        .with_open_issues(vec![ready_open_issue(3, &names, "Why\n")])
 }
 
 /// Runs the loop over the labeled queue to its stop; the runs it asked for and its output.
@@ -532,20 +532,26 @@ fn a_fix_of_a_cloud_tasks_pr_runs_in_the_cloud_and_of_a_local_ones_locally() {
     let f = common::fix_task::config();
     opened_pr7(&f.env.base_dir(), REPO, Location::Local);
     // The record wins over the issue's label.
-    let gh =
-        fix_github(&f, vec![41]).with_open_issues(vec![open_issue(41, &[RUN_CLOUD_LABEL], "")]);
+    let gh = fix_github(&f, vec![41]).with_open_issues(vec![ready_open_issue(
+        41,
+        &[RUN_CLOUD_LABEL],
+        "",
+    )]);
     assert_ran_locally(&fix(&f, None, &gh));
 }
 
 #[test]
 fn a_fix_with_no_task_record_follows_its_issues_label() {
     let f = common::fix_task::config();
-    let gh =
-        fix_github(&f, vec![41]).with_open_issues(vec![open_issue(41, &[RUN_CLOUD_LABEL], "")]);
+    let gh = fix_github(&f, vec![41]).with_open_issues(vec![ready_open_issue(
+        41,
+        &[RUN_CLOUD_LABEL],
+        "",
+    )]);
     assert_ran_in_the_cloud(&fix(&f, None, &gh));
 
     let f = common::fix_task::config();
-    let gh = fix_github(&f, vec![41]).with_open_issues(vec![open_issue(41, &["size:S"], "")]);
+    let gh = fix_github(&f, vec![41]).with_open_issues(vec![ready_open_issue(41, &["size:S"], "")]);
     assert_ran_locally(&fix(&f, None, &gh));
 }
 
@@ -686,7 +692,7 @@ const FIX_ID: &str = "fix-7-aaaaaaaaaaaa";
 fn labeled_41(label: &str) -> FakeGitHub {
     FakeGitHub::default()
         .with_pr(pr7_closing(vec![41]))
-        .with_open_issues(vec![open_issue(41, &[label], "")])
+        .with_open_issues(vec![ready_open_issue(41, &[label], "")])
 }
 
 #[test]

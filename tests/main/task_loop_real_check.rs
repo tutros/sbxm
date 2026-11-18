@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{
@@ -296,7 +296,7 @@ fn github(issues: &[u32], prs: &[u32]) -> FakeGitHub {
             .with_issue_text(text)
             .with_pr(pr(100 + n, HEAD))
             .with_pr_files(100 + n, files.clone());
-        open.push(open_issue(n, &[READY, "size:M"], ""));
+        open.push(ready_open_issue(n, &[READY, "size:M"], ""));
     }
     for &n in prs {
         gh = gh.with_pr(pr(n, HEAD)).with_pr_files(n, files.clone());

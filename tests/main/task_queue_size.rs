@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::Issue;
 use sbxm::github::fake::FakeGitHub;
@@ -145,8 +145,8 @@ fn github(issues: Vec<Issue>) -> FakeGitHub {
 
 fn doubly_sized() -> FakeGitHub {
     github(vec![
-        open_issue(3, &[READY, "size:S", "size:L"], ""),
-        open_issue(7, &[READY, "size:M"], ""),
+        ready_open_issue(3, &[READY, "size:S", "size:L"], ""),
+        ready_open_issue(7, &[READY, "size:M"], ""),
     ])
 }
 
@@ -226,7 +226,7 @@ fn task_queue_size_the_loop_never_runs_a_named_doubly_sized_issue() {
 
 #[test]
 fn task_queue_size_an_almost_ready_issue_with_two_sizes_names_them_as_a_blocker() {
-    let open = vec![open_issue(9, &["size:S", "size:L"], "")];
+    let open = vec![ready_open_issue(9, &["size:S", "size:L"], "")];
     let text = queue::report(&queue::Report {
         open: &open,
         skipped: &[],
@@ -244,7 +244,9 @@ fn task_queue_size_an_almost_ready_issue_with_two_sizes_names_them_as_a_blocker(
 /// not among them: older than the listing holds, or closed while its PR is open. Its labels are
 /// read from the issue itself, `labels`.
 fn issue_outside_the_listing(labels: &[&str]) -> FakeGitHub {
-    let newer = (21..=220).map(|n| open_issue(n, &["size:S"], "")).collect();
+    let newer = (21..=220)
+        .map(|n| ready_open_issue(n, &["size:S"], ""))
+        .collect();
     FakeGitHub::default()
         .with_open_issues(newer)
         .with_issue_label_names(20, labels)

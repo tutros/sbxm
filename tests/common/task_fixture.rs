@@ -121,6 +121,31 @@ pub fn open_issue(number: u32, labels: &[&str], body: &str) -> Issue {
     }
 }
 
+/// [`open_issue`] with what the readiness rules ask of a body that lacks it (issue 725): a
+/// `**Size:**` line matching its one size label, `**Depends on:** none` and an acceptance
+/// criteria heading with a box. An issue with no size label or several gets no `**Size:**` line,
+/// so it still fails the size rule as before.
+pub fn ready_open_issue(number: u32, labels: &[&str], body: &str) -> Issue {
+    let mut body = body.to_owned();
+    let mut sizes: Vec<&str> = labels
+        .iter()
+        .filter_map(|l| l.strip_prefix("size:"))
+        .collect();
+    sizes.dedup();
+    if let [size] = sizes.as_slice()
+        && !body.contains("**Size:**")
+    {
+        body.push_str(&format!("\n\n**Size:** {size}\n"));
+    }
+    if !body.contains("**Depends on:**") {
+        body.push_str("\n\n**Depends on:** none\n");
+    }
+    if !body.contains("## Acceptance criteria") {
+        body.push_str("\n\n## Acceptance criteria\n\n- [ ] done\n");
+    }
+    open_issue(number, labels, &body)
+}
+
 pub fn ctx<'a>(
     f: &'a Fixture,
     source: &'a str,

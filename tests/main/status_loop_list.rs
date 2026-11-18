@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use common::Env as TestEnv;
-use common::task_fixture::{issue_text, open_issue};
+use common::task_fixture::{issue_text, ready_open_issue};
 use sbxm::backend::FakeBackend;
 use sbxm::commands::status::{self, LoopSource};
 use sbxm::commands::task_loop::{self, Options, Steps};
@@ -146,7 +146,7 @@ fn loop_locks(issues: &[u32], cap: Option<u32>, labeled: &[u32]) -> (Vec<String>
         } else {
             &["size:S"]
         };
-        open.push(open_issue(n, labels, ""));
+        open.push(ready_open_issue(n, labels, ""));
     }
     let gh = gh.with_open_issues(open);
     let script = Script {
@@ -299,7 +299,7 @@ fn github(open: &[u32]) -> FakeGitHub {
             open: true,
             title: format!("Open {n}"),
             labels: vec!["size:S".into()],
-            body: String::new(),
+            body: ready_open_issue(n, &["size:S"], "").body,
         })
         .collect();
     issues.push(Issue {
@@ -307,7 +307,8 @@ fn github(open: &[u32]) -> FakeGitHub {
         open: true,
         title: "Labeled".into(),
         labels: vec!["ready-for-worker".into(), "size:S".into()],
-        body: String::new(),
+        // What the readiness rules ask of a body (issue 725).
+        body: ready_open_issue(900, &["ready-for-worker", "size:S"], "").body,
     });
     let mut gh = FakeGitHub::default();
     for i in &issues {

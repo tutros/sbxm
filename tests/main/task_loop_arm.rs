@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{PrFile, PrFiles, PrInfo, PrState};
@@ -217,7 +217,7 @@ fn github(issues: &[u32]) -> FakeGitHub {
     let mut open = Vec::new();
     for &n in issues {
         gh = gh.with_issue_text(issue_text(n));
-        open.push(open_issue(n, &[READY, "size:S"], ""));
+        open.push(ready_open_issue(n, &[READY, "size:S"], ""));
     }
     gh.with_open_issues(open)
 }
@@ -593,7 +593,7 @@ fn github_medium(size: &str, files: &[&str]) -> FakeGitHub {
         .with_user("me")
         .with_default_branch("main")
         .with_issue_text(issue_text(3))
-        .with_open_issues(vec![open_issue(3, &[READY, size], "")])
+        .with_open_issues(vec![ready_open_issue(3, &[READY, size], "")])
         .with_pr(pr(103, PrState::Open, REVIEWED))
         .with_pr_files(
             103,

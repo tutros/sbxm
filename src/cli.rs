@@ -696,6 +696,20 @@ pub enum TaskCommand {
         #[arg(long)]
         follow: bool,
     },
+    /// Check whether an open issue is ready for a worker: one line per readiness rule (pass, fail,
+    /// warn or skip, with a reason): one size label matching its **Size:** line, a **Depends on:**
+    /// line, a non-empty **Real check:**, nothing left open, an Acceptance criteria heading with a
+    /// box, the paths it names on the default branch, a well-formed **Files:** line and the PRs
+    /// merged since its ready-for-worker label that changed them. Exit 1 when a rule fails (warns
+    /// don't). Read-only.
+    ReadyCheck {
+        /// The issue to check.
+        #[arg(long, value_name = "N")]
+        issue: u32,
+        /// Print the rules as a JSON object instead of one line each.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print one row of facts per task started in a window, for a retro: issue, size, review
     /// rounds and must-fix per round, wall time to ready, the latest worker's and reviewer's
     /// seconds and cost, outcome and PR. Reads the task records and the archive only (no GitHub);
