@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::backend::{FakeBackend, Location};
 use sbxm::commands::task_loop::child::{Child, ChildSpawner, Exit, Spawner};
 use sbxm::commands::task_loop::{self, Env, Options, PhaseEnd, Steps, TaskSteps};
@@ -317,7 +317,11 @@ fn github() -> FakeGitHub {
         .with_user("me")
         .with_default_branch("main")
         .with_issue_text(issue_text(ISSUE))
-        .with_open_issues(vec![open_issue(ISSUE, &["ready-for-worker", "size:S"], "")])
+        .with_open_issues(vec![ready_open_issue(
+            ISSUE,
+            &["ready-for-worker", "size:S"],
+            "",
+        )])
 }
 
 struct Run {

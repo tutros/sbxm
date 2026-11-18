@@ -273,6 +273,7 @@ fn bare_lock(process: Process) -> LockFile {
         adopted: Vec::new(),
         idle_check: None,
         took_over: Vec::new(),
+        retro_due: None,
     }
 }
 

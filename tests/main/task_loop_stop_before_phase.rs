@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{issue_text, open_issue};
+use common::task_fixture::{issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::Issue;
 use sbxm::github::fake::FakeGitHub;
@@ -209,7 +209,7 @@ fn fixture() -> Fixture {
 }
 
 fn labeled(number: u32) -> Issue {
-    open_issue(number, &["ready-for-worker", "size:S"], "")
+    ready_open_issue(number, &["ready-for-worker", "size:S"], "")
 }
 
 fn github(issues: Vec<Issue>) -> FakeGitHub {

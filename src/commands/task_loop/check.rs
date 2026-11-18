@@ -10,9 +10,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use super::{
-    OPEN_POINTS, Options, refused_reason, related_reason, unmerged_dependencies, waiting_reason,
-};
+use super::{Options, refused_reason, related_reason, unmerged_dependencies, waiting_reason};
 use crate::config::GlobalConfig;
 use crate::github::{GitHubBackend, Issue};
 use crate::status::looping::{self, Lock};
@@ -20,7 +18,7 @@ use crate::task::config::TaskConfig;
 use crate::task::finish::check_own_folder;
 use crate::task::queue::{self, READY_LABEL};
 use crate::task::record::{self, ProcessProbe};
-use crate::task::{findings, location, pipeline};
+use crate::task::{findings, location, pipeline, ready};
 
 use super::super::task_start::resolve_repo;
 
@@ -86,6 +84,12 @@ pub fn check(
             }
             Some(why) => writeln!(out, "{named}: skip: {why}")?,
         }
+        // The readiness rules' warns (issue 725, review M-2), which never decide the verdict.
+        if let Some(issue) = open.iter().find(|i| i.number == number) {
+            for warn in ready::warnings(&repo, github, issue) {
+                writeln!(out, "  warn {}: {}", warn.rule, warn.reason)?;
+            }
+        }
     }
 
     if taken.is_empty() {
@@ -137,11 +141,11 @@ pub(crate) fn reasons(
     )
 }
 
-/// Every reason the loop would pass `issue` over, or none: the label and the size, the open
-/// points, then the loop's own checks in its order (its location's labels, an unmerged
-/// dependency, a Related partner with a task, else what `task run` would refuse before any
-/// write), then a branch of the task's name already on origin, which `task finish` would refuse
-/// to push over.
+/// Every reason the loop would pass `issue` over, or none: the label, the readiness rules (the
+/// size and the open points among them, issue 725), then the loop's own checks in its order (its
+/// location's labels, an unmerged dependency, a Related partner with a task, else what `task run`
+/// would refuse before any write), then a branch of the task's name already on origin, which
+/// `task finish` would refuse to push over.
 fn reasons_in(
     base_dir: &Path,
     cloud_slots: Option<u32>,
@@ -155,12 +159,9 @@ fn reasons_in(
     if !issue.labels.iter().any(|l| l == READY_LABEL) {
         reasons.push(format!("not labeled {READY_LABEL}"));
     }
-    if queue::size(&issue.labels).is_none() {
-        reasons.push("no size label (size:S, size:M or size:L)".to_owned());
-    }
-    if queue::has_open_points(&issue.body) {
-        reasons.push(OPEN_POINTS.to_owned());
-    }
+    // The readiness rules (issue 725): one size, `**Depends on:**`, `**Real check:**`, open
+    // points and acceptance criteria, each failure a reason of its own.
+    reasons.extend(ready::failures(issue));
     if let Err(reason) = location::for_loop(&issue.labels, cloud_slots) {
         reasons.push(reason);
     }

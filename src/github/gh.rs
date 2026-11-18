@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use super::{
     CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, JobLog, LabelEvent, ListedPr,
-    Mergeable, PostedStatus, PrComment, PrFile, PrFiles, PrInfo, PrMergeState, PrRequest, PrState,
-    RunStatus, WorkflowRun,
+    Mergeable, MergedPr, PostedStatus, PrComment, PrFile, PrFiles, PrInfo, PrMergeState, PrRequest,
+    PrState, RunStatus, WorkflowRun,
 };
 
 /// Runs `gh` with arguments and optional stdin, returning stdout.
@@ -415,6 +415,47 @@ struct RawIssueEvent {
     #[serde(default)]
     label: Option<Named>,
     created_at: String,
+}
+
+/// A merged PR as `gh pr list --json number,mergedAt` lists it (issue 714).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMergedPr {
+    number: u32,
+    merged_at: String,
+}
+
+/// An entry of a folder as `gh api repos/<repo>/contents/<dir>` lists it (issue 714).
+#[derive(Deserialize)]
+struct RawContent {
+    name: String,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+/// A branch's tree as `gh api repos/<repo>/git/trees/<branch>?recursive=1` gives it (issue 725).
+#[derive(Deserialize)]
+struct RawTree {
+    tree: Vec<RawTreeEntry>,
+    #[serde(default)]
+    truncated: bool,
+}
+
+#[derive(Deserialize)]
+struct RawTreeEntry {
+    path: String,
+}
+
+/// How many merged PRs [`GitHubBackend::prs_merged_since`] lists at most: the retro alert only
+/// needs to know there are 10 (issue 714).
+const MERGED_LIMIT: u32 = 500;
+
+/// `path`, a repository path, with each of its segments percent-encoded for an API path.
+fn repo_path(path: &str) -> String {
+    path.split('/')
+        .map(path_segment)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// `gh api repos/<repo>/pulls/<n>`'s merge time (issue 550).
@@ -1078,6 +1119,11 @@ impl GitHubBackend for GhBackend {
     }
 
     fn pr_labels(&self, repo: &str, number: u32) -> Result<Vec<String>> {
+        self.issue_label_names(repo, number)
+    }
+
+    // GitHub serves a PR's labels as its issue's, so the two reads are one.
+    fn issue_label_names(&self, repo: &str, number: u32) -> Result<Vec<String>> {
         let path = format!("repos/{repo}/issues/{number}/labels");
         let out = self.read(&strings(&["api", &path, "--paginate"]))?;
         let labels: Vec<Named> = pages(&out, &path)?;
@@ -1172,5 +1218,93 @@ impl GitHubBackend for GhBackend {
                 })
             })
             .transpose()
+    }
+
+    fn prs_merged_since(&self, repo: &str, day: &str) -> Result<Vec<MergedPr>> {
+        // The day goes into a search query: only a date is accepted.
+        if crate::run::results::parse_day(day).is_none() {
+            bail!("{day:?} isn't a YYYY-MM-DD day, so merged PRs since it can't be listed");
+        }
+        let limit = MERGED_LIMIT.to_string();
+        let args = strings(&[
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "merged",
+            "--search",
+            &format!("merged:>={day}"),
+            "--limit",
+            &limit,
+            "--json",
+            "number,mergedAt",
+        ]);
+        let raw: Vec<RawMergedPr> = self.json(&args)?;
+        raw.into_iter()
+            .map(|pr| {
+                let merged_at =
+                    crate::run::results::parse_timestamp(&pr.merged_at).ok_or_else(|| {
+                        anyhow!(
+                            "`gh pr list` gave PR #{} a merge time `{}` that can't be read",
+                            pr.number,
+                            pr.merged_at
+                        )
+                    })?;
+                Ok(MergedPr {
+                    number: pr.number,
+                    merged_at,
+                })
+            })
+            .collect()
+    }
+
+    fn dir_files(&self, repo: &str, branch: &str, dir: &str) -> Result<Vec<String>> {
+        let path = format!(
+            "repos/{repo}/contents/{}?ref={}",
+            repo_path(dir),
+            path_segment(branch)
+        );
+        let out = match self.read(&strings(&["api", &path])) {
+            Ok(out) => out,
+            // No such folder on the branch: no files in it.
+            Err(e) if format!("{e:#}").contains("HTTP 404") => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let entries: Vec<RawContent> = serde_json::from_str(&out)
+            .with_context(|| format!("could not parse the output of `gh api {path}`"))?;
+        Ok(entries
+            .into_iter()
+            .filter(|e| e.kind == "file")
+            .map(|e| e.name)
+            .collect())
+    }
+
+    fn file_text(&self, repo: &str, branch: &str, path: &str) -> Result<String> {
+        let api = format!(
+            "repos/{repo}/contents/{}?ref={}",
+            repo_path(path),
+            path_segment(branch)
+        );
+        self.read(&strings(&[
+            "api",
+            &api,
+            "-H",
+            "Accept: application/vnd.github.raw+json",
+        ]))
+    }
+
+    fn repo_paths(&self, repo: &str, branch: &str) -> Result<Vec<String>> {
+        let path = format!(
+            "repos/{repo}/git/trees/{}?recursive=1",
+            path_segment(branch)
+        );
+        let raw: RawTree = self.json(&strings(&["api", &path]))?;
+        if raw.truncated {
+            bail!(
+                "`gh api {path}` gave a listing cut short (the tree is too large to list at once)"
+            );
+        }
+        Ok(raw.tree.into_iter().map(|e| e.path).collect())
     }
 }

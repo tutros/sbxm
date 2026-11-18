@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Steps};
 use sbxm::commands::task_queue::{self, Options};
 use sbxm::github::fake::FakeGitHub;
@@ -167,7 +167,7 @@ fn github(issues: Vec<Issue>, prs: &[(u32, PrState)]) -> FakeGitHub {
 }
 
 fn ready(number: u32) -> Issue {
-    open_issue(number, &[READY, "size:S"], ANSWERED)
+    ready_open_issue(number, &[READY, "size:S"], ANSWERED)
 }
 
 /// GitHub where #5 and #6 would be taken and PR #40, which issue 4's task opened, is open.
@@ -266,10 +266,10 @@ fn a_run_the_check_would_skip_is_refused_with_its_reason() {
     let f = fixture();
     let gh = github(
         vec![
-            open_issue(3, &["size:S"], ANSWERED),
-            open_issue(7, &[READY, "size:S"], "## Open points\n\n1. A or B?\n"),
-            open_issue(10, &[READY, "size:S"], "**Depends on:** #11\n"),
-            open_issue(11, &["size:M"], ""),
+            ready_open_issue(3, &["size:S"], ANSWERED),
+            ready_open_issue(7, &[READY, "size:S"], "## Open points\n\n1. A or B?\n"),
+            ready_open_issue(10, &[READY, "size:S"], "**Depends on:** #11\n"),
+            ready_open_issue(11, &["size:M"], ""),
             ready(14),
         ],
         &[],

@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::backend::FakeBackend;
 use sbxm::commands::status::{self, LoopSource};
 use sbxm::commands::task_loop::{self, Options, Steps};
@@ -251,7 +251,7 @@ fn github(issues: &[u32]) -> FakeGitHub {
     gh.with_open_issues(
         issues
             .iter()
-            .map(|&n| open_issue(n, &["size:S"], ""))
+            .map(|&n| ready_open_issue(n, &["size:S"], ""))
             .collect(),
     )
 }
@@ -576,6 +576,7 @@ fn a_lock_without_outcomes_is_read_from_the_records() {
         adopted: Vec::new(),
         idle_check: None,
         took_over: Vec::new(),
+        retro_due: None,
     };
     fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
     write(&base, 1, |r| {
@@ -627,6 +628,7 @@ fn an_older_binary_reads_a_lock_with_outcomes_as_its_process() {
         adopted: Vec::new(),
         idle_check: None,
         took_over: Vec::new(),
+        retro_due: None,
     };
     let text = serde_json::to_string(&file).unwrap();
 

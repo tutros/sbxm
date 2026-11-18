@@ -92,6 +92,7 @@ decision 166). A ranking is computed in code from the judge's scores.
 
 ```
 sbxm task init                         # writes sbxm-task.toml: worker, reviewer, profile, gates
+sbxm task ready-check --issue 63       # is the issue ready for a worker? one line per rule; exit 1 on a fail
 sbxm task start --issue 63             # worker in its own sandbox; commits collected; gates run
 sbxm task status                       # stage, status, commits ahead, result/review present
 sbxm status --watch                    # a live dashboard over every task (decision 171, part 4 of 6):
@@ -112,6 +113,16 @@ sbxm task run --spec idea.md           # the same for a spec task; no GitHub cal
 sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one after another
 ```
 
+- **Ready for a worker (issue 725):** `sbxm task ready-check --issue N` checks an issue against the readiness rules
+  before you label it `ready-for-worker`, and the loop checks them again before it starts the issue. They fail an
+  issue without exactly one `size:*` label and a `**Size:**` line naming the same size, without a `**Depends on:**`
+  line (`none`, or `#N` numbers then any text), with an empty `**Real check:**` line, with something left open (an
+  `**Open:**` line, a `## Open points` heading, or "to decide" anywhere), or without an `Acceptance criteria` heading (or
+  `**Acceptance criteria:**` label) holding a `- [ ]` box. They warn, never fail, on a backticked path the body names that isn't on the default branch
+  (mark one the change adds with `(new)`), on a `**Files:**` line that isn't a comma-separated list of backticked
+  paths, and on the PRs merged since the label was added that changed a path the body names (decision 295: re-check
+  the issue against them). `task loop` and `task loop --check` pass over an issue that fails a rule with the rule's
+  reason, and say its warns without holding it back; `--json` gives the verdicts as one object.
 - **Stages:** `prepared`, `working`, `gating`, `reviewing`, `fixing`, `ready`, `finished`. A failed gate shows as
   `gates-failed`; a killed run shows as `interrupted` in `task status`, and `task resume --issue N` continues a
   failed or interrupted task from its stage, keeping its clone and commits.
@@ -492,6 +503,18 @@ the binary you built, and waits for job files and labelled issues.
    failed, stopped, was refused or interrupted, a stop that needs you, `main` red pausing auto-merge, a task's
    question. Each shows once (`<base_dir>\.sbxm\notified.json`)
    and a click opens the PR or issue, or the loop's log. Turn them off with `[notify] toasts = false` in `config.toml`.
+6. It also tells you when a retro is due (decision 330(4), issue 714): at an idle wait, at most once an hour, it
+   counts the PRs merged since the end of the `Window:` line of the newest `sdlc/retros/*-retro.md` on the default
+   branch (from the day after, UTC). At 10 or more (or with no retro record) it comments once on the open `loop-log`
+   issue, shows a toast once a day and `sbxm status` shows `retro due: N PRs since <end>`, until a newer retro record
+   lands on the default branch. A retro needs you, so the loop only reminds; run it with the `sdlc-retro` skill.
+7. At the same waits it queues an improvement review (decision 330(2) and (3), issue 715) once 20 PRs merged since
+   the newest `sdlc/reviews/*-improvement-*.md` on the default branch: a spec job for the area of
+   `sdlc/reviews/areas.md` whose newest review is oldest, its spec written to `specs_dir` from
+   `prompts/improvement-review.md` with the run data since that review (`sbxm task facts` and the loop-log rows, at
+   most 30 KB). Its findings are should-fix and questions only, at most 10. When its PR merges a toast says
+   `Improvement review <slug> merged: sort its N findings`: sort them in a session, filing each or not. Change the
+   areas with a docs PR to `areas.md`; the loop needs `specs_dir` set to queue the job.
 
 ## How a change to sbxm itself goes
 
@@ -531,16 +554,6 @@ that look like reports are left out on purpose and keep asking: `doctor`, becaus
 check creates and removes a file in the base dir, and its kit check writes and removes kits in the temp dir), and
 `task status` (decision 192 (b), taken while it appended its output to the `run.log` of each task it shows; since
 issue 576 it only reads, and `sbxm status` shows the same tasks).
-
-## Recurring preparation: the scheduled factory check (an experiment)
-
-`scripts/factory-check.ps1` (decision 269, issue 327) prepares drafts while you are away: readiness drafts for issues
-that aren't ready yet, "still valid?" drafts for ready issues that PRs merged under (decision 295), and a retro draft
-once 10 PRs have merged since the last one. It only writes local files in `<base_dir>/.sbxm/factory/drafts/<date>/`;
-work through them in a session (`sdlc-issue-flow` stage 2 for an issue, `sdlc-retro` for the retro), set the labels
-and write the answers there, then copy the summary's log lines into `sdlc/batches/<date>-factory.md`, filling in the
-share of recommended answers you accepted unchanged and the time from the draft to `ready-for-worker`. The README
-has the setup ("The scheduled factory check").
 
 ## Practical notes
 

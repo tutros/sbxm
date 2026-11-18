@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use assert_cmd::Command;
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::gh::{GhBackend, GhRunner};
@@ -283,7 +283,7 @@ fn github(issues: &[u32], prs: &[u32]) -> FakeGitHub {
     let mut open = Vec::new();
     for &n in issues {
         gh = gh.with_issue_text(issue_text(n)).with_pr(pr(100 + n, HEAD));
-        open.push(open_issue(n, &[READY, "size:S"], ""));
+        open.push(ready_open_issue(n, &[READY, "size:S"], ""));
     }
     for &n in prs {
         gh = gh.with_pr(pr(n, OTHER));
@@ -777,6 +777,7 @@ fn the_status_loop_section_shows_the_pause() {
         cloud_first: false,
         dead: None,
         next_check: None,
+        retro_due: None,
         lock: Lock::Absent,
         work: None,
         snapshot: None,
@@ -801,6 +802,7 @@ fn the_status_loop_section_shows_an_unreadable_pause() {
         cloud_first: false,
         dead: None,
         next_check: None,
+        retro_due: None,
         lock: Lock::Absent,
         work: None,
         snapshot: None,
@@ -819,6 +821,7 @@ fn the_status_loop_section_has_no_pause_line_without_a_pause() {
         cloud_first: false,
         dead: None,
         next_check: None,
+        retro_due: None,
         lock: Lock::Absent,
         work: None,
         snapshot: None,

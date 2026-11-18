@@ -247,6 +247,16 @@ pub fn since(base_dir: &Path, started_at: u64, own: &Path) -> Result<Vec<PathBuf
     Ok(logs)
 }
 
+/// Every log under `base_dir` with its loop's start, in seconds since the epoch, oldest first
+/// (issue 715: the run data of an improvement review); a log whose name holds no start is left
+/// out.
+pub fn every(base_dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
+    Ok(logs(base_dir, Path::new(""))?
+        .into_iter()
+        .filter_map(|log| crate::run::results::parse_timestamp(&start_of(&log)).map(|at| (at, log)))
+        .collect())
+}
+
 /// Every log under `base_dir`, oldest first, `own` left out.
 fn logs(base_dir: &Path, own: &Path) -> Result<Vec<PathBuf>> {
     let dir = base_dir.join(".sbxm").join("loop-logs");
@@ -353,13 +363,23 @@ fn post_text(
     text: &str,
     start: &str,
 ) -> Result<()> {
+    let number = open_issue(github, repo, start)?;
+    for comment in comments(heading, text) {
+        github.issue_comment(repo, number, &comment)?;
+    }
+    Ok(())
+}
+
+/// The open `loop-log` issue with the lowest number, created titled by the date of `start` when
+/// there is none.
+fn open_issue(github: &dyn GitHubBackend, repo: &str, start: &str) -> Result<u32> {
     let found = github
         .issues_open_labeled(repo, LABEL)?
         .iter()
         .map(|i| i.number)
         .min();
-    let number = match found {
-        Some(number) => number,
+    match found {
+        Some(number) => Ok(number),
         None => {
             let date = start.split_once('T').map_or(start, |(d, _)| d);
             github.issue_create(
@@ -369,11 +389,25 @@ fn post_text(
                     body: ISSUE_BODY.to_owned(),
                     labels: vec![LABEL.to_owned()],
                 },
-            )?
+            )
         }
-    };
-    for comment in comments(heading, text) {
-        github.issue_comment(repo, number, &comment)?;
     }
-    Ok(())
+}
+
+/// Posts `body` as one comment on the open `loop-log` issue (as [`post`] finds or makes it),
+/// unless a comment on any `loop-log` issue, open or closed, already is the same note
+/// (`posted`), so a restarted loop doesn't post it again (issue 714). Returns whether it posted.
+pub fn comment_once(
+    github: &dyn GitHubBackend,
+    repo: &str,
+    body: &str,
+    posted: impl Fn(&str) -> bool,
+    now: u64,
+) -> Result<bool> {
+    if posted_comments(github, repo)?.iter().any(|c| posted(c)) {
+        return Ok(false);
+    }
+    let number = open_issue(github, repo, &format_timestamp(now))?;
+    github.issue_comment(repo, number, body)?;
+    Ok(true)
 }

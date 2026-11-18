@@ -249,6 +249,7 @@ pub fn work(base: &Path, lock: &Process, probe: &dyn ProcessProbe) -> anyhow::Re
             adopted: Vec::new(),
             idle_check: None,
             took_over: Vec::new(),
+            retro_due: None,
         },
         probe,
     )
@@ -716,7 +717,7 @@ pub fn fetch_checking(
             .map(|i| QueueItem {
                 number: i.number,
                 title: i.title.clone(),
-                size: queue::size(&i.labels),
+                size: queue::size(&i.labels).ok(),
             })
             .collect()
     });
@@ -805,6 +806,9 @@ pub struct View {
     pub dead: Option<Dead>,
     /// For a running loop waiting on an empty queue: when it next looks for work (issue 671).
     pub next_check: Option<NextCheck>,
+    /// For a running loop whose last retro check found a retro due: the line its lock records
+    /// (issue 714).
+    pub retro_due: Option<String>,
 }
 
 /// When an idle loop next looks for work (issue 671).
@@ -1006,6 +1010,9 @@ pub fn render(view: &View, width: Option<usize>) -> String {
             format_timestamp(at)
         )),
         None => {}
+    }
+    if let Some(line) = &view.retro_due {
+        lines.push(format!("  {line}"));
     }
     if view.cloud_first {
         lines.push(format!("  placement: {}", Placement::CloudFirst.as_str()));

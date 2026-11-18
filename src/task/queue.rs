@@ -67,6 +67,11 @@ pub struct LockFile {
     /// otherwise, and in a lock an older binary wrote.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub took_over: Vec<TookOver>,
+    /// The line `sbxm status` shows while the loop's last retro check found a retro due (issue
+    /// 714, decision 330(4)): `retro due: 12 PRs since 2026-11-16`. Absent when it isn't due, and
+    /// in a lock an older binary wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retro_due: Option<String>,
 }
 
 impl LockFile {
@@ -376,14 +381,47 @@ pub fn awaits_user(state: PrMergeState) -> bool {
     state.state == PrState::Open && !state.auto_merge
 }
 
-/// An issue's size from its `size:S`, `size:M` or `size:L` label.
-pub fn size(labels: &[String]) -> Option<&'static str> {
-    labels.iter().find_map(|label| match label.as_str() {
-        "size:S" => Some("S"),
-        "size:M" => Some("M"),
-        "size:L" => Some("L"),
-        _ => None,
-    })
+/// Why an issue has no one size (issue 709).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SizeError {
+    /// None of `size:S`, `size:M` and `size:L`.
+    Missing,
+    /// More than one of them, in the labels' order.
+    Several(Vec<&'static str>),
+}
+
+impl std::fmt::Display for SizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => write!(f, "no size label (size:S, size:M or size:L)"),
+            Self::Several(sizes) => {
+                write!(f, "more than one size label ({})", sizes.join(", "))
+            }
+        }
+    }
+}
+
+/// An issue's size from its one `size:S`, `size:M` or `size:L` label: the one rule the queue's
+/// order, `task loop --check`, the loop's pick, its log and a medium-risk PR's arming read
+/// (issue 709). The same label twice is one size.
+pub fn size(labels: &[String]) -> Result<&'static str, SizeError> {
+    let mut sizes: Vec<&'static str> = Vec::new();
+    for label in labels {
+        let size = match label.as_str() {
+            "size:S" => "S",
+            "size:M" => "M",
+            "size:L" => "L",
+            _ => continue,
+        };
+        if !sizes.contains(&size) {
+            sizes.push(size);
+        }
+    }
+    match sizes.as_slice() {
+        [] => Err(SizeError::Missing),
+        [size] => Ok(size),
+        _ => Err(SizeError::Several(sizes)),
+    }
 }
 
 /// Whether an issue carries [`PRIORITY_LABEL`].
@@ -397,9 +435,9 @@ fn is_priority(labels: &[String]) -> bool {
 /// the lowest number.
 pub fn queue_order(open: &[Issue]) -> Vec<u32> {
     let rank = |issue: &Issue| match size(&issue.labels) {
-        Some("S") => 0,
-        Some("M") => 1,
-        Some("L") => 2,
+        Ok("S") => 0,
+        Ok("M") => 1,
+        Ok("L") => 2,
         _ => 3,
     };
     let mut queue: Vec<&Issue> = open
@@ -421,9 +459,9 @@ pub fn largest_first(open: &[Issue]) -> Vec<u32> {
             .map(|i| i.labels.as_slice())
             .unwrap_or_default();
         let size = match size(labels) {
-            Some("L") => 0,
-            Some("M") => 1,
-            Some("S") => 2,
+            Ok("L") => 0,
+            Ok("M") => 1,
+            Ok("S") => 2,
             _ => 3,
         };
         (!is_priority(labels), size)
@@ -644,6 +682,49 @@ pub fn append_job_row(path: &Path, repo: &str, job: &str, row: &Row) -> Result<(
     add_any(path, repo, Some(&cell(job)), row, false).map(|_| ())
 }
 
+/// Appends a note of the loop's own (issue 714: a retro check that failed) as a row of the
+/// table whose `#` cell is `-` and whose Issue cell is `note`, the other cells empty: the table
+/// stays whole, and it is no task row, so it is never numbered, counted, or a reason to post the
+/// log.
+pub fn append_note(path: &Path, repo: &str, note: &str) -> Result<()> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let mut add = start_of_log(&text, repo);
+    add.push_str(&format!("| - | {} |{}\n", cell(note), " |".repeat(9)));
+    write_log(path, &add)
+}
+
+/// What goes before a new row of a log whose text so far is `text`: the title, repository and
+/// header for a new log, a line end for one that lacks it.
+fn start_of_log(text: &str, repo: &str) -> String {
+    let mut add = String::new();
+    if text.is_empty() {
+        add.push_str(TITLE);
+        add.push_str(&format!("{REPOSITORY}{}\n\n", cell(repo)));
+        add.push_str(HEADER);
+    } else if !text.ends_with('\n') {
+        add.push('\n');
+    }
+    add
+}
+
+/// Appends `add` to the log at `path`, making its folder first.
+fn write_log(path: &Path, add: &str) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(add.as_bytes()))
+        .with_context(|| format!("cannot write {}", path.display()))
+}
+
 fn add_row(path: &Path, repo: &str, row: &Row, once: bool) -> Result<bool> {
     add_any(path, repo, None, row, once)
 }
@@ -658,28 +739,12 @@ fn add_any(path: &Path, repo: &str, item: Option<&str>, row: &Row, once: bool) -
     if once && logged {
         return Ok(false);
     }
-    let mut add = String::new();
-    if text.is_empty() {
-        add.push_str(TITLE);
-        add.push_str(&format!("{REPOSITORY}{}\n\n", cell(repo)));
-        add.push_str(HEADER);
-    } else if !text.ends_with('\n') {
-        add.push('\n');
-    }
+    let mut add = start_of_log(&text, repo);
     add.push_str(&match item {
         Some(item) => render_as(count + 1, item, row),
         None => render(count + 1, row),
     });
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create {}", parent.display()))?;
-    }
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut file| file.write_all(add.as_bytes()))
-        .with_context(|| format!("cannot write {}", path.display()))?;
+    write_log(path, &add)?;
     Ok(true)
 }
 
@@ -739,7 +804,7 @@ pub fn report(report: &Report) -> String {
         .open
         .iter()
         .filter(|i| !i.labels.iter().any(|l| l == READY_LABEL))
-        .filter(|i| size(&i.labels).is_some())
+        .filter(|i| size(&i.labels) != Err(SizeError::Missing))
         .collect();
     if almost.is_empty() {
         text.push_str("no almost-ready issues (sized, not labeled ready-for-worker)\n");
@@ -747,12 +812,16 @@ pub fn report(report: &Report) -> String {
     }
     text.push_str("almost ready (sized, not labeled ready-for-worker), and what blocks each:\n");
     for issue in almost {
-        let size = size(&issue.labels).unwrap_or("?");
+        let sized = size(&issue.labels);
+        let size = sized.as_ref().map_or("?", |size| *size);
         text.push_str(&format!(
             "  #{} {} (size:{size})\n",
             issue.number, issue.title
         ));
         let mut blockers = Vec::new();
+        if let Err(several) = sized {
+            blockers.push(several.to_string());
+        }
         if issue.labels.iter().any(|l| l == "question") {
             blockers.push("labeled question".to_owned());
         }

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{Issue, PrInfo, PrState};
@@ -382,7 +382,7 @@ impl Fixture {
 }
 
 fn labeled(number: u32, size: &str) -> Issue {
-    open_issue(number, &[READY, size], "")
+    ready_open_issue(number, &[READY, size], "")
 }
 
 fn github(issues: Vec<Issue>) -> FakeGitHub {
@@ -537,7 +537,7 @@ fn the_label_is_removed_when_a_task_starts() {
 #[test]
 fn an_empty_queue_at_start_reports_and_runs_nothing() {
     let f = fixture();
-    let gh = github(vec![open_issue(
+    let gh = github(vec![ready_open_issue(
         5,
         &["size:M"],
         "## Open points\n\n- Warn or refuse?\n",
@@ -557,7 +557,10 @@ fn an_empty_queue_at_start_reports_and_runs_nothing() {
 #[test]
 fn a_queue_emptied_mid_loop_stops_with_the_report() {
     let f = fixture();
-    let gh = github(vec![labeled(3, "size:S"), open_issue(9, &["size:L"], "")]);
+    let gh = github(vec![
+        labeled(3, "size:S"),
+        ready_open_issue(9, &["size:L"], ""),
+    ]);
     let script = Script::new(&f.base());
 
     let run = run_loop(&f, opts(&f), &script, &gh);
@@ -574,7 +577,8 @@ fn named_issues_run_in_the_users_order_and_the_list_ending_stops_the_loop() {
     let gh = github(vec![
         labeled(3, "size:S"),
         labeled(7, "size:L"),
-        open_issue(8, &[], ""),
+        // Sized, as the readiness rules ask (issue 725), but not labeled.
+        ready_open_issue(8, &["size:M"], ""),
     ]);
     let script = Script::new(&f.base());
 
@@ -1685,7 +1689,7 @@ fn a_task_naming_a_pr_that_no_longer_exists_is_left_out_with_a_warning() {
 #[test]
 fn an_issue_depending_on_a_merged_pr_is_picked() {
     let f = fixture();
-    let gh = github(vec![open_issue(
+    let gh = github(vec![ready_open_issue(
         3,
         &[READY, "size:S"],
         "**Depends on:** #341 and PR #377\n",
@@ -1703,9 +1707,9 @@ fn an_issue_depending_on_a_merged_pr_is_picked() {
 fn an_issue_depending_on_an_open_pr_or_issue_is_skipped_and_reported() {
     let f = fixture();
     let gh = github(vec![
-        open_issue(3, &[READY, "size:S"], "**Depends on:** PR #377\n"),
-        open_issue(4, &[READY, "size:S"], "**Depends on:** #9\n"),
-        open_issue(9, &["size:L"], ""),
+        ready_open_issue(3, &[READY, "size:S"], "**Depends on:** PR #377\n"),
+        ready_open_issue(4, &[READY, "size:S"], "**Depends on:** #9\n"),
+        ready_open_issue(9, &["size:L"], ""),
         labeled(5, "size:M"),
     ])
     .with_pr(pr(377, PrState::Open));
@@ -1735,7 +1739,7 @@ fn the_first_task_refused_before_any_write_is_reported_and_the_loop_goes_on() {
         })
         .with_issue_text(issue_text(4))
         .with_open_issues(vec![
-            open_issue(3, &[READY, "size:S"], "PR: #200\n\nfix it"),
+            ready_open_issue(3, &[READY, "size:S"], "PR: #200\n\nfix it"),
             labeled(4, "size:M"),
         ])
         .with_pr(pr(200, PrState::Merged));
@@ -1972,10 +1976,10 @@ fn only_issue_tasks_prs_count_and_each_once() {
 #[test]
 fn an_issue_whose_dependency_closes_mid_loop_is_picked_then() {
     let f = fixture();
-    let blocked = open_issue(4, &[READY, "size:S"], "**Depends on:** #9\n");
+    let blocked = ready_open_issue(4, &[READY, "size:S"], "**Depends on:** #9\n");
     let gh = github(vec![
         blocked.clone(),
-        open_issue(9, &["size:L"], ""),
+        ready_open_issue(9, &["size:L"], ""),
         labeled(5, "size:M"),
     ]);
     let script = Script::new(&f.base());

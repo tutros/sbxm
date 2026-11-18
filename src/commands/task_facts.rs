@@ -263,7 +263,7 @@ fn size(dir: &Path) -> Option<&'static str> {
     let text = fs::read_to_string(path).ok()?;
     let labels = text.lines().find_map(|l| l.strip_prefix("labels:"))?;
     let labels: Vec<String> = labels.split(',').map(|l| l.trim().to_owned()).collect();
-    queue::size(&labels)
+    queue::size(&labels).ok()
 }
 
 /// Where the task stands: its stage, with its status unless that is `ok`, and why it stopped

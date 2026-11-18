@@ -105,7 +105,8 @@ fn issue(number: u32, title: &str, labels: &[&str]) -> Issue {
         open: true,
         title: title.into(),
         labels: labels.iter().map(|l| (*l).to_owned()).collect(),
-        body: String::new(),
+        // What the readiness rules ask of a body (issue 725).
+        body: common::task_fixture::ready_open_issue(number, labels, "").body,
     }
 }
 
@@ -859,6 +860,7 @@ fn render_is_pure_over_its_view() {
         cloud_first: false,
         dead: None,
         next_check: None,
+        retro_due: None,
         lock: Lock::Running(loop_process()),
         work: Some(Work::default()),
         snapshot: Some(Snapshot {

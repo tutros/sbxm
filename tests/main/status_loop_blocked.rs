@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::Env as TestEnv;
-use common::task_fixture::issue_text;
+use common::task_fixture::{issue_text, ready_open_issue};
 use sbxm::backend::FakeBackend;
 use sbxm::commands::status::{self, Env, LoopSource};
 use sbxm::commands::task_loop::{self, Options};
@@ -53,7 +53,8 @@ fn issue(number: u32, title: &str, labels: &[&str], body: &str) -> Issue {
         open: true,
         title: title.into(),
         labels: labels.iter().map(|l| (*l).to_owned()).collect(),
-        body: body.into(),
+        // What the readiness rules ask of a body (issue 725).
+        body: ready_open_issue(number, labels, body).body,
     }
 }
 
@@ -284,6 +285,7 @@ fn an_issue_loops_pending_list_shows_the_reason() {
         adopted: Vec::new(),
         idle_check: None,
         took_over: Vec::new(),
+        retro_due: None,
     };
     let path = lock_path(&base);
     fs::create_dir_all(path.parent().unwrap()).unwrap();

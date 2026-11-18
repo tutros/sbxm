@@ -219,6 +219,15 @@ pub struct JobLog {
     pub log: String,
 }
 
+/// A merged pull request and when it merged, as `gh pr list --state merged --json
+/// number,mergedAt` lists it (issue 714).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedPr {
+    pub number: u32,
+    /// Seconds since the epoch.
+    pub merged_at: u64,
+}
+
 pub trait GitHubBackend: Send + Sync {
     fn whoami(&self) -> Result<String>;
     fn default_branch(&self, repo: &str) -> Result<String>;
@@ -304,6 +313,10 @@ pub trait GitHubBackend: Send + Sync {
     /// The labels on PR `number`, every page (`gh api repos/<repo>/issues/<n>/labels
     /// --paginate`), read for its `hold` and `go` labels (issue 548).
     fn pr_labels(&self, repo: &str, number: u32) -> Result<Vec<String>>;
+    /// The labels on issue `number` in any state, every page (`gh api
+    /// repos/<repo>/issues/<n>/labels --paginate`): read before a medium-risk PR from that issue
+    /// would be armed, whether or not the issue is among [`Self::issues_open`]'s (issue 709).
+    fn issue_label_names(&self, repo: &str, number: u32) -> Result<Vec<String>>;
     /// Removes the label named exactly `label` from PR `number` (`gh api --method DELETE
     /// repos/<repo>/issues/<n>/labels/<label>`), as the loop does to `go` before it pushes onto
     /// the PR (issue 548).
@@ -321,4 +334,18 @@ pub trait GitHubBackend: Send + Sync {
     /// When PR `number` merged, in seconds since the epoch; `None` while it isn't merged (`gh api
     /// repos/<repo>/pulls/<n>`, issue 550).
     fn pr_merged_at(&self, repo: &str, number: u32) -> Result<Option<u64>>;
+    /// Every PR of `repo` merged on day `day` (`YYYY-MM-DD`, UTC) or later, with when it merged
+    /// (`gh pr list --state merged --search merged:>=<day>`): the loop counts those since the
+    /// last retro's window (issue 714, decision 330(4)).
+    fn prs_merged_since(&self, repo: &str, day: &str) -> Result<Vec<MergedPr>>;
+    /// The names of the files in folder `dir` of `repo` at branch `branch` (`gh api
+    /// repos/<repo>/contents/<dir>?ref=<branch>`); none when the folder doesn't exist (issue 714).
+    fn dir_files(&self, repo: &str, branch: &str, dir: &str) -> Result<Vec<String>>;
+    /// The text of the file at `path` of `repo` at branch `branch` (`gh api
+    /// repos/<repo>/contents/<path>?ref=<branch>`, raw) (issue 714).
+    fn file_text(&self, repo: &str, branch: &str, path: &str) -> Result<String>;
+    /// Every path of `repo` at branch `branch`, files and folders, in one listing (`gh api
+    /// repos/<repo>/git/trees/<branch>?recursive=1`); an error rather than a partial list when
+    /// GitHub cuts the listing short (issue 725).
+    fn repo_paths(&self, repo: &str, branch: &str) -> Result<Vec<String>>;
 }

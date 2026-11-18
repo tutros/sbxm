@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{
@@ -605,15 +605,14 @@ fn an_unarmed_medium_risk_pr_says_its_size_and_cargo_lock_reasons_after_a_log_fi
     let mut rec = record::read(&dir.join("task.json")).unwrap();
     rec.review.as_mut().unwrap().risk = Level::Medium;
     record::write(&dir, &rec).unwrap();
-    let mut text = issue_text(1);
-    text.text = "title:\tFix 1\nstate:\tOPEN\nlabels:\tsize:L\n--\nbody\n".to_owned();
     let gh = FakeGitHub::default()
         .with_user("me")
         .with_default_branch("main")
         .with_branch_head("main", MAIN)
         .with_pr(pr(101, OTHER))
         .with_runs(OTHER, vec![run(7, 2, RunStatus::Failed)])
-        .with_issue_text(text)
+        .with_issue_text(issue_text(1))
+        .with_open_issues(vec![ready_open_issue(1, &["size:L"], "")])
         .with_pr_files(
             101,
             PrFiles {
@@ -645,18 +644,19 @@ fn an_unarmed_medium_risk_pr_says_its_size_and_cargo_lock_reasons_after_a_log_fi
 fn a_medium_risk_log_fix_while_paused_says_the_pause_and_its_reasons() {
     let f = fixture();
     f.write_pause();
-    let mut text = issue_text(1);
-    text.text = "title:\tFix 1\nstate:\tOPEN\nlabels:\tsize:L\n--\nbody\n".to_owned();
-    let gh = github().with_issue_text(text).with_pr_files(
-        101,
-        PrFiles {
-            changed_files: 1,
-            files: vec![PrFile {
-                filename: "Cargo.lock".to_owned(),
-                previous_filename: None,
-            }],
-        },
-    );
+    let gh = github()
+        .with_issue_text(issue_text(1))
+        .with_open_issues(vec![ready_open_issue(1, &["size:L"], "")])
+        .with_pr_files(
+            101,
+            PrFiles {
+                changed_files: 1,
+                files: vec![PrFile {
+                    filename: "Cargo.lock".to_owned(),
+                    previous_filename: None,
+                }],
+            },
+        );
     let script = Script::new(&f.base(), &gh, Ends::Clean(Level::Medium));
 
     let ran = run_loop(&f, &script, &gh);
@@ -682,7 +682,11 @@ fn a_log_fix_refused_before_its_task_is_not_tried_again_in_the_same_run() {
     let gh = github()
         .with_issue_text(issue_text(3))
         .with_pr(pr(103, HEAD))
-        .with_open_issues(vec![open_issue(3, &["ready-for-worker", "size:S"], "")]);
+        .with_open_issues(vec![ready_open_issue(
+            3,
+            &["ready-for-worker", "size:S"],
+            "",
+        )]);
     let mut script = Script::new(&f.base(), &gh, Ends::Refused);
     script.after_run = Box::new(|gh| {
         gh.set_runs(
@@ -782,7 +786,11 @@ fn a_log_fix_deferred_for_a_low_disk_runs_once_there_is_room_again() {
     let gh = github()
         .with_issue_text(issue_text(3))
         .with_pr(pr(103, HEAD))
-        .with_open_issues(vec![open_issue(3, &["ready-for-worker", "size:S"], "")]);
+        .with_open_issues(vec![ready_open_issue(
+            3,
+            &["ready-for-worker", "size:S"],
+            "",
+        )]);
     let script = Script::new(&f.base(), &gh, Ends::Clean(Level::Low));
     script.low_disk.set(1);
 
@@ -813,7 +821,11 @@ fn after_a_log_fix_hands_a_question_back_a_later_conflict_in_the_run_is_not_reso
     let gh = github()
         .with_issue_text(issue_text(3))
         .with_pr(pr(103, HEAD))
-        .with_open_issues(vec![open_issue(3, &["ready-for-worker", "size:S"], "")]);
+        .with_open_issues(vec![ready_open_issue(
+            3,
+            &["ready-for-worker", "size:S"],
+            "",
+        )]);
     let mut script = Script::new(&f.base(), &gh, Ends::HandsBack);
     script.after_run = Box::new(|gh| gh.set_mergeable(101, Mergeable::Conflicting));
 

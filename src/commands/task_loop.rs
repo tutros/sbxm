@@ -52,6 +52,7 @@ use crate::task::loop_pause::{self, Pause};
 use crate::task::outcome;
 use crate::task::queue::awaiting_rank;
 use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
+use crate::task::ready;
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
@@ -62,9 +63,11 @@ use crate::task::{
 
 mod check;
 pub mod child;
+mod improvement;
 mod job_children;
 mod jobs;
 mod parallel;
+mod retro;
 mod waiting;
 pub use check::check;
 pub(crate) use check::{reasons, skip_reason};
@@ -100,8 +103,6 @@ impl Owed {
 pub const PAUSE_POLL: Duration = Duration::from_secs(5 * 60);
 /// How often a task's first phase is looked at for its record, to take its label off.
 const LABEL_POLL: Duration = Duration::from_secs(2);
-/// Why an issue whose body still has a `## Open points` heading is passed over (issue 511).
-const OPEN_POINTS: &str = "open points not answered";
 
 pub struct Options {
     /// The target repo's root, where `sbxm-task.toml` is (the loop writes nothing there).
@@ -537,6 +538,16 @@ impl LoopLock {
         self.rewrite()
     }
 
+    /// Records in the lock the retro alert's line for `sbxm status` (`Some` while a retro is due,
+    /// issue 714); the lock is written only when this changes it.
+    fn retro(&mut self, line: Option<String>) -> Result<()> {
+        if self.file.retro_due == line {
+            return Ok(());
+        }
+        self.file.retro_due = line;
+        self.rewrite()
+    }
+
     /// Writes the lock again, through a temporary file renamed over it, since `sbxm status` reads
     /// it meanwhile; one no longer this process's (removed by hand) is not written again.
     fn rewrite(&mut self) -> Result<()> {
@@ -595,6 +606,7 @@ fn take_lock(
         adopted: Vec::new(),
         idle_check: None,
         took_over: Vec::new(),
+        retro_due: None,
     };
     let mut dead: Option<queue::LockFile> = None;
     for _ in 0..3 {
@@ -905,6 +917,17 @@ struct Loop<'a> {
     run_jobs: Vec<jobs::RunJob>,
     /// The issues of the running task children (issue 633): a queued `run` job of one waits.
     running_issues: Vec<u32>,
+    /// When the retro alert last checked (issue 714): it checks again an hour later at the
+    /// earliest, a failed check too.
+    retro_checked: Option<u64>,
+    /// What the retro alerts this run commented on are about ([`retro::Due::about`]).
+    retro_commented: HashSet<String>,
+    /// When the improvement review's check last ran (issue 715): again an hour later at the
+    /// earliest, a failed check too.
+    improvement_checked: Option<u64>,
+    /// The lines of the improvement review's check this run logged that are said once a run (an
+    /// `areas.md` that can't be used, say), not once an hour.
+    improvement_noted: HashSet<String>,
 }
 
 impl Loop<'_> {
@@ -1529,10 +1552,13 @@ impl Loop<'_> {
             let found = open.iter().find(|i| i.number == number);
             let title = found.map_or_else(String::new, |i| format!(" {}", i.title));
             let body = found.map_or("", |i| i.body.as_str());
-            // The label alone isn't enough (issue 511): a worker can't answer open points.
-            if queue::has_open_points(body) {
+            // The label alone isn't enough (issues 511, 709, 725): a worker can't answer open
+            // points or guess a size, so an issue that fails a readiness rule is the issue's to
+            // fix. A named issue that isn't open is refused below, as before.
+            let failures = found.map(ready::failures).unwrap_or_default();
+            if !failures.is_empty() {
                 tried.insert(number);
-                let reason = OPEN_POINTS.to_owned();
+                let reason = failures.join("; also: ");
                 writeln!(out, "skipped #{number}{title}: {reason}")?;
                 refused.push(Skipped {
                     issue: number,
@@ -1540,8 +1566,8 @@ impl Loop<'_> {
                 });
                 continue;
             }
-            // Its location's labels (issue 600): a refusal is the issue's to fix, as above.
             let labels = found.map_or(&[][..], |i| i.labels.as_slice());
+            // Its location's labels (issue 600): a refusal is the issue's to fix, as above.
             let location = match location::for_loop(labels, self.cloud_slots) {
                 Ok(location) => location,
                 Err(reason) => {
@@ -1596,6 +1622,13 @@ impl Loop<'_> {
                     reason,
                 });
                 continue;
+            }
+            // The readiness rules' warns, said before the start and never holding it back
+            // (issue 725, review M-2): the paths and the PRs merged since the label among them.
+            if let Some(issue) = found {
+                for warn in ready::warnings(&self.repo, self.github, issue) {
+                    writeln!(out, "#{number}{title}: warn {}: {}", warn.rule, warn.reason)?;
+                }
             }
             self.locations.insert(number, location);
             return Ok((Some(number), waiting));
@@ -2080,7 +2113,7 @@ impl Loop<'_> {
         let size = |issue: u32| {
             open.iter()
                 .find(|i| i.number == issue)
-                .and_then(|i| queue::size(&i.labels))
+                .and_then(|i| queue::size(&i.labels).ok())
                 .map(str::to_owned)
         };
         for h in due.iter_mut() {
@@ -4299,6 +4332,10 @@ fn run_loop(
         jobs: Vec::new(),
         run_jobs: Vec::new(),
         running_issues: Vec::new(),
+        retro_checked: None,
+        retro_commented: HashSet::new(),
+        improvement_checked: None,
+        improvement_noted: HashSet::new(),
     };
 
     // The dead loop's children that ended with an outcome it never acted on (issue 657), read
@@ -4601,7 +4638,7 @@ fn work(
                 let found = open.iter().find(|i| i.number == issue);
                 let title = found.map_or_else(|| format!("issue {issue}"), |i| i.title.clone());
                 let size = found
-                    .and_then(|i| queue::size(&i.labels))
+                    .and_then(|i| queue::size(&i.labels).ok())
                     .map(str::to_owned);
                 let labeled = found.is_some_and(|i| i.labels.iter().any(|l| l == READY_LABEL));
 
@@ -4916,7 +4953,8 @@ fn note(
 /// The wait of a `--wait` loop on an empty queue, in either scheduler: says so once per idle
 /// spell (`said`; the next task, or the next stop, ends it), records in the lock when the wait
 /// began for `sbxm status` (issue 671), sleeps a [`PAUSE_POLL`], and clears the record on waking,
-/// before the loop looks for work again.
+/// before the loop looks for work again. Each wait first checks whether a retro is due (issue
+/// 714) and whether an improvement review is (issue 715), each at most once an hour.
 fn wait_idle(
     lock: &mut LoopLock,
     lp: &mut Loop,
@@ -4932,6 +4970,8 @@ fn wait_idle(
         )?;
         *said = true;
     }
+    lp.check_retro(lock, out, warn)?;
+    lp.check_improvement(out, warn)?;
     idle_note(lock, lp, warn, Some(lp.now()))?;
     (lp.env.sleep)(PAUSE_POLL);
     idle_note(lock, lp, warn, None)

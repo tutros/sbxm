@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text};
+use common::task_fixture::{Probe, issue_text, open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{
@@ -184,9 +184,9 @@ fn reviewed_at(at: u64) -> Vec<PostedStatus> {
     }]
 }
 
-/// GitHub with PR `100 + issue` open at `head` for each of `issues` (each size M, changing one
-/// source file), the trial's issue open with `merges` merge comments, and the review of [`HEAD`]
-/// posted at `review_at`.
+/// GitHub with PR `100 + issue` open at `head` for each of `issues` (each open and size M,
+/// changing one source file), the trial's issue open with `merges` merge comments, and the review
+/// of [`HEAD`] posted at `review_at`.
 pub(super) fn github(issues: &[u32], head: &str, merges: usize, review_at: u64) -> FakeGitHub {
     let files = PrFiles {
         changed_files: 1,
@@ -199,13 +199,12 @@ pub(super) fn github(issues: &[u32], head: &str, merges: usize, review_at: u64) 
         .with_user("me")
         .with_default_branch("main")
         .with_branch_head("main", MAIN)
-        .with_open_issues(vec![trial_issue()])
         .with_statuses(HEAD, reviewed_at(review_at));
+    let mut open = vec![trial_issue()];
     for &n in issues {
-        let mut text = issue_text(n);
-        text.text = format!("title:\tFix {n}\nstate:\tOPEN\nlabels:\tsize:M\n--\nbody\n");
+        open.push(open_issue(n, &["size:M"], ""));
         gh = gh
-            .with_issue_text(text)
+            .with_issue_text(issue_text(n))
             .with_pr(pr(100 + n, head))
             .with_pr_files(100 + n, files.clone());
     }
@@ -224,7 +223,7 @@ pub(super) fn github(issues: &[u32], head: &str, merges: usize, review_at: u64) 
         })
         .collect();
     let refs: Vec<&str> = comments.iter().map(String::as_str).collect();
-    gh.with_issue_comments(TRIAL, &refs)
+    gh.with_open_issues(open).with_issue_comments(TRIAL, &refs)
 }
 
 pub(super) struct Ran {
@@ -493,10 +492,9 @@ fn a_medium_pr_whose_head_moved_after_the_review_has_no_window() {
 fn a_medium_pr_of_size_l_isnt_armed_at_its_windows_end() {
     let f = fixture();
     f.medium_pr();
-    let mut text = issue_text(20);
-    text.text = "title:\tFix 20\nstate:\tOPEN\nlabels:\tsize:L\n--\nbody\n".into();
     let gh = github(&[], HEAD, 0, START - 3 * WINDOW)
-        .with_issue_text(text)
+        .with_open_issues(vec![trial_issue(), open_issue(20, &["size:L"], "")])
+        .with_issue_text(issue_text(20))
         .with_pr(pr(PR, HEAD))
         .with_pr_files(
             PR,
@@ -653,7 +651,7 @@ fn with_no_trial_issue_it_arms_and_warns_once() {
     let f = fixture();
     f.medium_pr();
     let gh = github(&[20], HEAD, 0, START - WINDOW);
-    gh.set_open_issues(Vec::new());
+    gh.set_open_issues(vec![open_issue(20, &["size:M"], "")]);
 
     let ran = run_passes(&f, &gh, &FakeNotifier::default(), 2, &|_| {});
 

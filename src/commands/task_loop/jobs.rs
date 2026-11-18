@@ -26,7 +26,7 @@ use crate::task::jobs::{self, AsRead, Job, JobHarness, JobResult, Outcome, Runni
 use crate::task::outcome::{self, Kind as ChildKind};
 use crate::task::queue::{self, Row};
 use crate::task::record::{self, Kind, Record, Stage};
-use crate::task::{location, lock, next};
+use crate::task::{location, lock, next, ready};
 
 /// How one job ended, before its result file.
 struct Ended {
@@ -287,6 +287,7 @@ impl Loop<'_> {
                         return self.halt_after(&taken, &label, read, started, ended, out, warn);
                     }
                 };
+                say_warnings(issue, &found, out)?;
                 self.locations.insert(issue, found.location);
                 self.mark(&taken, &read, started, Some(format!("issue-{issue}")))?;
                 // Started as a task child by the loop's pass, before any new issue.
@@ -1082,7 +1083,10 @@ impl Loop<'_> {
         warn: &mut dyn Write,
     ) -> Result<Ended> {
         let location = match self.run_ready(issue) {
-            Ok(found) => found.location,
+            Ok(found) => {
+                say_warnings(issue, &found, out)?;
+                found.location
+            }
             Err(ended) => return Ok(ended),
         };
         self.locations.insert(issue, location);
@@ -1124,8 +1128,9 @@ impl Loop<'_> {
             .map_err(|reason| Ended::new(Outcome::Refused, reason))?;
         Ok(RunIssue {
             location,
+            warnings: ready::warnings(&self.repo, self.github, found),
             title: found.title.clone(),
-            size: queue::size(&found.labels).map(str::to_owned),
+            size: queue::size(&found.labels).ok().map(str::to_owned),
             labeled: found.labels.iter().any(|l| l == queue::READY_LABEL),
         })
     }
@@ -1207,9 +1212,23 @@ impl Loop<'_> {
 /// A `run` job's issue, as the loop takes it.
 struct RunIssue {
     location: Option<Location>,
+    /// The readiness rules' warns, said before it starts (issue 725, review M-2).
+    warnings: Vec<ready::Verdict>,
     title: String,
     size: Option<String>,
     labeled: bool,
+}
+
+/// The readiness rules' warns of a `run` job's issue, as the loop says them of an issue it picked.
+fn say_warnings(issue: u32, found: &RunIssue, out: &mut dyn Write) -> Result<()> {
+    for warn in &found.warnings {
+        writeln!(
+            out,
+            "#{issue} {}: warn {}: {}",
+            found.title, warn.rule, warn.reason
+        )?;
+    }
+    Ok(())
 }
 
 /// A `run` job taken, for the loop to start as a task child (issue 633).

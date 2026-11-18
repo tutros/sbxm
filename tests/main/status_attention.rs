@@ -527,6 +527,7 @@ fn section(base: &Path, gh: &FakeGitHub) -> String {
         cloud_first: false,
         dead: None,
         next_check: None,
+        retro_due: None,
     };
     looping::render(&view, None)
 }
@@ -753,6 +754,7 @@ fn write_loop_lock(base: &Path) {
         adopted: Vec::new(),
         idle_check: None,
         took_over: Vec::new(),
+        retro_due: None,
     };
     fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
 }
@@ -953,6 +955,7 @@ fn a_child_the_dead_loop_had_adopted_is_left_too() {
         }],
         idle_check: None,
         took_over: Vec::new(),
+        retro_due: None,
     };
     fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
     let mut adopted = loops_child(15, Stage::Reviewing, Status::Running);
@@ -996,6 +999,7 @@ fn write_idle_lock(base: &Path, began: Option<u64>) {
         adopted: Vec::new(),
         idle_check: began.map(format_timestamp),
         took_over: Vec::new(),
+        retro_due: None,
     };
     fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
 }

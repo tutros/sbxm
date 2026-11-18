@@ -6,8 +6,8 @@ use anyhow::{Result, anyhow};
 
 use super::{
     CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, JobLog, LabelEvent, ListedPr,
-    Mergeable, PostedStatus, PrComment, PrFiles, PrInfo, PrMergeState, PrRequest, PrState,
-    RunStatus, WorkflowRun,
+    Mergeable, MergedPr, PostedStatus, PrComment, PrFiles, PrInfo, PrMergeState, PrRequest,
+    PrState, RunStatus, WorkflowRun,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +56,7 @@ pub enum GhCall {
     PrMergeCommit(String, u32),
     PrFiles(String, u32),
     PrLabels(String, u32),
+    IssueLabelNames(String, u32),
     /// Repo, number, label.
     PrRemoveLabel(String, u32, String),
     /// Repo, commit.
@@ -63,6 +64,14 @@ pub enum GhCall {
     IssueCommentBodies(String, u32),
     LabelEvents(String, u32),
     PrMergedAt(String, u32),
+    /// Repo, day.
+    PrsMergedSince(String, String),
+    /// Repo, branch, folder.
+    DirFiles(String, String, String),
+    /// Repo, branch, path.
+    FileText(String, String, String),
+    /// Repo, branch.
+    RepoPaths(String, String),
 }
 
 #[derive(Default)]
@@ -125,6 +134,9 @@ pub struct FakeGitHub {
     remove_label_failure: Option<String>,
     /// Only `issue_labels` fails (and is still recorded; issue 623).
     issue_labels_failure: Option<String>,
+    /// What `issue_label_names` answers, by issue, before the open issues' labels (issue 709).
+    issue_label_names: Vec<(u32, Vec<String>)>,
+    issue_label_reads_failure: Option<String>,
     /// What `commit_statuses` answers, by commit; none for a commit not scripted.
     posted_statuses: Vec<(String, Vec<PostedStatus>)>,
     statuses_failure: Option<String>,
@@ -139,6 +151,13 @@ pub struct FakeGitHub {
     merged_at: Mutex<Vec<(u32, u64)>>,
     /// The next `issues_open` fails with this, once (issue 687).
     issues_open_failure: Mutex<Option<String>>,
+    /// The files of the default branch, by path (issue 714): `None` when not scripted, and then
+    /// `dir_files` and `file_text` fail, so a loop test that scripts none sees no retro alert.
+    repo_files: Mutex<Option<Vec<(String, String)>>>,
+    /// What `prs_merged_since` lists from (issue 714); none when not scripted.
+    merged_prs: Mutex<Vec<MergedPr>>,
+    /// `dir_files`, `file_text` and `prs_merged_since` fail with this while set (issue 714).
+    retro_reads_failure: Mutex<Option<String>>,
     calls: Mutex<Vec<GhCall>>,
 }
 
@@ -217,6 +236,20 @@ impl FakeGitHub {
     /// Only `issue_labels` fails (and is still recorded; issue 623).
     pub fn failing_issue_labels(mut self, message: &str) -> Self {
         self.issue_labels_failure = Some(message.to_owned());
+        self
+    }
+
+    /// The labels `issue_label_names` reads on issue `number`, open or closed, listed or not
+    /// (issue 709); an issue not scripted here answers with its open issue's labels.
+    pub fn with_issue_label_names(mut self, number: u32, labels: &[&str]) -> Self {
+        let labels = labels.iter().map(|l| (*l).to_owned()).collect();
+        self.issue_label_names.push((number, labels));
+        self
+    }
+
+    /// Only `issue_label_names` fails (and is still recorded).
+    pub fn failing_issue_label_reads(mut self, message: &str) -> Self {
+        self.issue_label_reads_failure = Some(message.to_owned());
         self
     }
 
@@ -498,6 +531,42 @@ impl FakeGitHub {
     pub fn failing(mut self, message: &str) -> Self {
         self.failure = Some(message.to_owned());
         self
+    }
+
+    /// The files of the default branch, by path (issue 714); an empty list is a repository with
+    /// none.
+    pub fn with_repo_files(self, files: &[(&str, &str)]) -> Self {
+        self.set_repo_files(files);
+        self
+    }
+
+    /// The files of the default branch from now on, as a merge landing a file makes them.
+    pub fn set_repo_files(&self, files: &[(&str, &str)]) {
+        *self.repo_files.lock().unwrap() = Some(
+            files
+                .iter()
+                .map(|(path, text)| ((*path).to_owned(), (*text).to_owned()))
+                .collect(),
+        );
+    }
+
+    /// The merged PRs `prs_merged_since` lists from (issue 714).
+    pub fn with_merged_prs(self, prs: Vec<MergedPr>) -> Self {
+        *self.merged_prs.lock().unwrap() = prs;
+        self
+    }
+
+    /// From now on the reads of the retro alert fail with `message`, or no longer do (`None`).
+    pub fn set_retro_reads_failing(&self, message: Option<&str>) {
+        *self.retro_reads_failure.lock().unwrap() = message.map(str::to_owned);
+    }
+
+    fn retro_read(&self, call: GhCall) -> Result<()> {
+        self.record(call)?;
+        match self.retro_reads_failure.lock().unwrap().as_ref() {
+            Some(message) => Err(anyhow!("{message}")),
+            None => Ok(()),
+        }
     }
 
     pub fn calls(&self) -> Vec<GhCall> {
@@ -970,6 +1039,24 @@ impl GitHubBackend for FakeGitHub {
         Ok(self.pr_labels_now(number))
     }
 
+    /// The scripted labels of issue `number`, else its open issue's; an error for neither.
+    fn issue_label_names(&self, repo: &str, number: u32) -> Result<Vec<String>> {
+        self.record(GhCall::IssueLabelNames(repo.to_owned(), number))?;
+        if let Some(message) = &self.issue_label_reads_failure {
+            return Err(anyhow!("{message}"));
+        }
+        if let Some((_, labels)) = self.issue_label_names.iter().find(|(n, _)| *n == number) {
+            return Ok(labels.clone());
+        }
+        self.open_issues
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|i| i.number == number)
+            .map(|i| i.labels.clone())
+            .ok_or_else(|| anyhow!("no labels scripted for issue #{number}"))
+    }
+
     fn pr_remove_label(&self, repo: &str, number: u32, label: &str) -> Result<()> {
         self.record(GhCall::PrRemoveLabel(
             repo.to_owned(),
@@ -1035,5 +1122,78 @@ impl GitHubBackend for FakeGitHub {
             .iter()
             .find(|(n, _)| *n == number)
             .map(|(_, at)| *at))
+    }
+
+    /// The scripted merged PRs that merged on `day` or later, as GitHub's `merged:>=` search
+    /// lists them.
+    fn prs_merged_since(&self, repo: &str, day: &str) -> Result<Vec<MergedPr>> {
+        self.retro_read(GhCall::PrsMergedSince(repo.to_owned(), day.to_owned()))?;
+        let from = crate::run::results::parse_day(day)
+            .ok_or_else(|| anyhow!("FakeGitHub: {day:?} isn't a day"))?;
+        Ok(self
+            .merged_prs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|pr| pr.merged_at >= from)
+            .cloned()
+            .collect())
+    }
+
+    fn dir_files(&self, repo: &str, branch: &str, dir: &str) -> Result<Vec<String>> {
+        self.retro_read(GhCall::DirFiles(
+            repo.to_owned(),
+            branch.to_owned(),
+            dir.to_owned(),
+        ))?;
+        let files = self.repo_files.lock().unwrap();
+        let files = files
+            .as_ref()
+            .ok_or_else(|| anyhow!("FakeGitHub: the repository's files are not scripted"))?;
+        let prefix = format!("{dir}/");
+        Ok(files
+            .iter()
+            .filter_map(|(path, _)| path.strip_prefix(&prefix))
+            .filter(|name| !name.contains('/'))
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn file_text(&self, repo: &str, branch: &str, path: &str) -> Result<String> {
+        self.retro_read(GhCall::FileText(
+            repo.to_owned(),
+            branch.to_owned(),
+            path.to_owned(),
+        ))?;
+        self.repo_files
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .find(|(p, _)| p == path)
+            .map(|(_, text)| text.clone())
+            .ok_or_else(|| anyhow!("FakeGitHub: {path} is not scripted"))
+    }
+
+    /// The scripted files of the default branch and the folders they are in (issue 725).
+    fn repo_paths(&self, repo: &str, branch: &str) -> Result<Vec<String>> {
+        self.retro_read(GhCall::RepoPaths(repo.to_owned(), branch.to_owned()))?;
+        let files = self.repo_files.lock().unwrap();
+        let files = files
+            .as_ref()
+            .ok_or_else(|| anyhow!("FakeGitHub: the repository's files are not scripted"))?;
+        let mut paths: Vec<String> = Vec::new();
+        for (path, _) in files {
+            let mut at = 0;
+            while let Some(slash) = path[at..].find('/') {
+                let folder = &path[..at + slash];
+                if !paths.iter().any(|p| p == folder) {
+                    paths.push(folder.to_owned());
+                }
+                at += slash + 1;
+            }
+            paths.push(path.clone());
+        }
+        Ok(paths)
     }
 }

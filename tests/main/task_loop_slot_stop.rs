@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use common::child::InProcess;
 use common::task_fixture::{
-    CLAUDE_DONE, CODEX_DONE, Fixture, Play, Probe, fixture_with, issue_text, ok, open_issue,
-    play_reviews, play_tasks, worked_task,
+    CLAUDE_DONE, CODEX_DONE, Fixture, Play, Probe, fixture_with, issue_text, ok, play_reviews,
+    play_tasks, ready_open_issue, worked_task,
 };
 use sbxm::backend::FakeBackend;
 use sbxm::commands::task_loop::{self, Env, Options, Steps, StopFlag};
@@ -32,7 +32,11 @@ fn github() -> FakeGitHub {
     FakeGitHub::default()
         .with_default_branch("main")
         .with_issue_text(issue_text(ISSUE))
-        .with_open_issues(vec![open_issue(ISSUE, &["ready-for-worker", "size:S"], "")])
+        .with_open_issues(vec![ready_open_issue(
+            ISSUE,
+            &["ready-for-worker", "size:S"],
+            "",
+        )])
 }
 
 /// Waits a little for `path` to exist, as a real pause would give the loop time to write it.

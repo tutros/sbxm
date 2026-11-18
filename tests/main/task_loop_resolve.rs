@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::gh::{GhBackend, GhRunner};
@@ -345,7 +345,7 @@ fn github(issues: &[u32], prs: &[u32]) -> FakeGitHub {
     let mut open = Vec::new();
     for &n in issues {
         gh = gh.with_issue_text(issue_text(n)).with_pr(pr(100 + n, HEAD));
-        open.push(open_issue(n, &[READY, "size:S"], ""));
+        open.push(ready_open_issue(n, &[READY, "size:S"], ""));
     }
     for &n in prs {
         gh = gh.with_pr(pr(n, HEAD));
@@ -584,12 +584,11 @@ fn a_conflicting_medium_or_high_risk_pr_is_resolved_and_not_armed() {
 fn a_medium_risk_resolve_says_its_size_and_cargo_lock_reasons() {
     let f = fixture();
     f.loop_pr(1, Level::Low);
-    let mut text = issue_text(1);
-    text.text = "title:\tFix 1\nstate:\tOPEN\nlabels:\tsize:L\n--\nbody\n".to_owned();
     let gh = github(&[], &[101])
         .with_mergeable(101, Mergeable::Conflicting)
         .with_auto_merge(101)
-        .with_issue_text(text)
+        .with_issue_text(issue_text(1))
+        .with_open_issues(vec![ready_open_issue(1, &["size:L"], "")])
         .with_pr_files(
             101,
             PrFiles {
@@ -630,11 +629,10 @@ fn an_unarmed_medium_risk_pr_says_its_size_and_cargo_lock_reasons_after_a_resolv
     // again; the line still says why it couldn't be under the medium rules.
     let f = fixture();
     f.loop_pr(1, Level::Medium);
-    let mut text = issue_text(1);
-    text.text = "title:\tFix 1\nstate:\tOPEN\nlabels:\tsize:L\n--\nbody\n".to_owned();
     let gh = github(&[], &[101])
         .with_mergeable(101, Mergeable::Conflicting)
-        .with_issue_text(text)
+        .with_issue_text(issue_text(1))
+        .with_open_issues(vec![ready_open_issue(1, &["size:L"], "")])
         .with_pr_files(
             101,
             PrFiles {
