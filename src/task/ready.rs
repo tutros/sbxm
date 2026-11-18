@@ -268,20 +268,31 @@ fn heading(line: &str) -> Option<(usize, &str)> {
     (1..=6).contains(&hashes).then(|| (hashes, text.trim()))
 }
 
+/// A bold field label at a line's start, `**Name:**`, by its name.
+fn bold_label(line: &str) -> Option<&str> {
+    let name = line.trim_start().strip_prefix("**")?;
+    let (name, _) = name.split_once(":**")?;
+    (!name.is_empty() && !name.contains('*')).then_some(name)
+}
+
 /// Rule 5: an `Acceptance criteria` heading with at least one `- [ ]` box before the next heading.
+/// The `**Acceptance criteria:**` label `task file-findings` writes (the code-review skill's issue
+/// template) counts as the heading, its boxes ending at the next heading or bold label.
 fn acceptance(lines: &[&str]) -> Verdict {
     const RULE: &str = "acceptance";
+    let is_acceptance = |text: &str| {
+        text.trim_end_matches(':')
+            .eq_ignore_ascii_case("acceptance criteria")
+    };
     let Some(at) = lines.iter().position(|l| {
-        heading(l).is_some_and(|(_, text)| {
-            text.trim_end_matches(':')
-                .eq_ignore_ascii_case("acceptance criteria")
-        })
+        heading(l).is_some_and(|(_, text)| is_acceptance(text))
+            || bold_label(l).is_some_and(is_acceptance)
     }) else {
         return Verdict::new(RULE, Status::Fail, "no Acceptance criteria heading");
     };
     let boxes = lines[at + 1..]
         .iter()
-        .take_while(|l| heading(l).is_none())
+        .take_while(|l| heading(l).is_none() && bold_label(l).is_none())
         .filter(|l| l.trim_start().starts_with("- [ ]"))
         .count();
     if boxes == 0 {

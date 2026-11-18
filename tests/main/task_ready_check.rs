@@ -248,6 +248,18 @@ fn acceptance_boxes_under_a_later_heading_dont_count() {
 }
 
 #[test]
+fn acceptance_the_bold_label_of_a_filed_finding_counts_as_its_heading() {
+    // `task file-findings` writes the code-review skill's `**Acceptance criteria:**` label.
+    let body = READY_BODY.replace("## Acceptance criteria\n\n", "**Acceptance criteria:**\n");
+    assert_eq!(status(&ready_issue(&body), "acceptance"), Status::Pass);
+    let body = READY_BODY.replace(
+        "## Acceptance criteria\n\n- [ ] It works\n",
+        "**Acceptance criteria:**\nIt works.\n**Review:** x\n- [ ] later\n",
+    );
+    assert_eq!(status(&ready_issue(&body), "acceptance"), Status::Fail);
+}
+
+#[test]
 fn acceptance_no_heading_fails() {
     let body = READY_BODY.replace("## Acceptance criteria\n", "");
     let v = verdict(&ready_issue(&body), "acceptance");

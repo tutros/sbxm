@@ -136,10 +136,10 @@ pub(crate) fn reasons(
 }
 
 /// Every reason the loop would pass `issue` over, or none: the label, the readiness rules (the
-/// size and the open points among them), then the loop's own checks in its order (its location's labels, an unmerged
-/// dependency, a Related partner with a task, else what `task run` would refuse before any
-/// write), then a branch of the task's name already on origin, which `task finish` would refuse
-/// to push over.
+/// size and the open points among them, issue 725), then the loop's own checks in its order (its
+/// location's labels, an unmerged dependency, a Related partner with a task, else what `task run`
+/// would refuse before any write), then a branch of the task's name already on origin, which
+/// `task finish` would refuse to push over.
 fn reasons_in(
     base_dir: &Path,
     cloud_slots: Option<u32>,
