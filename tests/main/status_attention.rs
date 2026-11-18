@@ -752,6 +752,7 @@ fn write_loop_lock(base: &Path) {
         progress: None,
         adopted: Vec::new(),
         idle_check: None,
+        took_over: None,
     };
     fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
 }
@@ -951,6 +952,7 @@ fn a_child_the_dead_loop_had_adopted_is_left_too() {
             owner: earlier.clone(),
         }],
         idle_check: None,
+        took_over: None,
     };
     fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
     let mut adopted = loops_child(15, Stage::Reviewing, Status::Running);
@@ -993,6 +995,7 @@ fn write_idle_lock(base: &Path, began: Option<u64>) {
         progress: None,
         adopted: Vec::new(),
         idle_check: began.map(format_timestamp),
+        took_over: None,
     };
     fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
 }

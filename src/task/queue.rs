@@ -59,6 +59,30 @@ pub struct LockFile {
     /// lock an older binary wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_check: Option<String>,
+    /// The lock of the dead loop this loop took over (issue 710), written with the take-over and
+    /// dropped once this loop has marked the dead loop's cut-off tasks owed and named its adopted
+    /// children: a loop that takes this lock over before then owns the dead loop's tasks too.
+    /// Absent otherwise, and in a lock an older binary wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub took_over: Option<Box<LockFile>>,
+}
+
+impl LockFile {
+    /// Whether the loop of this lock owns `rec`, as a loop that takes the lock over decides it:
+    /// the loop its child recorded, else its process (decision 322), a child it had adopted from
+    /// the loop before it, still that loop's (issue 643, review M-1), or a task of the loop whose
+    /// lock it took over and had not yet marked (issue 710).
+    pub fn owns(&self, rec: &record::Record) -> bool {
+        rec.owner() == Some(&self.process)
+            || self.adopted.iter().any(|a| a.is(rec))
+            || self.took_over.as_deref().is_some_and(|dead| dead.owns(rec))
+    }
+
+    /// The first loop of the chain this lock took over (issue 710): the earliest one whose tasks
+    /// it owns. This lock itself when it took none over.
+    pub fn first(&self) -> &LockFile {
+        self.took_over.as_deref().map_or(self, LockFile::first)
+    }
 }
 
 /// A child a loop adopted (issue 643): its issue's task, and the owner its record names, the dead

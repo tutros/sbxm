@@ -223,6 +223,7 @@ mod task_loop_scheduled;
 mod task_loop_should_fix;
 mod task_loop_slot_stop;
 mod task_loop_stop_before_phase;
+mod task_loop_takeover_failure;
 mod task_loop_trial;
 mod task_loop_trial_restart;
 mod task_machine;
