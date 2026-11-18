@@ -36,6 +36,7 @@ fn write_lock(base: &Path, retro_due: Option<&str>) {
         progress: None,
         adopted: Vec::new(),
         idle_check: None,
+        took_over: Vec::new(),
         retro_due: retro_due.map(str::to_owned),
     };
     fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();

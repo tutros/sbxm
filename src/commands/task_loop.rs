@@ -510,13 +510,21 @@ impl LoopLock {
     }
 
     /// Names the issues whose children this loop adopted (issue 643) in its lock, for `sbxm
-    /// status`.
+    /// status`, and drops the dead loops it kept since the take-over (issue 710): their cut-off
+    /// tasks are marked owed by now. Unwritten, both stay as they were, so the lock is left on
+    /// disk with the dead loops in it for the next loop.
     fn adopted(&mut self, children: Vec<queue::AdoptedChild>) -> Result<()> {
-        if children.is_empty() {
+        if children.is_empty() && self.file.took_over.is_empty() {
             return Ok(());
         }
-        self.file.adopted = children;
-        self.rewrite()
+        let took_over = std::mem::take(&mut self.file.took_over);
+        let before = std::mem::replace(&mut self.file.adopted, children);
+        let written = self.rewrite();
+        if written.is_err() {
+            self.file.adopted = before;
+            self.file.took_over = took_over;
+        }
+        written
     }
 
     /// Records in the lock when the loop began an idle wait (`Some`), or that it no longer waits
@@ -559,8 +567,12 @@ impl LoopLock {
 }
 
 impl Drop for LoopLock {
+    /// A lock that still holds the dead loops it took over (issue 710) is left: this loop
+    /// stopped before it marked their tasks, so the next loop takes it over and does.
     fn drop(&mut self) {
-        if fs::read_to_string(&self.path).is_ok_and(|text| text == self.me) {
+        if self.file.took_over.is_empty()
+            && fs::read_to_string(&self.path).is_ok_and(|text| text == self.me)
+        {
             let _ = fs::remove_file(&self.path);
         }
     }
@@ -572,7 +584,9 @@ impl Drop for LoopLock {
 /// status` (issue 477); a labeled-queue loop writes its process alone, as before.
 /// Returns the lock and, when it took over a lock whose process is gone, that dead loop's lock
 /// (decision 310: the tasks it was running are resumed; issue 643: its live children, and the
-/// ones it adopted, are adopted).
+/// ones it adopted, are adopted). The new lock names that loop, and the ones its lock still held,
+/// in the same write, until [`LoopLock::adopted`] drops them (issue 710): a loop that stops
+/// before then leaves them all to the next, in a list that stays flat however many loops fail.
 fn take_lock(
     base_dir: &Path,
     opts: &Options,
@@ -591,11 +605,19 @@ fn take_lock(
         progress: listed.then(queue::Progress::default),
         adopted: Vec::new(),
         idle_check: None,
+        took_over: Vec::new(),
         retro_due: None,
     };
-    let me = serde_json::to_string(&contents)?;
-    let mut dead = None;
+    let mut dead: Option<queue::LockFile> = None;
     for _ in 0..3 {
+        let contents = queue::LockFile {
+            took_over: dead
+                .as_ref()
+                .map(queue::LockFile::taken_over)
+                .unwrap_or_default(),
+            ..contents.clone()
+        };
+        let me = serde_json::to_string(&contents)?;
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -604,10 +626,10 @@ fn take_lock(
             Ok(mut file) => {
                 let lock = LoopLock {
                     path,
-                    me: me.clone(),
-                    file: contents.clone(),
+                    me,
+                    file: contents,
                 };
-                file.write_all(me.as_bytes())
+                file.write_all(lock.me.as_bytes())
                     .with_context(|| format!("cannot write {}", lock.path.display()))?;
                 return Ok((lock, dead));
             }
@@ -709,13 +731,6 @@ struct Adopted {
     ended: bool,
     /// Its issue's size, from its `size:` label as a fresh start reads it (issue 687).
     size: Option<String>,
-}
-
-/// Whether the dead loop whose lock this loop took over owns `rec`: the loop its child recorded,
-/// else its process (decision 322), or a child it had adopted from the loop before it, still that
-/// loop's (issue 643, review M-1).
-fn dead_owns(dead: &queue::LockFile, rec: &Record) -> bool {
-    rec.owner() == Some(&dead.process) || dead.adopted.iter().any(|a| a.is(rec))
 }
 
 /// What became of an adopted child that ended with no outcome.
@@ -1817,9 +1832,10 @@ impl Loop<'_> {
     /// The tasks a loop was running when it died (decision 310), to be continued once, as the
     /// loop's one resume after an environment stop: this repo's issue tasks not finished and
     /// interrupted as `task status` decides it, that are either owned by `dead`, the loop whose
-    /// lock this loop took over ([`dead_owns`]), or still owed their resume from an earlier start ([`Owed`]). A newly found
-    /// one is marked as owed, under its lock, before anything else runs, so a loop that stops or
-    /// fails before the resume leaves it to the next loop. One whose resume was taken already, and
+    /// lock this loop took over ([`queue::LockFile::owns`]), or still owed their resume from an
+    /// earlier start ([`Owed`]). A newly found one is marked as owed, under its lock, before the
+    /// adopted children are named, so a loop that stops or fails before the resume leaves it to
+    /// the next loop. One whose resume was taken already, and
     /// was cut off again, is parked with its log row instead.
     fn cut_off(
         &mut self,
@@ -1845,7 +1861,7 @@ impl Loop<'_> {
             let owed = Owed::of(&rec);
             // Owned by `dead`: the loop its child recorded, else the process (decision 322), or a
             // child `dead` had adopted (issue 643).
-            let by_dead = dead.is_some_and(|dead| dead_owns(dead, &rec));
+            let by_dead = dead.is_some_and(|dead| dead.owns(&rec));
             // Owed for the process still recorded: a command run by hand since then took it.
             let owed_here = matches!(&owed, Owed::Due(p) if rec.process.as_ref() == Some(p));
             // One that ended with its outcome is adopted instead (issue 657).
@@ -1917,8 +1933,8 @@ impl Loop<'_> {
 
     /// The issues of `dead`'s children that ended with an `outcome.json` `dead` never acted on
     /// (issue 657): this repo's issue tasks, not finished and with no PR, that `dead` owns
-    /// ([`dead_owns`]), whose recorded process has ended, or that record none (issue 680: a child
-    /// that ends normally clears it), and that have an `outcome.json`, whose
+    /// ([`queue::LockFile::owns`]), whose recorded process has ended, or that record none (issue
+    /// 680: a child that ends normally clears it), and that have an `outcome.json`, whose
     /// issue has no row in a log `dead` wrote: one with a row there was acted on (parked, say)
     /// before `dead` died. None taken over: none. Read only, before anything is written.
     fn ended_under(
@@ -1942,7 +1958,7 @@ impl Loop<'_> {
                 && rec.id == format!("issue-{}", rec.number)
                 && rec.stage != Stage::Finished
                 && rec.pr.is_none()
-                && dead_owns(dead, &rec)
+                && dead.owns(&rec)
                 && rec.process.as_ref().is_none_or(|p| !p.alive(self.probe))
                 && !matches!(outcome::read(&dir), outcome::Read::Missing);
             if ours {
@@ -1960,7 +1976,8 @@ impl Loop<'_> {
     /// having no rows: it never stops the start's recovery before the cut-off tasks are marked
     /// owed and the adopted ones named in the lock (review M-1).
     fn unlogged(&mut self, dead: &queue::LockFile, issues: &mut Vec<u32>, warn: &mut dyn Write) {
-        let started = crate::run::results::parse_timestamp(&dead.process.started_at).unwrap_or(0);
+        // From the first loop of the chain `dead` took over (issue 710): each since wrote logs.
+        let started = crate::run::results::parse_timestamp(&dead.first().started_at).unwrap_or(0);
         let logs = match loop_log::since(&self.base_dir, started, &self.log) {
             Ok(logs) => logs,
             Err(e) => {
@@ -1990,12 +2007,13 @@ impl Loop<'_> {
     }
 
     /// The children that outlived `dead`, the loop whose lock this loop took over (issue 643):
-    /// this repo's issue tasks, not finished and with no PR, that `dead` owns ([`dead_owns`])
-    /// and whose recorded process is alive, by its identity (decision 322), not its bare pid. The
-    /// loop adopts each as its own child: it holds its slot and counts toward [`PR_CAP`] while it
-    /// runs, and the loop acts on its end. The issues in `ended` ([`Self::ended_under`]) too,
-    /// whose children ended already: the loop acts on their outcome at once, as on any adopted
-    /// child's end (issue 657). A task run by hand, or none taken over: nothing.
+    /// this repo's issue tasks, not finished and with no PR, that `dead` owns
+    /// ([`queue::LockFile::owns`]) and whose recorded process is alive, by its identity (decision
+    /// 322), not its bare pid. The loop adopts each as its own child: it holds its slot and counts
+    /// toward [`PR_CAP`] while it runs, and the loop acts on its end. The issues in `ended`
+    /// ([`Self::ended_under`]) too, whose children ended already: the loop acts on their outcome
+    /// at once, as on any adopted child's end (issue 657). A task run by hand, or none taken
+    /// over: nothing.
     fn adopt(
         &mut self,
         dead: Option<&queue::LockFile>,
@@ -2018,7 +2036,7 @@ impl Loop<'_> {
                 && rec.id == format!("issue-{}", rec.number)
                 && rec.stage != Stage::Finished
                 && rec.pr.is_none()
-                && dead_owns(dead, &rec);
+                && dead.owns(&rec);
             let gone = ended.contains(&rec.number);
             let alive = rec.process.as_ref().is_some_and(|p| p.alive(self.probe));
             if !ours || !(gone || alive) {
@@ -4321,7 +4339,9 @@ fn run_loop(
     };
 
     // The dead loop's children that ended with an outcome it never acted on (issue 657), read
-    // first; then the cut-off tasks: their owed resumes are written before anything else can fail.
+    // first; then the cut-off tasks, marked owed, and the adopted children, named in the lock. The
+    // steps above can fail first: the lock keeps the dead loops until `lock.adopted` drops them
+    // (issue 710), so a loop that fails or is killed before then leaves both to the next loop.
     let result = lp.ended_under(dead.as_ref(), warn).and_then(|ended| {
         let mut due = lp.cut_off(dead.as_ref(), &ended, out, warn)?;
         // The medium PRs an earlier loop armed (issue 712), before a first `rm_merged` removes a

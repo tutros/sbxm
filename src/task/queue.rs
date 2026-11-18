@@ -59,11 +59,67 @@ pub struct LockFile {
     /// lock an older binary wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_check: Option<String>,
+    /// The dead loops this loop took over (issue 710), oldest first: the one whose lock it took
+    /// over, after the ones that loop had taken over and not yet marked. Written with the
+    /// take-over and emptied once this loop has marked their cut-off tasks owed and named their
+    /// adopted children: a loop that takes this lock over before then owns their tasks too. A flat
+    /// list, so a lock taken over again and again stays one level deep (review M-1). Empty
+    /// otherwise, and in a lock an older binary wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub took_over: Vec<TookOver>,
     /// The line `sbxm status` shows while the loop's last retro check found a retro due (issue
     /// 714, decision 330(4)): `retro due: 12 PRs since 2026-11-16`. Absent when it isn't due, and
     /// in a lock an older binary wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retro_due: Option<String>,
+}
+
+impl LockFile {
+    /// Whether the loop of this lock owns `rec`, as a loop that takes the lock over decides it:
+    /// the loop its child recorded, else its process (decision 322), a child it had adopted from
+    /// the loop before it, still that loop's (issue 643, review M-1), or a task of a loop whose
+    /// lock it took over and had not yet marked (issue 710).
+    pub fn owns(&self, rec: &record::Record) -> bool {
+        owned_by(&self.process, &self.adopted, rec)
+            || self
+                .took_over
+                .iter()
+                .any(|dead| owned_by(&dead.process, &dead.adopted, rec))
+    }
+
+    /// The process of the first loop whose tasks this lock owns (issue 710): the oldest loop it
+    /// took over, else its own.
+    pub fn first(&self) -> &record::Process {
+        self.took_over
+            .first()
+            .map_or(&self.process, |dead| &dead.process)
+    }
+
+    /// What a loop that takes this lock over keeps of it (issue 710): the loops it had taken over,
+    /// then itself, oldest first.
+    pub fn taken_over(&self) -> Vec<TookOver> {
+        let mut chain = self.took_over.clone();
+        chain.push(TookOver {
+            process: self.process.clone(),
+            adopted: self.adopted.clone(),
+        });
+        chain
+    }
+}
+
+/// Whether `rec` is the task of the loop `process` or of a child it adopted ([`LockFile::owns`]).
+fn owned_by(process: &record::Process, adopted: &[AdoptedChild], rec: &record::Record) -> bool {
+    rec.owner() == Some(process) || adopted.iter().any(|a| a.is(rec))
+}
+
+/// A dead loop a loop took over and has not yet marked (issue 710): its process and the children
+/// it had adopted, what its tasks are told by.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TookOver {
+    #[serde(flatten)]
+    pub process: record::Process,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adopted: Vec<AdoptedChild>,
 }
 
 /// A child a loop adopted (issue 643): its issue's task, and the owner its record names, the dead

@@ -104,10 +104,11 @@ pub enum LeftWhy {
 }
 
 /// What the dead loop of the lock `file` left (issue 671): when it was last seen, and each task it
-/// owns (the loop its child recorded, else its process, or a child it had adopted, as
-/// `task loop` decides it when it takes the lock over) that is either still running under a live
-/// process or at `ready` with an `outcome.json` that says its last command didn't end well (any
-/// end but `ready`, and `held`, which wrote nothing). Reads only.
+/// owns (the loop its child recorded, else its process, a child it had adopted, or a task of a
+/// loop it took over and had not marked yet, as `task loop` decides it when it takes the lock
+/// over: [`LockFile::owns`]) that is either still running under a live process or at `ready` with
+/// an `outcome.json` that says its last command didn't end well (any end but `ready`, and `held`,
+/// which wrote nothing). Reads only.
 pub fn dead(base: &Path, file: &LockFile, probe: &dyn ProcessProbe) -> Dead {
     let modified = |path: &Path| {
         fs::metadata(path)
@@ -121,8 +122,7 @@ pub fn dead(base: &Path, file: &LockFile, probe: &dyn ProcessProbe) -> Dead {
     let last_seen = modified(&queue::lock_path(base)).max(log);
     let mut left = Vec::new();
     for rec in record::load_all(base).unwrap_or_default() {
-        let owned = rec.owner() == Some(&file.process) || file.adopted.iter().any(|a| a.is(&rec));
-        if !owned {
+        if !file.owns(&rec) {
             continue;
         }
         let dir = record::task_dir(base, &rec.id);
@@ -248,6 +248,7 @@ pub fn work(base: &Path, lock: &Process, probe: &dyn ProcessProbe) -> anyhow::Re
             progress: None,
             adopted: Vec::new(),
             idle_check: None,
+            took_over: Vec::new(),
             retro_due: None,
         },
         probe,

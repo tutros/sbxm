@@ -490,7 +490,9 @@ the binary you built, and waits for job files and labelled issues.
    again 10 minutes later, at most 3 times in an hour; a stop that needs you (exit 3: a lapsed sign-in, a missing
    secret, two parked tasks, the usage waits' total) leaves it down: fix the cause, then run
    `./scripts/loop-trigger.ps1` by hand or wait for the next logon. A task the loop was running when it died is
-   resumed once at the next start. The trigger waits for the loop's own process, not its tasks' (issue 676), and the
+   resumed once at the next start, and a child of it still running is adopted. A restarted loop that fails or is
+   killed again before it has marked those tasks keeps the dead loop in its own lock (issue 710), so the start
+   after it still finds them. The trigger waits for the loop's own process, not its tasks' (issue 676), and the
    loop's output is in files, not a window: `<UTC yyyyMMdd-HHmmss>-loop.out.log` and `...-loop.err.log` in `-LogDir`
    (default `H:\sbxm-e2e\loop-trigger-logs`), whose paths it prints at each start.
 3. Stop it with `sbxm task loop --stop`: it stops after the current task, or within 5 minutes while it waits (5
