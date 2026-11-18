@@ -313,6 +313,10 @@ pub trait GitHubBackend: Send + Sync {
     /// The labels on PR `number`, every page (`gh api repos/<repo>/issues/<n>/labels
     /// --paginate`), read for its `hold` and `go` labels (issue 548).
     fn pr_labels(&self, repo: &str, number: u32) -> Result<Vec<String>>;
+    /// The labels on issue `number` in any state, every page (`gh api
+    /// repos/<repo>/issues/<n>/labels --paginate`): read before a medium-risk PR from that issue
+    /// would be armed, whether or not the issue is among [`Self::issues_open`]'s (issue 709).
+    fn issue_label_names(&self, repo: &str, number: u32) -> Result<Vec<String>>;
     /// Removes the label named exactly `label` from PR `number` (`gh api --method DELETE
     /// repos/<repo>/issues/<n>/labels/<label>`), as the loop does to `go` before it pushes onto
     /// the PR (issue 548).

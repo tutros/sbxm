@@ -579,10 +579,9 @@ fn a_medium_or_high_risk_pr_waits_for_the_user_and_counts_toward_the_cap() {
 // Issue 549 (#460 guardrail 6): a medium-risk PR's note also gives its size and `Cargo.lock`
 // reasons; it is still never armed (until #550). Low risk keeps its rules.
 
-/// `github(&[3])` with issue 3 labeled `labels` and PR 103's files scripted.
-fn github_medium(labels: &str, files: &[&str]) -> FakeGitHub {
-    let mut text = issue_text(3);
-    text.text = format!("title:\tFix 3\nstate:\tOPEN\nlabels:\t{labels}\n--\nbody\n");
+/// `github(&[3])` with issue 3 labeled ready and `size` and PR 103's files scripted; the size is
+/// read from issue 3's labels, which the fake answers from the open issue (issue 709).
+fn github_medium(size: &str, files: &[&str]) -> FakeGitHub {
     let files: Vec<PrFile> = files
         .iter()
         .map(|name| PrFile {
@@ -593,8 +592,8 @@ fn github_medium(labels: &str, files: &[&str]) -> FakeGitHub {
     FakeGitHub::default()
         .with_user("me")
         .with_default_branch("main")
-        .with_issue_text(text)
-        .with_open_issues(vec![open_issue(3, &[READY, "size:S"], "")])
+        .with_issue_text(issue_text(3))
+        .with_open_issues(vec![open_issue(3, &[READY, size], "")])
         .with_pr(pr(103, PrState::Open, REVIEWED))
         .with_pr_files(
             103,
@@ -613,7 +612,7 @@ const MEDIUM_CLEAN: Review = Review {
 #[test]
 fn a_medium_pr_of_size_l_changing_cargo_lock_awaits_you_with_both_reasons() {
     let f = fixture();
-    let gh = github_medium("ready-for-worker, size:L", &["src/a.rs", "Cargo.lock"]);
+    let gh = github_medium("size:L", &["src/a.rs", "Cargo.lock"]);
     let script = Script::new(&f.base(), MEDIUM_CLEAN);
 
     let run = run_loop(&f, &f.opts(None), &script, &gh);

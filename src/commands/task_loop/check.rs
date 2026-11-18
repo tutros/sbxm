@@ -155,8 +155,8 @@ fn reasons_in(
     if !issue.labels.iter().any(|l| l == READY_LABEL) {
         reasons.push(format!("not labeled {READY_LABEL}"));
     }
-    if queue::size(&issue.labels).is_none() {
-        reasons.push("no size label (size:S, size:M or size:L)".to_owned());
+    if let Err(size) = queue::size(&issue.labels) {
+        reasons.push(size.to_string());
     }
     if queue::has_open_points(&issue.body) {
         reasons.push(OPEN_POINTS.to_owned());

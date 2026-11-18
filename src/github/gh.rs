@@ -1106,6 +1106,11 @@ impl GitHubBackend for GhBackend {
     }
 
     fn pr_labels(&self, repo: &str, number: u32) -> Result<Vec<String>> {
+        self.issue_label_names(repo, number)
+    }
+
+    // GitHub serves a PR's labels as its issue's, so the two reads are one.
+    fn issue_label_names(&self, repo: &str, number: u32) -> Result<Vec<String>> {
         let path = format!("repos/{repo}/issues/{number}/labels");
         let out = self.read(&strings(&["api", &path, "--paginate"]))?;
         let labels: Vec<Named> = pages(&out, &path)?;

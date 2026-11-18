@@ -1125,7 +1125,7 @@ impl Loop<'_> {
         Ok(RunIssue {
             location,
             title: found.title.clone(),
-            size: queue::size(&found.labels).map(str::to_owned),
+            size: queue::size(&found.labels).ok().map(str::to_owned),
             labeled: found.labels.iter().any(|l| l == queue::READY_LABEL),
         })
     }

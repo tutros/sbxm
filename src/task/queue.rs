@@ -325,14 +325,47 @@ pub fn awaits_user(state: PrMergeState) -> bool {
     state.state == PrState::Open && !state.auto_merge
 }
 
-/// An issue's size from its `size:S`, `size:M` or `size:L` label.
-pub fn size(labels: &[String]) -> Option<&'static str> {
-    labels.iter().find_map(|label| match label.as_str() {
-        "size:S" => Some("S"),
-        "size:M" => Some("M"),
-        "size:L" => Some("L"),
-        _ => None,
-    })
+/// Why an issue has no one size (issue 709).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SizeError {
+    /// None of `size:S`, `size:M` and `size:L`.
+    Missing,
+    /// More than one of them, in the labels' order.
+    Several(Vec<&'static str>),
+}
+
+impl std::fmt::Display for SizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => write!(f, "no size label (size:S, size:M or size:L)"),
+            Self::Several(sizes) => {
+                write!(f, "more than one size label ({})", sizes.join(", "))
+            }
+        }
+    }
+}
+
+/// An issue's size from its one `size:S`, `size:M` or `size:L` label: the one rule the queue's
+/// order, `task loop --check`, the loop's pick, its log and a medium-risk PR's arming read
+/// (issue 709). The same label twice is one size.
+pub fn size(labels: &[String]) -> Result<&'static str, SizeError> {
+    let mut sizes: Vec<&'static str> = Vec::new();
+    for label in labels {
+        let size = match label.as_str() {
+            "size:S" => "S",
+            "size:M" => "M",
+            "size:L" => "L",
+            _ => continue,
+        };
+        if !sizes.contains(&size) {
+            sizes.push(size);
+        }
+    }
+    match sizes.as_slice() {
+        [] => Err(SizeError::Missing),
+        [size] => Ok(size),
+        _ => Err(SizeError::Several(sizes)),
+    }
 }
 
 /// Whether an issue carries [`PRIORITY_LABEL`].
@@ -346,9 +379,9 @@ fn is_priority(labels: &[String]) -> bool {
 /// the lowest number.
 pub fn queue_order(open: &[Issue]) -> Vec<u32> {
     let rank = |issue: &Issue| match size(&issue.labels) {
-        Some("S") => 0,
-        Some("M") => 1,
-        Some("L") => 2,
+        Ok("S") => 0,
+        Ok("M") => 1,
+        Ok("L") => 2,
         _ => 3,
     };
     let mut queue: Vec<&Issue> = open
@@ -370,9 +403,9 @@ pub fn largest_first(open: &[Issue]) -> Vec<u32> {
             .map(|i| i.labels.as_slice())
             .unwrap_or_default();
         let size = match size(labels) {
-            Some("L") => 0,
-            Some("M") => 1,
-            Some("S") => 2,
+            Ok("L") => 0,
+            Ok("M") => 1,
+            Ok("S") => 2,
             _ => 3,
         };
         (!is_priority(labels), size)
@@ -715,7 +748,7 @@ pub fn report(report: &Report) -> String {
         .open
         .iter()
         .filter(|i| !i.labels.iter().any(|l| l == READY_LABEL))
-        .filter(|i| size(&i.labels).is_some())
+        .filter(|i| size(&i.labels) != Err(SizeError::Missing))
         .collect();
     if almost.is_empty() {
         text.push_str("no almost-ready issues (sized, not labeled ready-for-worker)\n");
@@ -723,12 +756,16 @@ pub fn report(report: &Report) -> String {
     }
     text.push_str("almost ready (sized, not labeled ready-for-worker), and what blocks each:\n");
     for issue in almost {
-        let size = size(&issue.labels).unwrap_or("?");
+        let sized = size(&issue.labels);
+        let size = sized.as_ref().map_or("?", |size| *size);
         text.push_str(&format!(
             "  #{} {} (size:{size})\n",
             issue.number, issue.title
         ));
         let mut blockers = Vec::new();
+        if let Err(several) = sized {
+            blockers.push(several.to_string());
+        }
         if issue.labels.iter().any(|l| l == "question") {
             blockers.push("labeled question".to_owned());
         }
