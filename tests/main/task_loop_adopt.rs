@@ -766,7 +766,7 @@ fn second_loop_died(f: &Fixture) {
         progress: None,
         adopted: vec![adopted_from_dead(3)],
         idle_check: None,
-        took_over: None,
+        took_over: Vec::new(),
     };
     fs::write(lock_path(&f.base()), serde_json::to_string(&lock).unwrap()).unwrap();
 }
@@ -1813,7 +1813,7 @@ fn lock_file(adopted: &[u32]) -> LockFile {
             .map(|&issue| adopted_from_dead(issue))
             .collect(),
         idle_check: None,
-        took_over: None,
+        took_over: Vec::new(),
     }
 }
 

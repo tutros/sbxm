@@ -575,7 +575,7 @@ fn a_lock_without_outcomes_is_read_from_the_records() {
         progress: None,
         adopted: Vec::new(),
         idle_check: None,
-        took_over: None,
+        took_over: Vec::new(),
     };
     fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
     write(&base, 1, |r| {
@@ -626,7 +626,7 @@ fn an_older_binary_reads_a_lock_with_outcomes_as_its_process() {
         }),
         adopted: Vec::new(),
         idle_check: None,
-        took_over: None,
+        took_over: Vec::new(),
     };
     let text = serde_json::to_string(&file).unwrap();
 

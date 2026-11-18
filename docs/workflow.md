@@ -480,7 +480,7 @@ the binary you built, and waits for job files and labelled issues.
    secret, two parked tasks, the usage waits' total) leaves it down: fix the cause, then run
    `./scripts/loop-trigger.ps1` by hand or wait for the next logon. A task the loop was running when it died is
    resumed once at the next start, and a child of it still running is adopted. A restarted loop that fails or is
-   killed again before it has marked those tasks keeps the dead loop's lock inside its own (issue 710), so the start
+   killed again before it has marked those tasks keeps the dead loop in its own lock (issue 710), so the start
    after it still finds them. The trigger waits for the loop's own process, not its tasks' (issue 676), and the
    loop's output is in files, not a window: `<UTC yyyyMMdd-HHmmss>-loop.out.log` and `...-loop.err.log` in `-LogDir`
    (default `H:\sbxm-e2e\loop-trigger-logs`), whose paths it prints at each start.

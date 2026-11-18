@@ -248,7 +248,7 @@ pub fn work(base: &Path, lock: &Process, probe: &dyn ProcessProbe) -> anyhow::Re
             progress: None,
             adopted: Vec::new(),
             idle_check: None,
-            took_over: None,
+            took_over: Vec::new(),
         },
         probe,
     )

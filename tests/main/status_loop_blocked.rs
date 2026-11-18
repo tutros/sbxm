@@ -283,7 +283,7 @@ fn an_issue_loops_pending_list_shows_the_reason() {
         progress: None,
         adopted: Vec::new(),
         idle_check: None,
-        took_over: None,
+        took_over: Vec::new(),
     };
     let path = lock_path(&base);
     fs::create_dir_all(path.parent().unwrap()).unwrap();

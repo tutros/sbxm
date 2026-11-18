@@ -1,4 +1,4 @@
-//! Issue 710: a loop that took over a dead loop's lock keeps that lock in its own (`took_over`)
+//! Issue 710: a loop that took over a dead loop's lock keeps that loop in its own (`took_over`)
 //! until it has marked the dead loop's cut-off tasks owed and named its adopted children. A loop
 //! that fails (or is killed) in between leaves the next loop able to resume the cut-off task and
 //! adopt the live child, as if it had taken the dead lock over itself.
@@ -272,7 +272,7 @@ fn bare_lock(process: Process) -> LockFile {
         progress: None,
         adopted: Vec::new(),
         idle_check: None,
-        took_over: None,
+        took_over: Vec::new(),
     }
 }
 
@@ -409,7 +409,7 @@ fn assert_recovered(f: &Fixture, run: &Run) {
             owner: Process::new(DEAD_LOOP, 0),
         }]
     );
-    assert_eq!(lock.took_over, None);
+    assert!(lock.took_over.is_empty(), "{:?}", lock.took_over);
 }
 
 // --- acceptance criterion 1: the loop that took over fails at `free_log` ---
@@ -432,7 +432,7 @@ fn task_loop_takeover_failure_at_free_log_leaves_the_dead_loops_tasks_to_the_nex
         let left: LockFile =
             serde_json::from_str(&fs::read_to_string(lock_path(&f.base())).unwrap()).unwrap();
         assert_eq!(left.process, Process::new(std::process::id(), 1));
-        assert_eq!(left.took_over.as_deref(), Some(&dead_lock()));
+        assert_eq!(left.took_over, dead_lock().taken_over());
         fs::remove_file(&taken).unwrap();
 
         let run = run_loop(&f, RESTART, 2, true);
@@ -451,7 +451,7 @@ fn task_loop_takeover_failure_killed_after_the_take_over_leaves_the_dead_loops_t
         let f = fixture(cloud_slots);
         // The lock as the killed loop's take-over wrote it.
         let mut killed = bare_lock(Process::new(SECOND_LOOP, 0));
-        killed.took_over = Some(Box::new(dead_lock()));
+        killed.took_over = dead_lock().taken_over();
         fs::write(
             lock_path(&f.base()),
             serde_json::to_string(&killed).unwrap(),
@@ -468,10 +468,10 @@ fn task_loop_takeover_failure_killed_after_the_take_over_leaves_the_dead_loops_t
 fn task_loop_takeover_failure_two_loops_killed_in_a_row_leave_the_first_ones_tasks_to_the_next() {
     let f = fixture(Some(2));
     let mut second = bare_lock(Process::new(SECOND_LOOP, 0));
-    second.took_over = Some(Box::new(dead_lock()));
+    second.took_over = dead_lock().taken_over();
     // A third loop, this process before a restart, killed after taking the second's lock over.
     let mut third = bare_lock(Process::new(std::process::id(), 1));
-    third.took_over = Some(Box::new(second));
+    third.took_over = second.taken_over();
     fs::write(lock_path(&f.base()), serde_json::to_string(&third).unwrap()).unwrap();
 
     let run = run_loop(&f, RESTART, 2, true);
@@ -485,7 +485,7 @@ fn task_loop_takeover_failure_two_loops_killed_in_a_row_leave_the_first_ones_tas
 fn task_loop_takeover_failure_status_reads_the_lock_and_lists_the_first_loops_live_child() {
     let f = fixture(Some(2));
     let mut killed = bare_lock(Process::new(SECOND_LOOP, 0));
-    killed.took_over = Some(Box::new(dead_lock()));
+    killed.took_over = dead_lock().taken_over();
     fs::write(
         lock_path(&f.base()),
         serde_json::to_string(&killed).unwrap(),
@@ -503,8 +503,59 @@ fn task_loop_takeover_failure_status_reads_the_lock_and_lists_the_first_loops_li
 
     assert_eq!(lock, looping::Lock::Stale(Process::new(SECOND_LOOP, 0)));
     let file = file.expect("the lock parses");
-    assert_eq!(file.took_over.as_deref(), Some(&dead_lock()));
+    assert_eq!(file.took_over, dead_lock().taken_over());
     let dead = looping::dead(&f.base(), &file, &probe);
     let left: HashSet<&str> = dead.left.iter().map(|l| l.id.as_str()).collect();
     assert_eq!(left, HashSet::from(["issue-4"]), "{:?}", dead.left);
+}
+
+// --- review M-1: many loops in a row fail before their marks ---
+
+/// `failures` loops in a row take the lock over and fail before their marks (a folder at the stop
+/// file's path fails each start); `sbxm status` reads the lock each leaves and names the first
+/// loop's live child, and once the cause is gone the next loop recovers the first loop's tasks.
+fn after_failures_in_a_row(failures: u64) {
+    let f = fixture(Some(2));
+    let stop = task_loop::stop_path(&f.base());
+    fs::create_dir(&stop).unwrap();
+    for attempt in 1..=failures {
+        let run = run_loop(&f, START, attempt, false);
+        let e = format!("{:#}", run.result.expect_err("the start fails"));
+        assert!(e.contains("cannot remove"), "attempt {attempt}: {e}");
+    }
+    let clock = AtomicU64::new(START);
+    let probe = Probe {
+        clock: &clock,
+        base: f.base(),
+        me: failures + 1,
+        ended: Mutex::default(),
+    };
+    let (_, file) = looping::read_lock_file(&f.base(), &probe);
+    let file = file.unwrap_or_else(|| panic!("the lock parses after {failures} failures"));
+    // One entry per loop taken over, the first loop first, none nested in another.
+    assert_eq!(file.took_over.len() as u64, failures);
+    assert_eq!(file.first(), &Process::new(DEAD_LOOP, 0));
+    let dead = looping::dead(&f.base(), &file, &probe);
+    let left: HashSet<&str> = dead.left.iter().map(|l| l.id.as_str()).collect();
+    assert_eq!(left, HashSet::from(["issue-4"]), "{:?}", dead.left);
+    fs::remove_dir(&stop).unwrap();
+
+    let run = run_loop(&f, RESTART, failures + 1, true);
+
+    assert_recovered(&f, &run);
+}
+
+#[test]
+fn task_loop_takeover_failure_126_failures_in_a_row_leave_the_first_loops_tasks_to_the_next() {
+    after_failures_in_a_row(126);
+}
+
+#[test]
+fn task_loop_takeover_failure_127_failures_in_a_row_leave_the_first_loops_tasks_to_the_next() {
+    after_failures_in_a_row(127);
+}
+
+#[test]
+fn task_loop_takeover_failure_128_failures_in_a_row_leave_the_first_loops_tasks_to_the_next() {
+    after_failures_in_a_row(128);
 }
