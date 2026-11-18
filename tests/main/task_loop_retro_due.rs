@@ -21,6 +21,7 @@ use sbxm::github::MergedPr;
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::notify::FakeNotifier;
 use sbxm::run::results::parse_timestamp;
+use sbxm::task::loop_log;
 use sbxm::task::queue::{LockFile, lock_path};
 use sbxm::task::retro;
 
@@ -204,6 +205,17 @@ fn run_loop(
 fn retro_line(base: &Path) -> Option<String> {
     let text = fs::read_to_string(lock_path(base)).ok()?;
     serde_json::from_str::<LockFile>(&text).ok()?.retro_due
+}
+
+/// The lines of the loop's own log (the loop started at [`start`]) that name the retro alert.
+fn log_notes(f: &Fixture) -> Vec<String> {
+    let log = loop_log::path(&f.base(), start());
+    fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("retro"))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn comments(gh: &FakeGitHub) -> Vec<(u32, String)> {
@@ -574,6 +586,37 @@ fn task_loop_retro_due_a_failing_read_logs_one_line_and_the_loop_goes_on() {
     assert!(ran.out.contains("stopped on request"), "{}", ran.out);
     assert!(notifier.shown().is_empty());
     assert!(comments(&gh).is_empty());
+    // One line in the loop's own log too; it is no task row, so the log isn't posted.
+    let logged = log_notes(&f);
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert!(logged[0].contains("HTTP 502"), "{}", logged[0]);
+    assert!(
+        !gh.calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::IssueComment(..))),
+        "a loop that ran no task posts no log"
+    );
+}
+
+#[test]
+fn task_loop_retro_due_a_failing_read_each_hour_logs_a_line_each_hour() {
+    let f = fixture();
+    let gh = github(merged(12, after_end()));
+    gh.set_retro_reads_failing(Some("HTTP 502: Bad Gateway"));
+
+    run_loop(
+        &f,
+        &gh,
+        &FakeNotifier::default(),
+        start(),
+        TWO_CHECKS,
+        &|_| {},
+    )
+    .result
+    .unwrap();
+
+    assert_eq!(checks(&gh), 2);
+    assert_eq!(log_notes(&f).len(), 2, "{:?}", log_notes(&f));
 }
 
 #[test]
@@ -610,4 +653,71 @@ fn task_loop_retro_due_a_failed_comment_is_one_line_and_the_toast_still_shows() 
     let lines: Vec<&str> = ran.warn.lines().filter(|l| l.contains("retro")).collect();
     assert_eq!(lines.len(), 1, "{}", ran.warn);
     assert_eq!(notifier.shown().len(), 1);
+    let logged = log_notes(&f);
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert!(logged[0].contains("loop-log"), "{}", logged[0]);
+}
+
+// --- The note in the loop's log ---
+
+fn row(issue: u32) -> sbxm::task::queue::Row {
+    sbxm::task::queue::Row {
+        issue,
+        title: "t".into(),
+        size: None,
+        slot: None,
+        started: start(),
+        ready: None,
+        worker_s: None,
+        reviewer_s: None,
+        rounds: None,
+        must_fix: Vec::new(),
+        outcome: "done".into(),
+        stops: Vec::new(),
+        idle_before: None,
+    }
+}
+
+#[test]
+fn task_loop_retro_due_a_note_is_no_task_row_and_keeps_the_table_whole() {
+    let f = fixture();
+    let log = loop_log::path(&f.base(), start());
+    sbxm::task::queue::append_note(&log, REPO, "the retro check could not read GitHub").unwrap();
+    assert!(sbxm::task::queue::append_row(&log, REPO, &row(3)).unwrap());
+
+    let text = fs::read_to_string(&log).unwrap();
+    let table: Vec<&str> = text.lines().filter(|l| l.starts_with('|')).collect();
+    let columns = |l: &str| l.matches('|').count();
+    assert!(
+        table.iter().all(|l| columns(l) == columns(table[0])),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n| - | the retro check could not read GitHub |"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n| 1 | #3 t |"),
+        "the task's row is row 1: {text}"
+    );
+}
+
+#[test]
+fn task_loop_retro_due_an_earlier_log_with_only_a_note_is_marked_not_posted() {
+    let f = fixture();
+    let earlier = loop_log::path(&f.base(), start() - DAY);
+    sbxm::task::queue::append_note(&earlier, REPO, "the retro check could not read GitHub")
+        .unwrap();
+    let gh = github(Vec::new());
+    let own = loop_log::path(&f.base(), start());
+
+    let late = loop_log::post_late(&gh, REPO, &f.base(), &own, start());
+
+    assert!(late.failed.is_empty(), "{:?}", late.failed);
+    assert!(
+        !gh.calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::IssueComment(..)))
+    );
+    assert!(loop_log::marker(&earlier).exists());
 }

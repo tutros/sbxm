@@ -3,7 +3,8 @@
 //! first time it sees one due it comments once on the open `loop-log` issue; while it stays due it
 //! shows one toast a day (the key names the day, so [`Shown`](crate::notify::Shown) keeps it to
 //! one across restarts) and records the line `sbxm status` shows in its lock. A failed read is one
-//! warning line and the check waits for the next hour; the loop goes on.
+//! warning line, and one line in the loop's own log, and the check waits for the next hour; the loop
+//! goes on.
 
 use std::io::Write;
 
@@ -12,6 +13,7 @@ use anyhow::Result;
 use super::{Loop, LoopLock, first_line};
 use crate::notify::Notification;
 use crate::task::loop_log;
+use crate::task::queue;
 use crate::task::retro;
 
 impl Loop<'_> {
@@ -32,12 +34,12 @@ impl Loop<'_> {
         let due = match retro::check(self.github, &self.repo) {
             Ok(due) => due,
             Err(e) => {
-                writeln!(
-                    warn,
-                    "warning: the retro check could not read GitHub ({}); it is tried again in \
-                     an hour, the loop goes on",
+                let line = format!(
+                    "the retro check could not read GitHub ({}); it is tried again in an hour, \
+                     the loop goes on",
                     first_line(&format!("{e:#}"))
-                )?;
+                );
+                self.retro_note(&line, warn)?;
                 return Ok(());
             }
         };
@@ -65,12 +67,14 @@ impl Loop<'_> {
                 Ok(_) => {
                     self.retro_commented.insert(due.about().to_owned());
                 }
-                Err(e) => writeln!(
-                    warn,
-                    "warning: the retro alert could not be commented on the loop-log issue ({}); \
-                     it is tried again in an hour, the loop goes on",
-                    first_line(&format!("{e:#}"))
-                )?,
+                Err(e) => {
+                    let line = format!(
+                        "the retro alert could not be commented on the loop-log issue ({}); it \
+                         is tried again in an hour, the loop goes on",
+                        first_line(&format!("{e:#}"))
+                    );
+                    self.retro_note(&line, warn)?;
+                }
             }
         }
         let note = Notification {
@@ -83,5 +87,19 @@ impl Loop<'_> {
             click: self.log_click(),
         };
         self.notify(note, out, warn)
+    }
+
+    /// A failure of the retro alert, as the issue has it (issue 714, review M-1): one warning, and
+    /// one line in the loop's own log ([`queue::append_note`]). A log that can't be written is a
+    /// warning once; the loop goes on.
+    fn retro_note(&mut self, line: &str, warn: &mut dyn Write) -> Result<()> {
+        writeln!(warn, "warning: {line}")?;
+        if let Err(e) = queue::append_note(&self.log, &self.repo, line) {
+            self.warn_once(
+                warn,
+                format!("{e:#}; the loop goes on without that line in its log"),
+            )?;
+        }
+        Ok(())
     }
 }

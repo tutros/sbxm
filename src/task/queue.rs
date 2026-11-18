@@ -525,6 +525,49 @@ pub fn append_job_row(path: &Path, repo: &str, job: &str, row: &Row) -> Result<(
     add_any(path, repo, Some(&cell(job)), row, false).map(|_| ())
 }
 
+/// Appends a note of the loop's own (issue 714: a retro check that failed) as a row of the
+/// table whose `#` cell is `-` and whose Issue cell is `note`, the other cells empty: the table
+/// stays whole, and it is no task row, so it is never numbered, counted, or a reason to post the
+/// log.
+pub fn append_note(path: &Path, repo: &str, note: &str) -> Result<()> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let mut add = start_of_log(&text, repo);
+    add.push_str(&format!("| - | {} |{}\n", cell(note), " |".repeat(9)));
+    write_log(path, &add)
+}
+
+/// What goes before a new row of a log whose text so far is `text`: the title, repository and
+/// header for a new log, a line end for one that lacks it.
+fn start_of_log(text: &str, repo: &str) -> String {
+    let mut add = String::new();
+    if text.is_empty() {
+        add.push_str(TITLE);
+        add.push_str(&format!("{REPOSITORY}{}\n\n", cell(repo)));
+        add.push_str(HEADER);
+    } else if !text.ends_with('\n') {
+        add.push('\n');
+    }
+    add
+}
+
+/// Appends `add` to the log at `path`, making its folder first.
+fn write_log(path: &Path, add: &str) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(add.as_bytes()))
+        .with_context(|| format!("cannot write {}", path.display()))
+}
+
 fn add_row(path: &Path, repo: &str, row: &Row, once: bool) -> Result<bool> {
     add_any(path, repo, None, row, once)
 }
@@ -539,28 +582,12 @@ fn add_any(path: &Path, repo: &str, item: Option<&str>, row: &Row, once: bool) -
     if once && logged {
         return Ok(false);
     }
-    let mut add = String::new();
-    if text.is_empty() {
-        add.push_str(TITLE);
-        add.push_str(&format!("{REPOSITORY}{}\n\n", cell(repo)));
-        add.push_str(HEADER);
-    } else if !text.ends_with('\n') {
-        add.push('\n');
-    }
+    let mut add = start_of_log(&text, repo);
     add.push_str(&match item {
         Some(item) => render_as(count + 1, item, row),
         None => render(count + 1, row),
     });
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create {}", parent.display()))?;
-    }
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut file| file.write_all(add.as_bytes()))
-        .with_context(|| format!("cannot write {}", path.display()))?;
+    write_log(path, &add)?;
     Ok(true)
 }
 
