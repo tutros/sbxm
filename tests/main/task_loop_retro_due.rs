@@ -232,10 +232,12 @@ fn keys(notifier: &FakeNotifier) -> Vec<String> {
     notifier.shown().iter().map(|n| n.key.clone()).collect()
 }
 
+/// The retro checks: its reads of the retro folder (the improvement review's check reads another,
+/// issue 715).
 fn checks(gh: &FakeGitHub) -> usize {
     gh.calls()
         .iter()
-        .filter(|c| matches!(c, GhCall::DirFiles(..)))
+        .filter(|c| matches!(c, GhCall::DirFiles(_, _, dir) if dir == retro::DIR))
         .count()
 }
 

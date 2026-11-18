@@ -143,6 +143,17 @@ fn read_override(path: &Path) -> Result<Template> {
 /// Replaces every `{{name}}` in `template` with its value. A value is inserted as is and not
 /// expanded again, so text from an issue can't inject a placeholder. `name` labels errors.
 pub fn render(name: &str, template: &str, values: &[(&str, &str)]) -> Result<String> {
+    render_known(name, template, &KNOWN, values)
+}
+
+/// [`render`] over the placeholder names `known` instead of a task prompt's (the improvement
+/// review's spec, issue 715).
+pub fn render_known(
+    name: &str,
+    template: &str,
+    known: &[&str],
+    values: &[(&str, &str)],
+) -> Result<String> {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
@@ -152,11 +163,11 @@ pub fn render(name: &str, template: &str, values: &[(&str, &str)]) -> Result<Str
             bail!("prompt template {name} has an unclosed `{{{{`; close it with `}}}}`");
         };
         let placeholder = after[..end].trim();
-        if !KNOWN.contains(&placeholder) {
+        if !known.contains(&placeholder) {
             bail!(
                 "prompt template {name} uses the unknown placeholder {{{{{placeholder}}}}}; \
                  known names: {}",
-                KNOWN.join(", ")
+                known.join(", ")
             );
         }
         let Some((_, value)) = values.iter().find(|(key, _)| *key == placeholder) else {

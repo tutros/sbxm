@@ -62,6 +62,7 @@ use crate::task::{
 
 mod check;
 pub mod child;
+mod improvement;
 mod job_children;
 mod jobs;
 mod parallel;
@@ -907,6 +908,12 @@ struct Loop<'a> {
     retro_checked: Option<u64>,
     /// What the retro alerts this run commented on are about ([`retro::Due::about`]).
     retro_commented: HashSet<String>,
+    /// When the improvement review's check last ran (issue 715): again an hour later at the
+    /// earliest, a failed check too.
+    improvement_checked: Option<u64>,
+    /// The lines of the improvement review's check this run logged that are said once a run (an
+    /// `areas.md` that can't be used, say), not once an hour.
+    improvement_noted: HashSet<String>,
 }
 
 impl Loop<'_> {
@@ -4300,6 +4307,8 @@ fn run_loop(
         running_issues: Vec::new(),
         retro_checked: None,
         retro_commented: HashSet::new(),
+        improvement_checked: None,
+        improvement_noted: HashSet::new(),
     };
 
     // The dead loop's children that ended with an outcome it never acted on (issue 657), read
@@ -4916,7 +4925,7 @@ fn note(
 /// spell (`said`; the next task, or the next stop, ends it), records in the lock when the wait
 /// began for `sbxm status` (issue 671), sleeps a [`PAUSE_POLL`], and clears the record on waking,
 /// before the loop looks for work again. Each wait first checks whether a retro is due (issue
-/// 714), at most once an hour.
+/// 714) and whether an improvement review is (issue 715), each at most once an hour.
 fn wait_idle(
     lock: &mut LoopLock,
     lp: &mut Loop,
@@ -4933,6 +4942,7 @@ fn wait_idle(
         *said = true;
     }
     lp.check_retro(lock, out, warn)?;
+    lp.check_improvement(out, warn)?;
     idle_note(lock, lp, warn, Some(lp.now()))?;
     (lp.env.sleep)(PAUSE_POLL);
     idle_note(lock, lp, warn, None)
