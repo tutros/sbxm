@@ -13,7 +13,7 @@ const REPO: &str = "o/r";
 const PR: u32 = 120;
 const ISSUE: u32 = 20;
 
-/// Issue 20, open, with the comma-separated `labels` (issue 709: read from the open issues).
+/// Issue 20, open, with the comma-separated `labels`, which the fake's label read answers.
 fn labeled(labels: &str) -> Vec<Issue> {
     let labels: Vec<&str> = labels.split(", ").filter(|l| !l.is_empty()).collect();
     vec![open_issue(ISSUE, &labels, "")]
@@ -96,17 +96,6 @@ fn no_labels_at_all_is_refused() {
 }
 
 #[test]
-fn an_issue_not_among_the_open_issues_is_refused() {
-    let gh = FakeGitHub::default()
-        .with_open_issues(vec![open_issue(ISSUE + 1, &["size:S"], "")])
-        .with_pr_files(PR, plain());
-    assert_eq!(
-        reasons(&gh, Source::Issue(ISSUE)),
-        ["its issue #20 is not among the open issues, so its labels could not be read"]
-    );
-}
-
-#[test]
 fn two_size_labels_are_refused() {
     assert_eq!(
         sized("size:S, size:M"),
@@ -124,7 +113,7 @@ fn a_spec_jobs_pr_counts_as_size_s() {
 fn an_issue_whose_labels_cant_be_read_is_refused() {
     let gh = FakeGitHub::default()
         .with_open_issues(labeled("size:S"))
-        .failing_issues_open_once("gh failed")
+        .failing_issue_label_reads("gh failed")
         .with_pr_files(PR, plain());
     let got = reasons(&gh, Source::Issue(ISSUE));
     assert_eq!(got.len(), 1, "{got:?}");

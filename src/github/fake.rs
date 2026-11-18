@@ -56,6 +56,7 @@ pub enum GhCall {
     PrMergeCommit(String, u32),
     PrFiles(String, u32),
     PrLabels(String, u32),
+    IssueLabelNames(String, u32),
     /// Repo, number, label.
     PrRemoveLabel(String, u32, String),
     /// Repo, commit.
@@ -125,6 +126,9 @@ pub struct FakeGitHub {
     remove_label_failure: Option<String>,
     /// Only `issue_labels` fails (and is still recorded; issue 623).
     issue_labels_failure: Option<String>,
+    /// What `issue_label_names` answers, by issue, before the open issues' labels (issue 709).
+    issue_label_names: Vec<(u32, Vec<String>)>,
+    issue_label_reads_failure: Option<String>,
     /// What `commit_statuses` answers, by commit; none for a commit not scripted.
     posted_statuses: Vec<(String, Vec<PostedStatus>)>,
     statuses_failure: Option<String>,
@@ -217,6 +221,20 @@ impl FakeGitHub {
     /// Only `issue_labels` fails (and is still recorded; issue 623).
     pub fn failing_issue_labels(mut self, message: &str) -> Self {
         self.issue_labels_failure = Some(message.to_owned());
+        self
+    }
+
+    /// The labels `issue_label_names` reads on issue `number`, open or closed, listed or not
+    /// (issue 709); an issue not scripted here answers with its open issue's labels.
+    pub fn with_issue_label_names(mut self, number: u32, labels: &[&str]) -> Self {
+        let labels = labels.iter().map(|l| (*l).to_owned()).collect();
+        self.issue_label_names.push((number, labels));
+        self
+    }
+
+    /// Only `issue_label_names` fails (and is still recorded).
+    pub fn failing_issue_label_reads(mut self, message: &str) -> Self {
+        self.issue_label_reads_failure = Some(message.to_owned());
         self
     }
 
@@ -968,6 +986,24 @@ impl GitHubBackend for FakeGitHub {
             return Err(anyhow!("{message}"));
         }
         Ok(self.pr_labels_now(number))
+    }
+
+    /// The scripted labels of issue `number`, else its open issue's; an error for neither.
+    fn issue_label_names(&self, repo: &str, number: u32) -> Result<Vec<String>> {
+        self.record(GhCall::IssueLabelNames(repo.to_owned(), number))?;
+        if let Some(message) = &self.issue_label_reads_failure {
+            return Err(anyhow!("{message}"));
+        }
+        if let Some((_, labels)) = self.issue_label_names.iter().find(|(n, _)| *n == number) {
+            return Ok(labels.clone());
+        }
+        self.open_issues
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|i| i.number == number)
+            .map(|i| i.labels.clone())
+            .ok_or_else(|| anyhow!("no labels scripted for issue #{number}"))
     }
 
     fn pr_remove_label(&self, repo: &str, number: u32, label: &str) -> Result<()> {

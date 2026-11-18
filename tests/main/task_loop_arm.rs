@@ -580,7 +580,7 @@ fn a_medium_or_high_risk_pr_waits_for_the_user_and_counts_toward_the_cap() {
 // reasons; it is still never armed (until #550). Low risk keeps its rules.
 
 /// `github(&[3])` with issue 3 labeled ready and `size` and PR 103's files scripted; the size is
-/// read from the open issues alone (issue 709).
+/// read from issue 3's labels, which the fake answers from the open issue (issue 709).
 fn github_medium(size: &str, files: &[&str]) -> FakeGitHub {
     let files: Vec<PrFile> = files
         .iter()

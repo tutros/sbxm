@@ -1,6 +1,6 @@
 //! The reasons `task loop` doesn't arm auto-merge on a medium-risk PR besides its risk (issue
 //! 549, #460 guardrail 6): its issue isn't `size:S` or `size:M`, read by [`queue::size`] from the
-//! open issue's labels at arming time (issue 709; a queued spec job's PR has no issue and counts
+//! issue's own labels at arming time (issue 709; a queued spec job's PR has no issue and counts
 //! as S), or its diff changes a `Cargo.lock`, read from the PR's file list. Anything that can't be
 //! read is a reason too. Low risk never comes here (decisions 266, 280).
 
@@ -57,8 +57,8 @@ fn size_refusal(github: &dyn GitHubBackend, repo: &str, source: Source) -> Optio
         Source::Unknown => return Some("the issue it came from is unknown".to_owned()),
         Source::Issue(issue) => issue,
     };
-    let open = match github.issues_open(repo) {
-        Ok(open) => open,
+    let labels = match github.issue_label_names(repo, issue) {
+        Ok(labels) => labels,
         Err(e) => {
             return Some(format!(
                 "its issue #{issue}'s labels could not be read: {}",
@@ -66,12 +66,7 @@ fn size_refusal(github: &dyn GitHubBackend, repo: &str, source: Source) -> Optio
             ));
         }
     };
-    let Some(found) = open.iter().find(|i| i.number == issue) else {
-        return Some(format!(
-            "its issue #{issue} is not among the open issues, so its labels could not be read"
-        ));
-    };
-    match queue::size(&found.labels) {
+    match queue::size(&labels) {
         Ok("S" | "M") => None,
         Ok(size) => Some(format!("its issue #{issue} is size {size}")),
         Err(SizeError::Missing) => Some(format!("its issue #{issue} has no size label")),

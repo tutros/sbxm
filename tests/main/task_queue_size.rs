@@ -16,6 +16,7 @@ use common::task_fixture::{Probe, issue_text, open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::Issue;
 use sbxm::github::fake::FakeGitHub;
+use sbxm::task::medium;
 use sbxm::task::queue::{self, SizeError};
 
 const REPO: &str = "o/r";
@@ -234,5 +235,70 @@ fn task_queue_size_an_almost_ready_issue_with_two_sizes_names_them_as_a_blocker(
     assert!(
         text.contains("  #9 Fix 9 (size:?)\n    - more than one size label (S, L)\n"),
         "{text}"
+    );
+}
+
+// --- a medium-risk PR's size, read from its own issue (review M-1) ---
+
+/// PR 120 of issue 20 changing one source file, with 200 newer open issues and issue 20 itself
+/// not among them: older than the listing holds, or closed while its PR is open. Its labels are
+/// read from the issue itself, `labels`.
+fn issue_outside_the_listing(labels: &[&str]) -> FakeGitHub {
+    let newer = (21..=220).map(|n| open_issue(n, &["size:S"], "")).collect();
+    FakeGitHub::default()
+        .with_open_issues(newer)
+        .with_issue_label_names(20, labels)
+        .with_pr_files(
+            120,
+            sbxm::github::PrFiles {
+                changed_files: 1,
+                files: vec![sbxm::github::PrFile {
+                    filename: "src/a.rs".to_owned(),
+                    previous_filename: None,
+                }],
+            },
+        )
+}
+
+fn medium_reasons(gh: &FakeGitHub) -> Vec<String> {
+    medium::refusals(gh, REPO, medium::Source::Issue(20), 120)
+}
+
+#[test]
+fn task_queue_size_a_medium_pr_of_a_size_s_or_m_issue_outside_the_open_listing_passes() {
+    assert_eq!(
+        medium_reasons(&issue_outside_the_listing(&["size:S"])),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        medium_reasons(&issue_outside_the_listing(&[READY, "size:M"])),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn task_queue_size_a_medium_pr_of_an_issue_outside_the_open_listing_keeps_the_size_rule() {
+    assert_eq!(
+        medium_reasons(&issue_outside_the_listing(&[])),
+        ["its issue #20 has no size label"]
+    );
+    assert_eq!(
+        medium_reasons(&issue_outside_the_listing(&["size:L"])),
+        ["its issue #20 is size L"]
+    );
+    assert_eq!(
+        medium_reasons(&issue_outside_the_listing(&["size:S", "size:M"])),
+        ["its issue #20 has more than one size label (S, M)"]
+    );
+}
+
+#[test]
+fn task_queue_size_a_medium_pr_whose_issue_labels_cant_be_read_is_refused() {
+    let gh = issue_outside_the_listing(&["size:S"]).failing_issue_label_reads("gh failed");
+    let got = medium_reasons(&gh);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(
+        got[0].starts_with("its issue #20's labels could not be read: gh failed"),
+        "{got:?}"
     );
 }
