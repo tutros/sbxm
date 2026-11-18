@@ -84,6 +84,12 @@ pub fn check(
             }
             Some(why) => writeln!(out, "{named}: skip: {why}")?,
         }
+        // The readiness rules' warns (issue 725, review M-2), which never decide the verdict.
+        if let Some(issue) = open.iter().find(|i| i.number == number) {
+            for warn in ready::warnings(&repo, github, issue) {
+                writeln!(out, "  warn {}: {}", warn.rule, warn.reason)?;
+            }
+        }
     }
 
     if taken.is_empty() {

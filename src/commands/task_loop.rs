@@ -1608,6 +1608,13 @@ impl Loop<'_> {
                 });
                 continue;
             }
+            // The readiness rules' warns, said before the start and never holding it back
+            // (issue 725, review M-2): the paths and the PRs merged since the label among them.
+            if let Some(issue) = found {
+                for warn in ready::warnings(&self.repo, self.github, issue) {
+                    writeln!(out, "#{number}{title}: warn {}: {}", warn.rule, warn.reason)?;
+                }
+            }
             self.locations.insert(number, location);
             return Ok((Some(number), waiting));
         }

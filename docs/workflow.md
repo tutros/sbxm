@@ -122,7 +122,7 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   (mark one the change adds with `(new)`), on a `**Files:**` line that isn't a comma-separated list of backticked
   paths, and on the PRs merged since the label was added that changed a path the body names (decision 295: re-check
   the issue against them). `task loop` and `task loop --check` pass over an issue that fails a rule with the rule's
-  reason; `--json` gives the verdicts as one object.
+  reason, and say its warns without holding it back; `--json` gives the verdicts as one object.
 - **Stages:** `prepared`, `working`, `gating`, `reviewing`, `fixing`, `ready`, `finished`. A failed gate shows as
   `gates-failed`; a killed run shows as `interrupted` in `task status`, and `task resume --issue N` continues a
   failed or interrupted task from its stage, keeping its clone and commits.

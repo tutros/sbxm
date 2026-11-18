@@ -77,6 +77,15 @@ pub fn check(repo: &str, github: &dyn GitHubBackend, issue: &Issue) -> Vec<Verdi
     verdicts
 }
 
+/// The warns of [`check`], in the rules' order: what `task loop --check` and the loop say of an
+/// issue they take or pass over, holding nothing back (review M-2).
+pub fn warnings(repo: &str, github: &dyn GitHubBackend, issue: &Issue) -> Vec<Verdict> {
+    check(repo, github, issue)
+        .into_iter()
+        .filter(|v| v.status == Status::Warn)
+        .collect()
+}
+
 /// The reason of every rule `issue` fails, in the rules' order: what the loop and `task loop
 /// --check` skip it for. Warns never count.
 pub fn failures(issue: &Issue) -> Vec<String> {
