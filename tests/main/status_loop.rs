@@ -859,6 +859,7 @@ fn render_is_pure_over_its_view() {
         cloud_first: false,
         dead: None,
         next_check: None,
+        retro_due: None,
         lock: Lock::Running(loop_process()),
         work: Some(Work::default()),
         snapshot: Some(Snapshot {

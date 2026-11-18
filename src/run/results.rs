@@ -44,6 +44,14 @@ pub fn format_timestamp(secs: u64) -> String {
     format!("{}T{h:02}:{m:02}:{s:02}Z", date_from_days(secs / 86_400))
 }
 
+/// The first second (UTC) of `day`, a `YYYY-MM-DD` calendar date; `None` for any other text,
+/// a day that doesn't exist (`2026-02-30`, `2026-04-31`) included, which [`parse_timestamp`] alone
+/// would carry into the next month: the day must read back the same (issue 714, review M-2).
+pub fn parse_day(day: &str) -> Option<u64> {
+    let secs = parse_timestamp(&format!("{day}T00:00:00Z"))?;
+    (format_timestamp(secs) == format!("{day}T00:00:00Z")).then_some(secs)
+}
+
 /// Inverse of [`format_timestamp`]; `None` if `s` isn't exactly that shape (used to read a
 /// stamp `sbxm` itself wrote, e.g. a task's `Stamp::at`, never free-form input).
 pub fn parse_timestamp(s: &str) -> Option<u64> {

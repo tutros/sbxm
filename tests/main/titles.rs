@@ -576,6 +576,7 @@ fn the_loop_section_titles_its_task_and_the_prs_awaiting_but_not_one_whose_recor
         cloud_first: false,
         dead: None,
         next_check: None,
+        retro_due: None,
         lock: Lock::Running(Process::new(1, T0)),
         work: Some(work),
         snapshot: Some(Snapshot {
