@@ -46,6 +46,7 @@ mod github_gh;
 mod github_issue_comment;
 mod github_issues_labeled;
 mod github_pr_files;
+mod github_repo_paths;
 mod github_retro;
 mod github_retry;
 mod github_trial;

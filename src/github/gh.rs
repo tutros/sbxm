@@ -433,6 +433,19 @@ struct RawContent {
     kind: String,
 }
 
+/// A branch's tree as `gh api repos/<repo>/git/trees/<branch>?recursive=1` gives it (issue 725).
+#[derive(Deserialize)]
+struct RawTree {
+    tree: Vec<RawTreeEntry>,
+    #[serde(default)]
+    truncated: bool,
+}
+
+#[derive(Deserialize)]
+struct RawTreeEntry {
+    path: String,
+}
+
 /// How many merged PRs [`GitHubBackend::prs_merged_since`] lists at most: the retro alert only
 /// needs to know there are 10 (issue 714).
 const MERGED_LIMIT: u32 = 500;
@@ -1279,5 +1292,19 @@ impl GitHubBackend for GhBackend {
             "-H",
             "Accept: application/vnd.github.raw+json",
         ]))
+    }
+
+    fn repo_paths(&self, repo: &str, branch: &str) -> Result<Vec<String>> {
+        let path = format!(
+            "repos/{repo}/git/trees/{}?recursive=1",
+            path_segment(branch)
+        );
+        let raw: RawTree = self.json(&strings(&["api", &path]))?;
+        if raw.truncated {
+            bail!(
+                "`gh api {path}` gave a listing cut short (the tree is too large to list at once)"
+            );
+        }
+        Ok(raw.tree.into_iter().map(|e| e.path).collect())
     }
 }

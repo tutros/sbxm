@@ -344,4 +344,8 @@ pub trait GitHubBackend: Send + Sync {
     /// The text of the file at `path` of `repo` at branch `branch` (`gh api
     /// repos/<repo>/contents/<path>?ref=<branch>`, raw) (issue 714).
     fn file_text(&self, repo: &str, branch: &str, path: &str) -> Result<String>;
+    /// Every path of `repo` at branch `branch`, files and folders, in one listing (`gh api
+    /// repos/<repo>/git/trees/<branch>?recursive=1`); an error rather than a partial list when
+    /// GitHub cuts the listing short (issue 725).
+    fn repo_paths(&self, repo: &str, branch: &str) -> Result<Vec<String>>;
 }

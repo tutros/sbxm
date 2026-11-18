@@ -70,6 +70,8 @@ pub enum GhCall {
     DirFiles(String, String, String),
     /// Repo, branch, path.
     FileText(String, String, String),
+    /// Repo, branch.
+    RepoPaths(String, String),
 }
 
 #[derive(Default)]
@@ -1171,5 +1173,27 @@ impl GitHubBackend for FakeGitHub {
             .find(|(p, _)| p == path)
             .map(|(_, text)| text.clone())
             .ok_or_else(|| anyhow!("FakeGitHub: {path} is not scripted"))
+    }
+
+    /// The scripted files of the default branch and the folders they are in (issue 725).
+    fn repo_paths(&self, repo: &str, branch: &str) -> Result<Vec<String>> {
+        self.retro_read(GhCall::RepoPaths(repo.to_owned(), branch.to_owned()))?;
+        let files = self.repo_files.lock().unwrap();
+        let files = files
+            .as_ref()
+            .ok_or_else(|| anyhow!("FakeGitHub: the repository's files are not scripted"))?;
+        let mut paths: Vec<String> = Vec::new();
+        for (path, _) in files {
+            let mut at = 0;
+            while let Some(slash) = path[at..].find('/') {
+                let folder = &path[..at + slash];
+                if !paths.iter().any(|p| p == folder) {
+                    paths.push(folder.to_owned());
+                }
+                at += slash + 1;
+            }
+            paths.push(path.clone());
+        }
+        Ok(paths)
     }
 }

@@ -1,10 +1,11 @@
-//! Issue 725, decision 331(1): the readiness rules (`src/task/ready.rs`) one by one with their
+//! Issue 725: the readiness rules (`src/task/ready.rs`) one by one with their
 //! boundary cases, then `sbxm task ready-check --issue N [--json]`.
 
 use crate::common;
 
 use common::task_fixture::open_issue;
 use sbxm::github::Issue;
+use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::task::ready::{self, Status, Verdict};
 
 /// A body every rule passes, for a test that changes one part of it.
@@ -292,4 +293,107 @@ fn a_fenced_example_is_not_read() {
     let issue = ready_issue(&body);
     assert_eq!(status(&issue, "open-points"), Status::Pass);
     assert_eq!(status(&issue, "real-check"), Status::Skip);
+}
+
+// Rule 6: paths on the default branch, one listing read.
+
+fn with_paths(body: &str) -> Vec<Verdict> {
+    let gh = FakeGitHub::default().with_repo_files(&[
+        ("src/cli.rs", ""),
+        ("src/task/queue.rs", ""),
+        ("README.md", ""),
+    ]);
+    ready::check("o/r", &gh, &ready_issue(&format!("{READY_BODY}\n{body}\n")))
+}
+
+fn paths_verdict(body: &str) -> Verdict {
+    with_paths(body)
+        .into_iter()
+        .find(|v| v.rule == "paths")
+        .unwrap()
+}
+
+#[test]
+fn check_runs_every_rule_in_order() {
+    let rules: Vec<&str> = with_paths("").iter().map(|v| v.rule).collect();
+    assert_eq!(
+        rules,
+        [
+            "size",
+            "depends-on",
+            "real-check",
+            "open-points",
+            "acceptance",
+            "paths",
+            "files"
+        ]
+    );
+}
+
+#[test]
+fn paths_one_that_exists_passes() {
+    let v = paths_verdict("Change `src/cli.rs` and `README.md`.");
+    assert_eq!(v.status, Status::Pass, "{}", v.reason);
+}
+
+#[test]
+fn paths_a_new_one_is_not_looked_for() {
+    let v = paths_verdict("Add `src/task/ready.rs` (new) next to `src/task/queue.rs`.");
+    assert_eq!(v.status, Status::Pass, "{}", v.reason);
+    let v = paths_verdict("Add `src/task/ready.rs` (new).");
+    assert_eq!(v.status, Status::Skip, "{}", v.reason);
+}
+
+#[test]
+fn paths_a_missing_one_warns() {
+    let v = paths_verdict("Change `src/gone.rs` and `src/cli.rs`.");
+    assert_eq!(v.status, Status::Warn);
+    assert!(v.reason.contains("src/gone.rs"), "{}", v.reason);
+    assert!(!v.reason.contains("src/cli.rs"), "{}", v.reason);
+}
+
+#[test]
+fn paths_a_folder_ending_in_a_slash_exists_through_its_files() {
+    let v = paths_verdict("In `src/task/` and `src/`.");
+    assert_eq!(v.status, Status::Pass, "{}", v.reason);
+    let v = paths_verdict("In `src/nothing/`.");
+    assert_eq!(v.status, Status::Warn, "{}", v.reason);
+}
+
+#[test]
+fn paths_words_in_backticks_that_are_no_paths_are_left_alone() {
+    let v = paths_verdict(
+        "Run `cargo test`, pass `--json`, see `size:*`, `- [ ]` and `https://x.y/z`.",
+    );
+    assert_eq!(v.status, Status::Skip, "{}", v.reason);
+}
+
+#[test]
+fn paths_one_listing_is_read_from_the_default_branch() {
+    let gh = FakeGitHub::default()
+        .with_default_branch("trunk")
+        .with_repo_files(&[("src/cli.rs", "")]);
+    ready::check(
+        "o/r",
+        &gh,
+        &ready_issue(&format!("{READY_BODY}\n`src/cli.rs`, `src/main.rs`\n")),
+    );
+    let listings: Vec<GhCall> = gh
+        .calls()
+        .into_iter()
+        .filter(|c| matches!(c, GhCall::RepoPaths(..)))
+        .collect();
+    assert_eq!(listings, [GhCall::RepoPaths("o/r".into(), "trunk".into())]);
+}
+
+#[test]
+fn paths_a_listing_that_fails_warns() {
+    let gh = FakeGitHub::default();
+    let issue = ready_issue(&format!("{READY_BODY}\n`src/cli.rs`\n"));
+    let v = ready::check("o/r", &gh, &issue)
+        .into_iter()
+        .find(|v| v.rule == "paths")
+        .unwrap();
+    assert_eq!(v.status, Status::Warn);
+    assert!(v.reason.contains("not scripted"), "{}", v.reason);
 }

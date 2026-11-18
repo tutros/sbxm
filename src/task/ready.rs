@@ -1,4 +1,4 @@
-//! The readiness rules (issue 725, decision 331(1)): what an issue needs before a worker can take
+//! The readiness rules (issue 725): what an issue needs before a worker can take
 //! it, checked by `sbxm task ready-check`, `task loop --check` and the loop before a start. The
 //! rules read the issue's labels and its body outside code fences; a rule can pass, fail, warn or
 //! be skipped, and only a fail makes the issue unready. The rules that read GitHub beyond the
@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::finish::next_fence;
 use super::queue;
-use crate::github::Issue;
+use crate::github::{GitHubBackend, Issue};
 
 /// What a rule found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -62,6 +62,15 @@ pub fn body_rules(issue: &Issue) -> Vec<Verdict> {
         acceptance(&lines),
         files(&lines),
     ]
+}
+
+/// Every rule, in their order: [`body_rules`] with the paths rule before `**Files:**`. Reads
+/// GitHub for the paths; a read that fails is a warn, never a fail.
+pub fn check(repo: &str, github: &dyn GitHubBackend, issue: &Issue) -> Vec<Verdict> {
+    let mut verdicts = body_rules(issue);
+    let at = verdicts.len() - 1;
+    verdicts.insert(at, paths(repo, github, &issue.body));
+    verdicts
 }
 
 /// The reason of every rule `issue` fails, in the rules' order: what the loop and `task loop
@@ -280,7 +289,7 @@ fn acceptance(lines: &[&str]) -> Verdict {
 }
 
 /// Rule 7: a `**Files:**` line, if there is one, is a comma-separated list of backticked paths,
-/// each maybe marked `(new)`. Advice only (decision 331(2)), so a malformed line is a warn.
+/// each maybe marked `(new)`. Advice only, so a malformed line is a warn.
 fn files(lines: &[&str]) -> Verdict {
     const RULE: &str = "files";
     let Some(value) = field(lines, "**Files:**") else {
@@ -303,4 +312,116 @@ fn files(lines: &[&str]) -> Verdict {
             format!("**Files:** `{value}` is not a comma-separated list of backticked paths"),
         )
     }
+}
+
+/// A repository path the body names in backticks, and whether it is marked `(new)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedPath {
+    pub path: String,
+    pub new: bool,
+}
+
+/// Every repository path `body` names in backticks outside code fences, once each, in order: a
+/// word of path characters with a `/` or a file extension, not an absolute path, an option or a
+/// parent folder. One followed by `(new)` is marked new.
+pub fn named_paths(body: &str) -> Vec<NamedPath> {
+    let mut named: Vec<NamedPath> = Vec::new();
+    for line in unfenced(body) {
+        let mut spans = line.split('`');
+        // The text before the first backtick is outside any span.
+        spans.next();
+        while let (Some(inside), Some(after)) = (spans.next(), spans.next()) {
+            let new = after.trim_start().starts_with("(new)");
+            let Some(path) = repo_path(inside) else {
+                continue;
+            };
+            match named.iter_mut().find(|n| n.path == path) {
+                Some(seen) => seen.new |= new,
+                None => named.push(NamedPath {
+                    path: path.to_owned(),
+                    new,
+                }),
+            }
+        }
+    }
+    named
+}
+
+/// `text` as a repository path, `./` dropped, or `None` when it isn't one.
+fn repo_path(text: &str) -> Option<&str> {
+    let path = text.strip_prefix("./").unwrap_or(text);
+    let chars_ok = !path.is_empty()
+        && path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'));
+    if !chars_ok || path.starts_with(['/', '-']) || path.contains("//") {
+        return None;
+    }
+    if path.split('/').any(|segment| segment == "..") {
+        return None;
+    }
+    let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    let extension = name
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())
+        .is_some_and(|(_, ext)| ext.chars().any(|c| c.is_ascii_alphabetic()));
+    (path.contains('/') || extension).then_some(path)
+}
+
+/// Rule 6: every path the body names exists on the default branch, unless it is marked `(new)`,
+/// from one listing. A missing path is a warn: issue text names paths loosely.
+fn paths(repo: &str, github: &dyn GitHubBackend, body: &str) -> Verdict {
+    const RULE: &str = "paths";
+    let wanted: Vec<String> = named_paths(body)
+        .into_iter()
+        .filter(|n| !n.new)
+        .map(|n| n.path)
+        .collect();
+    if wanted.is_empty() {
+        return Verdict::new(RULE, Status::Skip, "the body names no existing path");
+    }
+    let listing = github
+        .default_branch(repo)
+        .and_then(|branch| github.repo_paths(repo, &branch));
+    let listed = match listing {
+        Ok(listed) => listed,
+        Err(e) => {
+            return Verdict::new(
+                RULE,
+                Status::Warn,
+                format!("the default branch's paths could not be listed ({e:#})"),
+            );
+        }
+    };
+    let missing: Vec<&str> = wanted
+        .iter()
+        .map(String::as_str)
+        .filter(|path| !listed.iter().any(|l| names(path, l)))
+        .collect();
+    if missing.is_empty() {
+        Verdict::new(
+            RULE,
+            Status::Pass,
+            format!("{} paths exist on the default branch", wanted.len()),
+        )
+    } else {
+        Verdict::new(
+            RULE,
+            Status::Warn,
+            format!(
+                "not on the default branch (mark a path to add `(new)`): {}",
+                missing.join(", ")
+            ),
+        )
+    }
+}
+
+/// Whether `named`, a path the body names (a folder may end in `/`), is `path` or a folder it is
+/// in.
+fn names(named: &str, path: &str) -> bool {
+    let named = named.trim_end_matches('/');
+    path == named
+        || path
+            .strip_prefix(named)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
