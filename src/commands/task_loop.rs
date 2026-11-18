@@ -65,6 +65,7 @@ pub mod child;
 mod job_children;
 mod jobs;
 mod parallel;
+mod retro;
 mod waiting;
 pub use check::check;
 pub(crate) use check::{reasons, skip_reason};
@@ -529,6 +530,16 @@ impl LoopLock {
         self.rewrite()
     }
 
+    /// Records in the lock the retro alert's line for `sbxm status` (`Some` while a retro is due,
+    /// issue 714); the lock is written only when this changes it.
+    fn retro(&mut self, line: Option<String>) -> Result<()> {
+        if self.file.retro_due == line {
+            return Ok(());
+        }
+        self.file.retro_due = line;
+        self.rewrite()
+    }
+
     /// Writes the lock again, through a temporary file renamed over it, since `sbxm status` reads
     /// it meanwhile; one no longer this process's (removed by hand) is not written again.
     fn rewrite(&mut self) -> Result<()> {
@@ -580,6 +591,7 @@ fn take_lock(
         progress: listed.then(queue::Progress::default),
         adopted: Vec::new(),
         idle_check: None,
+        retro_due: None,
     };
     let me = serde_json::to_string(&contents)?;
     let mut dead = None;
@@ -890,6 +902,11 @@ struct Loop<'a> {
     run_jobs: Vec<jobs::RunJob>,
     /// The issues of the running task children (issue 633): a queued `run` job of one waits.
     running_issues: Vec<u32>,
+    /// When the retro alert last checked (issue 714): it checks again an hour later at the
+    /// earliest, a failed check too.
+    retro_checked: Option<u64>,
+    /// What the retro alerts this run commented on are about ([`retro::Due::about`]).
+    retro_commented: HashSet<String>,
 }
 
 impl Loop<'_> {
@@ -3773,17 +3790,6 @@ struct RunsRead {
     listed: bool,
 }
 
-/// Whether a failed phase stopped on a lapsed sign-in (issue 445): `sbx`'s, or a harness's, said
-/// in its error or, as a usage limit is, in a line of its output that reports a failure.
-fn says_sign_in(e: &anyhow::Error, output: &str) -> bool {
-    e.downcast_ref::<pipeline::NotSignedIn>().is_some()
-        || e.downcast_ref::<pipeline::HarnessSignedOut>().is_some()
-        || pipeline::says_harness_signed_out(&format!("{e:#}"))
-        || output.lines().any(|line| {
-            line.to_lowercase().contains("failed") && pipeline::says_harness_signed_out(line)
-        })
-}
-
 /// The loop's last words on a sign-in stop (issue 445, answer 3): sign in, then `task resume` for
 /// the stopped task when it exists (its label is gone, so a new loop wouldn't pick it up), then
 /// `task loop` for the rest. A task refused before its record keeps its label.
@@ -4303,6 +4309,8 @@ fn run_loop(
         jobs: Vec::new(),
         run_jobs: Vec::new(),
         running_issues: Vec::new(),
+        retro_checked: None,
+        retro_commented: HashSet::new(),
     };
 
     // The dead loop's children that ended with an outcome it never acted on (issue 657), read
@@ -4918,7 +4926,8 @@ fn note(
 /// The wait of a `--wait` loop on an empty queue, in either scheduler: says so once per idle
 /// spell (`said`; the next task, or the next stop, ends it), records in the lock when the wait
 /// began for `sbxm status` (issue 671), sleeps a [`PAUSE_POLL`], and clears the record on waking,
-/// before the loop looks for work again.
+/// before the loop looks for work again. Each wait first checks whether a retro is due (issue
+/// 714), at most once an hour.
 fn wait_idle(
     lock: &mut LoopLock,
     lp: &mut Loop,
@@ -4934,6 +4943,7 @@ fn wait_idle(
         )?;
         *said = true;
     }
+    lp.check_retro(lock, out, warn)?;
     idle_note(lock, lp, warn, Some(lp.now()))?;
     (lp.env.sleep)(PAUSE_POLL);
     idle_note(lock, lp, warn, None)

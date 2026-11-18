@@ -48,6 +48,7 @@ fn write_lock(base: &Path, issues: &[u32]) {
         progress: None,
         adopted: Vec::new(),
         idle_check: None,
+        retro_due: None,
     };
     fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
 }

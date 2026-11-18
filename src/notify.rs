@@ -65,8 +65,8 @@ impl Notifier for FakeNotifier {
 /// part of a command line.
 pub const XML_VAR: &str = "SBXM_TOAST_XML";
 
-/// The toast snippet of `scripts/factory-trigger.ps1` (issue 327): WinRT types load only in
-/// Windows PowerShell 5.1, shown as Windows PowerShell's own app.
+/// The PowerShell snippet that shows the toast: WinRT types load only in Windows PowerShell 5.1,
+/// and the toast is shown as Windows PowerShell's own app.
 pub const TOAST_SCRIPT: &str = "\
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null

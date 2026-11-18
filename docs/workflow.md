@@ -490,6 +490,11 @@ the binary you built, and waits for job files and labelled issues.
    failed, stopped, was refused or interrupted, a stop that needs you, `main` red pausing auto-merge, a task's
    question. Each shows once (`<base_dir>\.sbxm\notified.json`)
    and a click opens the PR or issue, or the loop's log. Turn them off with `[notify] toasts = false` in `config.toml`.
+6. It also tells you when a retro is due (decision 330(4), issue 714): at an idle wait, at most once an hour, it
+   counts the PRs merged since the end of the `Window:` line of the newest `sdlc/retros/*-retro.md` on the default
+   branch (from the day after, UTC). At 10 or more (or with no retro record) it comments once on the open `loop-log`
+   issue, shows a toast once a day and `sbxm status` shows `retro due: N PRs since <end>`, until a newer retro record
+   lands on the default branch. A retro needs you, so the loop only reminds; run it with the `sdlc-retro` skill.
 
 ## How a change to sbxm itself goes
 
@@ -529,16 +534,6 @@ that look like reports are left out on purpose and keep asking: `doctor`, becaus
 check creates and removes a file in the base dir, and its kit check writes and removes kits in the temp dir), and
 `task status` (decision 192 (b), taken while it appended its output to the `run.log` of each task it shows; since
 issue 576 it only reads, and `sbxm status` shows the same tasks).
-
-## Recurring preparation: the scheduled factory check (an experiment)
-
-`scripts/factory-check.ps1` (decision 269, issue 327) prepares drafts while you are away: readiness drafts for issues
-that aren't ready yet, "still valid?" drafts for ready issues that PRs merged under (decision 295), and a retro draft
-once 10 PRs have merged since the last one. It only writes local files in `<base_dir>/.sbxm/factory/drafts/<date>/`;
-work through them in a session (`sdlc-issue-flow` stage 2 for an issue, `sdlc-retro` for the retro), set the labels
-and write the answers there, then copy the summary's log lines into `sdlc/batches/<date>-factory.md`, filling in the
-share of recommended answers you accepted unchanged and the time from the draft to `ready-for-worker`. The README
-has the setup ("The scheduled factory check").
 
 ## Practical notes
 

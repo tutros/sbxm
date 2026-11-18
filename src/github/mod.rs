@@ -219,6 +219,15 @@ pub struct JobLog {
     pub log: String,
 }
 
+/// A merged pull request and when it merged, as `gh pr list --state merged --json
+/// number,mergedAt` lists it (issue 714).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedPr {
+    pub number: u32,
+    /// Seconds since the epoch.
+    pub merged_at: u64,
+}
+
 pub trait GitHubBackend: Send + Sync {
     fn whoami(&self) -> Result<String>;
     fn default_branch(&self, repo: &str) -> Result<String>;
@@ -325,4 +334,14 @@ pub trait GitHubBackend: Send + Sync {
     /// When PR `number` merged, in seconds since the epoch; `None` while it isn't merged (`gh api
     /// repos/<repo>/pulls/<n>`, issue 550).
     fn pr_merged_at(&self, repo: &str, number: u32) -> Result<Option<u64>>;
+    /// Every PR of `repo` merged on day `day` (`YYYY-MM-DD`, UTC) or later, with when it merged
+    /// (`gh pr list --state merged --search merged:>=<day>`): the loop counts those since the
+    /// last retro's window (issue 714, decision 330(4)).
+    fn prs_merged_since(&self, repo: &str, day: &str) -> Result<Vec<MergedPr>>;
+    /// The names of the files in folder `dir` of `repo` at branch `branch` (`gh api
+    /// repos/<repo>/contents/<dir>?ref=<branch>`); none when the folder doesn't exist (issue 714).
+    fn dir_files(&self, repo: &str, branch: &str, dir: &str) -> Result<Vec<String>>;
+    /// The text of the file at `path` of `repo` at branch `branch` (`gh api
+    /// repos/<repo>/contents/<path>?ref=<branch>`, raw) (issue 714).
+    fn file_text(&self, repo: &str, branch: &str, path: &str) -> Result<String>;
 }
