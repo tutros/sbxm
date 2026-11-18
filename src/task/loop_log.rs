@@ -247,6 +247,16 @@ pub fn since(base_dir: &Path, started_at: u64, own: &Path) -> Result<Vec<PathBuf
     Ok(logs)
 }
 
+/// Every log under `base_dir` with its loop's start, in seconds since the epoch, oldest first
+/// (issue 715: the run data of an improvement review); a log whose name holds no start is left
+/// out.
+pub fn every(base_dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
+    Ok(logs(base_dir, Path::new(""))?
+        .into_iter()
+        .filter_map(|log| crate::run::results::parse_timestamp(&start_of(&log)).map(|at| (at, log)))
+        .collect())
+}
+
 /// Every log under `base_dir`, oldest first, `own` left out.
 fn logs(base_dir: &Path, own: &Path) -> Result<Vec<PathBuf>> {
     let dir = base_dir.join(".sbxm").join("loop-logs");
