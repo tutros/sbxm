@@ -311,13 +311,12 @@ pub struct Anchor {
     pub at: u64,
 }
 
-/// The run data a spec embeds, at most [`CAP`] bytes, how many rows were left out, and what its
-/// sources skipped (`sbxm task facts`'s warnings), which makes it incomplete.
+/// The run data a spec embeds, at most [`CAP`] bytes, and how many rows were left out. It is
+/// only built from sources read whole: a source that skipped something fails the check instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunData {
     pub text: String,
     pub left_out: usize,
-    pub skipped: Vec<String>,
 }
 
 /// When a loop-log row started: a time, or, when neither the log's span nor a record tells the
@@ -347,19 +346,13 @@ struct TimedRow {
 }
 
 /// The run data since `since` (`None`: all): `facts`, the Markdown table of `sbxm task facts`
-/// (with `skipped`, its warnings), and the table rows of `logs` that started on that day (UTC) or
+/// and the table rows of `logs` that started on that day (UTC) or
 /// later, each with its loop's start and its own day. A row's day comes from its clock between
 /// its loop's start and its log's last write, and when that spans more than a day, from the
 /// nearest of `anchors` for its item; a row neither tells is kept with its day shown unknown,
 /// never guessed. When the whole is longer than [`CAP`] bytes, the oldest rows of either part are
 /// left out until it fits.
-pub fn run_data(
-    facts: &str,
-    skipped: &[String],
-    logs: &[LoopLog],
-    anchors: &[Anchor],
-    since: Option<&str>,
-) -> RunData {
+pub fn run_data(facts: &str, logs: &[LoopLog], anchors: &[Anchor], since: Option<&str>) -> RunData {
     let window = since.map_or_else(|| "all".to_owned(), |d| format!("since {d}"));
     let from = since.and_then(parse_day).unwrap_or(0);
     let mut rows = Vec::new();
@@ -451,9 +444,12 @@ pub fn run_data(
     RunData {
         text: render(&parts),
         left_out,
-        skipped: skipped.to_vec(),
     }
 }
+
+/// How far a row's start may be from its task's or job's start and still be the same run: the
+/// loop logs when it starts a task, the record is written moments later, after any slot wait.
+const ANCHOR_SLACK: u64 = 3 * 60 * 60;
 
 /// When the loop-log row `line` of `log` started (see [`run_data`]).
 fn when(log: &LoopLog, line: &str, anchors: &[Anchor]) -> When {
@@ -479,21 +475,17 @@ fn when(log: &LoopLog, line: &str, anchors: &[Anchor]) -> When {
                 .filter(|a| !key.is_empty() && a.key == key)
                 .map(|a| a.at)
                 .collect::<Vec<_>>();
-            if near.is_empty() {
-                return When::Unknown { first, last: *last };
+            // A day is told only when exactly one candidate is a start's: two runs of the same
+            // item on different days, or a start far from every candidate, tell none.
+            let matching: Vec<u64> = candidates
+                .iter()
+                .copied()
+                .filter(|&t| near.iter().any(|&a| a.abs_diff(t) <= ANCHOR_SLACK))
+                .collect();
+            match matching.as_slice() {
+                [only] => When::At(*only),
+                _ => When::Unknown { first, last: *last },
             }
-            let distance = |t: u64| {
-                near.iter()
-                    .map(|&a| a.abs_diff(t))
-                    .min()
-                    .unwrap_or(u64::MAX)
-            };
-            When::At(
-                *candidates
-                    .iter()
-                    .min_by_key(|&&t| distance(t))
-                    .expect("two or more candidates"),
-            )
         }
     }
 }
@@ -530,10 +522,12 @@ fn clock_at(start: u64, clock: &str) -> Option<u64> {
     Some(start - start_of_day + of_day + if of_day < start_of_day { DAY } else { 0 })
 }
 
-/// The [`Anchor`]s under `base_dir` for `repo`'s loop-log rows: every stage stamp of each task
-/// record, live or archived, keyed by its issue (`#<n>`) and its PR, and each finished job's
-/// start and end, keyed by its label. They only help tell a row's day: a record or result that
-/// can't be read gives none, and such a row is then shown with its day unknown.
+/// The [`Anchor`]s under `base_dir` for `repo`'s loop-log rows: each task's start, the first
+/// stamp of its record, live or archived, keyed by what its row names: an issue task by its
+/// issue (`#<n>`), a fix task (a resolve or a log-fix) by its PR; and each finished job's start,
+/// keyed by its label. A later stage is never an anchor: it isn't when a row started. They only
+/// help tell a row's day: a record or result that can't be read gives none, and such a row is
+/// then shown with its day unknown.
 pub fn anchors(base_dir: &Path, repo: &str) -> Vec<Anchor> {
     let mut found = Vec::new();
     let mut dirs = record::task_folders(base_dir).unwrap_or_default();
@@ -547,20 +541,17 @@ pub fn anchors(base_dir: &Path, repo: &str) -> Vec<Anchor> {
         if rec.repo != repo {
             continue;
         }
-        let mut keys = Vec::new();
-        if rec.kind == Kind::Issue {
-            keys.push(format!("#{}", rec.number));
-        }
-        if let Some(pr) = rec.pr.as_deref().and_then(queue::pr_number) {
-            keys.push(format!("#{pr}"));
-        }
-        for stamp in rec.stages.iter().filter_map(|s| parse_timestamp(&s.at)) {
-            for key in &keys {
-                found.push(Anchor {
-                    key: key.clone(),
-                    at: stamp,
-                });
-            }
+        let key = match rec.kind {
+            Kind::Issue => format!("#{}", rec.number),
+            Kind::Fix => match rec.pr.as_deref().and_then(queue::pr_number) {
+                Some(pr) => format!("#{pr}"),
+                None => continue,
+            },
+            // A review or spec task runs as a job: its row is the job's, anchored below.
+            _ => continue,
+        };
+        if let Some(at) = rec.stages.first().and_then(|s| parse_timestamp(&s.at)) {
+            found.push(Anchor { key, at });
         }
     }
     let done = fs::read_dir(jobs::done_dir(base_dir))
@@ -581,20 +572,15 @@ pub fn anchors(base_dir: &Path, repo: &str) -> Vec<Anchor> {
         else {
             continue;
         };
-        for stamp in [&result.started_at, &result.ended_at] {
-            if let Some(at) = parse_timestamp(stamp) {
-                found.push(Anchor {
-                    key: job.label(),
-                    at,
-                });
-            }
+        if let Some(at) = parse_timestamp(&result.started_at) {
+            found.push(Anchor {
+                key: job.label(),
+                at,
+            });
         }
     }
     found
 }
-
-/// How many of `sbxm task facts`'s warnings a spec names before it counts the rest.
-const SKIPPED_NAMED: usize = 10;
 
 /// The spec of `area`'s review on `date`, the embedded `prompts/improvement-review.md` filled in.
 pub fn spec(area: &Area, date: &str, since: Option<&str>, data: &RunData) -> Result<String> {
@@ -602,32 +588,14 @@ pub fn spec(area: &Area, date: &str, since: Option<&str>, data: &RunData) -> Res
         || "the first task (no improvement review yet)".to_owned(),
         str::to_owned,
     );
-    let mut left_out = if data.left_out == 0 && data.skipped.is_empty() {
+    let left_out = if data.left_out == 0 {
         format!("All the run data since {since_text} is below.")
-    } else if data.left_out == 0 {
-        "Every row read is below, but the run data is incomplete.".to_owned()
     } else {
         format!(
             "The run data is capped at 30 KB: the {} oldest rows were left out, the newest kept.",
             data.left_out
         )
     };
-    if !data.skipped.is_empty() {
-        left_out.push_str(&format!(
-            " `sbxm task facts` skipped {} task records it could not read, so their tasks are \
-             missing:",
-            data.skipped.len()
-        ));
-        for line in data.skipped.iter().take(SKIPPED_NAMED) {
-            left_out.push_str(&format!("\n- {line}"));
-        }
-        if data.skipped.len() > SKIPPED_NAMED {
-            left_out.push_str(&format!(
-                "\n- and {} more",
-                data.skipped.len() - SKIPPED_NAMED
-            ));
-        }
-    }
     prompts::render_known(
         TEMPLATE_NAME,
         TEMPLATE,

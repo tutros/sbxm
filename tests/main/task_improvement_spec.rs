@@ -2,8 +2,13 @@
 //! with an area, a date and the run data ([`improvement::spec`]), and the run data's 30 KB cap
 //! ([`improvement::run_data`]): the newest rows are kept and the spec says how many were left out.
 
-use sbxm::run::results::parse_timestamp;
+use crate::common;
+
+use sbxm::backend::Location;
+use sbxm::run::results::{format_timestamp, parse_timestamp};
 use sbxm::task::improvement::{self, Anchor, Area, CAP, LoopLog, RunData};
+use sbxm::task::merged;
+use sbxm::task::record::{self, Kind, NewTask, Process, Record, Stage, Stamp};
 
 const FACTS_HEADER: &str = "| task | issue | started | size | review rounds | must-fix per round | \
                             wall to ready (s) | worker (s) | worker cost | reviewer (s) | \
@@ -33,7 +38,7 @@ fn facts(n: usize, width: usize) -> String {
 
 /// The run data of `facts` and `logs`, with nothing skipped and no anchors.
 fn data(facts: &str, logs: &[LoopLog], since: Option<&str>) -> RunData {
-    improvement::run_data(facts, &[], logs, &[], since)
+    improvement::run_data(facts, logs, &[], since)
 }
 
 fn spec(data: &RunData) -> String {
@@ -231,7 +236,6 @@ fn three_day_anchors() -> Vec<Anchor> {
 fn task_improvement_spec_a_loop_running_for_days_keeps_its_rows_of_the_window() {
     let data = improvement::run_data(
         FACTS_HEADER,
-        &[],
         &[three_day_log()],
         &three_day_anchors(),
         Some("2026-11-17"),
@@ -251,7 +255,6 @@ fn task_improvement_spec_a_loop_running_for_days_keeps_its_rows_of_the_window() 
 fn task_improvement_spec_a_next_day_row_later_than_the_loops_start_clock_keeps_its_day() {
     let data = improvement::run_data(
         FACTS_HEADER,
-        &[],
         &[three_day_log()],
         &three_day_anchors(),
         Some("2026-11-15"),
@@ -278,7 +281,6 @@ fn task_improvement_spec_a_next_day_row_later_than_the_loops_start_clock_keeps_i
     };
     let data = improvement::run_data(
         FACTS_HEADER,
-        &[],
         &[log],
         &[anchor(804, "2026-11-16T12:00:01Z")],
         Some("2026-11-16"),
@@ -300,7 +302,7 @@ fn task_improvement_spec_a_loop_of_less_than_a_day_tells_the_day_without_a_recor
         text,
     };
 
-    let data = improvement::run_data(FACTS_HEADER, &[], &[log], &[], Some("2026-11-16"));
+    let data = improvement::run_data(FACTS_HEADER, &[log], &[], Some("2026-11-16"));
 
     assert!(
         data.text.contains("| 2026-11-16 | 1 | #805 t805 |"),
@@ -311,13 +313,7 @@ fn task_improvement_spec_a_loop_of_less_than_a_day_tells_the_day_without_a_recor
 
 #[test]
 fn task_improvement_spec_a_row_no_record_dates_is_kept_with_its_day_unknown() {
-    let data = improvement::run_data(
-        FACTS_HEADER,
-        &[],
-        &[three_day_log()],
-        &[],
-        Some("2026-11-17"),
-    );
+    let data = improvement::run_data(FACTS_HEADER, &[three_day_log()], &[], Some("2026-11-17"));
 
     // Each clock fits several days up to the 17th: none is guessed.
     assert!(
@@ -341,7 +337,7 @@ fn task_improvement_spec_a_row_no_record_dates_is_kept_with_its_day_unknown() {
         end: ts("2026-11-17T13:00:00Z"),
         text,
     };
-    let data = improvement::run_data(FACTS_HEADER, &[], &[log], &[], Some("2026-11-17"));
+    let data = improvement::run_data(FACTS_HEADER, &[log], &[], Some("2026-11-17"));
     assert!(!data.text.contains("#806"), "{}", data.text);
 }
 
@@ -361,7 +357,7 @@ fn task_improvement_spec_over_the_cap_rows_of_later_days_go_first_out_of_log_ord
         anchor(902, "2026-11-15T05:30:00Z"),
     ];
     // Tasks from 2026-11-17T00:00, one a minute, more than fit.
-    let data = improvement::run_data(&facts(600, 100), &[], &[log], &anchors, None);
+    let data = improvement::run_data(&facts(600, 100), &[log], &anchors, None);
 
     assert!(data.text.len() <= CAP);
     assert!(data.left_out > 0);
@@ -399,16 +395,121 @@ fn task_improvement_spec_without_a_loop_log_a_row_up_to_the_cap_is_kept_and_one_
     }
 }
 
-// --- Review M-2 of issue 715: what the run data couldn't read ---
+// --- Review M-1 (again) of issue 715: a row is dated by its task's start, not a later stage ---
+
+/// An issue task of `o/r` for `issue` whose record started at `started`, with a later `ready`
+/// stamp at `ready`, written in the task folders under `base`.
+fn task_with_stages(base: &std::path::Path, issue: u32, started: &str, ready: &str) {
+    let task = record_with_stages(issue, started, ready);
+    record::write(&record::task_dir(base, &task.id), &task).unwrap();
+}
+
+fn record_with_stages(issue: u32, started: &str, ready: &str) -> Record {
+    let mut task = Record::new(
+        &NewTask {
+            kind: Kind::Issue,
+            number: issue,
+            repo: "o/r",
+            title: "t",
+            base: "main",
+            branch: "b",
+            config_hash: "h",
+            id: None,
+        },
+        ts(started),
+        Process::new(1, ts(started)),
+    );
+    task.location = Location::Local;
+    task.stages.push(Stamp {
+        stage: Stage::Ready,
+        at: format_timestamp(ts(ready)),
+    });
+    task
+}
 
 #[test]
-fn task_improvement_spec_records_task_facts_skipped_make_the_spec_say_incomplete() {
-    let skipped = vec!["/b/.sbxm/tasks/issue-9/task.json skipped: not a task record".to_owned()];
-    let data = improvement::run_data(FACTS_HEADER, &skipped, &[], &[], Some("2026-11-16"));
+fn task_improvement_spec_a_later_stage_closer_than_the_start_doesnt_move_a_row() {
+    let env = common::Env::new();
+    // The loop logged #801 at 11:00:00; the record's start is 5 s later, its `ready` a day on at
+    // exactly 11:00:00.
+    task_with_stages(
+        &env.base_dir(),
+        801,
+        "2026-11-15T11:00:05Z",
+        "2026-11-16T11:00:00Z",
+    );
+    let anchors = improvement::anchors(&env.base_dir(), "o/r");
+    let mut text = LOG_HEAD.to_owned();
+    text.push_str(&log_row(1, 801, "11:00:00"));
+    let log = LoopLog {
+        start: ts("2026-11-15T10:00:00Z"),
+        end: ts("2026-11-17T13:00:00Z"),
+        text,
+    };
 
-    let text = spec(&data);
+    let since_16 = improvement::run_data(
+        FACTS_HEADER,
+        std::slice::from_ref(&log),
+        &anchors,
+        Some("2026-11-16"),
+    );
+    assert!(!since_16.text.contains("#801"), "{}", since_16.text);
 
-    assert!(!text.contains("All the run data"), "{text}");
-    assert!(text.contains("the run data is incomplete"), "{text}");
-    assert!(text.contains("issue-9/task.json skipped"), "{text}");
+    let since_15 = improvement::run_data(FACTS_HEADER, &[log], &anchors, Some("2026-11-15"));
+    assert!(
+        since_15.text.contains("| 2026-11-15 | 1 | #801 t801 |"),
+        "{}",
+        since_15.text
+    );
+}
+
+#[test]
+fn task_improvement_spec_two_runs_of_an_issue_on_two_candidate_days_leave_the_day_unknown() {
+    let env = common::Env::new();
+    task_with_stages(
+        &env.base_dir(),
+        802,
+        "2026-11-15T11:00:05Z",
+        "2026-11-15T12:00:00Z",
+    );
+    // Another run of the same issue, archived, started the next day at nearly the same clock.
+    let other = record_with_stages(802, "2026-11-16T11:00:02Z", "2026-11-16T12:00:00Z");
+    record::write(
+        &merged::archive_root(&env.base_dir()).join("issue-802-2026-11-16"),
+        &other,
+    )
+    .unwrap();
+    let anchors = improvement::anchors(&env.base_dir(), "o/r");
+    assert_eq!(anchors.len(), 2, "{anchors:?}");
+    let mut text = LOG_HEAD.to_owned();
+    text.push_str(&log_row(1, 802, "11:00:00"));
+    let log = LoopLog {
+        start: ts("2026-11-15T10:00:00Z"),
+        end: ts("2026-11-17T13:00:00Z"),
+        text,
+    };
+
+    let data = improvement::run_data(FACTS_HEADER, &[log], &anchors, Some("2026-11-15"));
+
+    assert!(
+        data.text
+            .contains("| unknown (2026-11-15 to 2026-11-17) | 1 | #802 t802 |"),
+        "{}",
+        data.text
+    );
+}
+
+#[test]
+fn task_improvement_spec_only_starts_are_anchors() {
+    let env = common::Env::new();
+    task_with_stages(
+        &env.base_dir(),
+        803,
+        "2026-11-15T11:00:05Z",
+        "2026-11-16T11:00:00Z",
+    );
+
+    let anchors = improvement::anchors(&env.base_dir(), "o/r");
+
+    assert_eq!(anchors, [anchor(803, "2026-11-15T11:00:05Z")]);
 }

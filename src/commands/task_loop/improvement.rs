@@ -110,16 +110,6 @@ impl Loop<'_> {
             Ok(data) => data,
             Err(e) => return self.improvement_failed("could not read the run data", &e, warn),
         };
-        if !data.skipped.is_empty() {
-            let line = format!(
-                "the improvement review of {}: `sbxm task facts` skipped {} task records ({}); its \
-                 spec says its run data is incomplete",
-                area.slug,
-                data.skipped.len(),
-                data.skipped[0]
-            );
-            self.improvement_log(&line, warn)?;
-        }
         let spec = match improvement::spec(area, &date, due.since.as_deref(), &data) {
             Ok(spec) => spec,
             Err(e) => return self.improvement_failed("could not write its spec", &e, warn),
@@ -175,9 +165,10 @@ impl Loop<'_> {
         self.improvement_row(&line, warn)
     }
 
-    /// The run data since `since`: the table of `sbxm task facts`, with the records it skipped,
-    /// and this repository's loop-log rows ([`improvement::run_data`] keeps those of that day or
-    /// later). A log that can't be read is an error naming it, so nothing goes missing unsaid.
+    /// The run data since `since`: the table of `sbxm task facts` and this repository's loop-log
+    /// rows ([`improvement::run_data`] keeps those of that day or later). A source that can't be
+    /// read whole is an error naming what it couldn't read: a log that can't be read, or a task
+    /// record `task facts` skipped, so no spec is queued from incomplete data.
     fn run_data(&self, since: Option<&str>) -> Result<improvement::RunData> {
         let opts = task_facts::Options {
             since: since.unwrap_or("1970-01-01").to_owned(),
@@ -191,6 +182,13 @@ impl Loop<'_> {
             .map(|l| l.strip_prefix("warning: ").unwrap_or(l).trim().to_owned())
             .filter(|l| !l.is_empty())
             .collect();
+        if let Some(first) = skipped.first() {
+            let more = match skipped.len() {
+                1 => String::new(),
+                n => format!(" and {} more", n - 1),
+            };
+            anyhow::bail!("`sbxm task facts` could not read every task record: {first}{more}");
+        }
         let mut logs = Vec::new();
         for (start, path) in loop_log::every(&self.base_dir)? {
             let read = fs::read_to_string(&path)
@@ -213,7 +211,6 @@ impl Loop<'_> {
         let anchors = improvement::anchors(&self.base_dir, &self.repo);
         Ok(improvement::run_data(
             &String::from_utf8_lossy(&facts),
-            &skipped,
             &logs,
             &anchors,
             since,

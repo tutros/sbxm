@@ -850,19 +850,65 @@ fn task_loop_improvement_due_a_repaired_log_waits_for_the_next_hour_then_queues(
     );
 }
 
-#[test]
-fn task_loop_improvement_due_a_record_task_facts_skips_makes_the_spec_say_incomplete() {
-    let f = fixture();
+/// A task record `task facts` can't read, `issue-99`'s; returns its path.
+fn broken_record(f: &Fixture) -> PathBuf {
     let dir = record::tasks_root(&f.base()).join("issue-99");
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("task.json"), "not json").unwrap();
+    let path = dir.join("task.json");
+    fs::write(&path, "not json").unwrap();
+    path
+}
+
+#[test]
+fn task_loop_improvement_due_a_record_task_facts_skips_queues_nothing_and_names_it() {
+    let f = fixture();
+    broken_record(&f);
     let gh = github(Some(AREAS), &all_reviewed(), merged(20));
 
     let ran = run_loop(&f, &gh, &FakeNotifier::default(), 1);
 
-    let spec = fs::read_to_string(f.specs().join(spec_name("beta"))).unwrap();
-    assert!(!spec.contains("All the run data"), "{spec}");
-    assert!(spec.contains("the run data is incomplete"), "{spec}");
-    assert!(spec.contains("issue-99"), "{spec}");
-    assert!(ran.warn.contains("skipped 1 task records"), "{}", ran.warn);
+    assert!(
+        !ran.out.contains("improvement review of beta queued"),
+        "{}",
+        ran.out
+    );
+    assert!(fs::read_dir(f.specs()).unwrap().next().is_none(), "no spec");
+    let notes = f.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("issue-99"), "{notes:?}");
+    assert!(notes[0].contains("tried again in an hour"), "{notes:?}");
+    assert!(ran.warn.contains("issue-99"), "{}", ran.warn);
+}
+
+#[test]
+fn task_loop_improvement_due_a_repaired_record_waits_for_the_next_hour_then_queues() {
+    let repair = |path: &Path| fs::remove_dir_all(path.parent().unwrap()).unwrap();
+
+    let f = fixture();
+    let path = broken_record(&f);
+    let gh = github(Some(AREAS), &all_reviewed(), merged(20));
+    let ran = run_loop_between(&f, &gh, &FakeNotifier::default(), TWO_CHECKS - 1, &|n| {
+        if n == 1 {
+            repair(&path);
+        }
+    });
+    assert!(
+        !ran.out.contains("improvement review of beta queued"),
+        "no check before the hour: {}",
+        ran.out
+    );
+
+    let f = fixture();
+    let path = broken_record(&f);
+    let ran = run_loop_between(&f, &gh, &FakeNotifier::default(), TWO_CHECKS, &|n| {
+        if n == 1 {
+            repair(&path);
+        }
+    });
+    assert!(
+        ran.out.contains("improvement review of beta queued"),
+        "{}\n{}",
+        ran.out,
+        ran.warn
+    );
 }
