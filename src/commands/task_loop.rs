@@ -3762,17 +3762,6 @@ struct RunsRead {
     listed: bool,
 }
 
-/// Whether a failed phase stopped on a lapsed sign-in (issue 445): `sbx`'s, or a harness's, said
-/// in its error or, as a usage limit is, in a line of its output that reports a failure.
-fn says_sign_in(e: &anyhow::Error, output: &str) -> bool {
-    e.downcast_ref::<pipeline::NotSignedIn>().is_some()
-        || e.downcast_ref::<pipeline::HarnessSignedOut>().is_some()
-        || pipeline::says_harness_signed_out(&format!("{e:#}"))
-        || output.lines().any(|line| {
-            line.to_lowercase().contains("failed") && pipeline::says_harness_signed_out(line)
-        })
-}
-
 /// The loop's last words on a sign-in stop (issue 445, answer 3): sign in, then `task resume` for
 /// the stopped task when it exists (its label is gone, so a new loop wouldn't pick it up), then
 /// `task loop` for the rest. A task refused before its record keeps its label.

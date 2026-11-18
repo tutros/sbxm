@@ -13,7 +13,7 @@ use anyhow::{Result, anyhow};
 use super::job_children::{JobChild, Work};
 use super::{
     Capture, Cause, Claimed, End, Halt, JobStep, Loop, NeedsUser, PR_CAP, PhaseEnd, Steps, check,
-    first_line, needs_user, says_sign_in, sign_in_stop,
+    first_line, needs_user, sign_in_stop,
 };
 use crate::backend::Location;
 use crate::commands::task_start::spec_flag;
@@ -23,10 +23,10 @@ use crate::harness::Harness;
 use crate::notify::Notification;
 use crate::run::results::format_timestamp;
 use crate::task::jobs::{self, AsRead, Job, JobHarness, JobResult, Outcome, Running};
-use crate::task::outcome::Kind as ChildKind;
+use crate::task::outcome::{self, Kind as ChildKind};
 use crate::task::queue::{self, Row};
 use crate::task::record::{self, Kind, Record, Stage};
-use crate::task::{location, lock, next, pipeline};
+use crate::task::{location, lock, next};
 
 /// How one job ended, before its result file.
 struct Ended {
@@ -989,21 +989,21 @@ impl Loop<'_> {
             Ok(value) => return Ok(value),
             Err(e) => e,
         };
-        if says_sign_in(&e, &String::from_utf8_lossy(&captured)) {
-            let resume = resume.and_then(|(id, command)| self.record_of(id).map(|_| command));
-            let stop = sign_in_stop(e, resume);
-            return Err(Ended {
-                halt: Some(needs_user(Cause::SignIn, anyhow!("{stop:#}"))),
-                ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
-            });
-        }
-        if e.is::<pipeline::MissingSecret>() {
-            return Err(Ended {
+        match outcome::kind_of(&e, &String::from_utf8_lossy(&captured)) {
+            ChildKind::SignedOut => {
+                let resume = resume.and_then(|(id, command)| self.record_of(id).map(|_| command));
+                let stop = sign_in_stop(e, resume);
+                Err(Ended {
+                    halt: Some(needs_user(Cause::SignIn, anyhow!("{stop:#}"))),
+                    ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
+                })
+            }
+            ChildKind::MissingSecret => Err(Ended {
                 halt: Some(needs_user(Cause::Secret, anyhow!("{e:#}"))),
                 ..Ended::new(Outcome::Failed, format!("{what}{e:#}"))
-            });
+            }),
+            _ => Err(Ended::new(Outcome::Failed, format!("{what}{e:#}"))),
         }
-        Err(Ended::new(Outcome::Failed, format!("{what}{e:#}")))
     }
 
     /// A `review` or (`fix`) `fix` job of PR `pr`: only of a PR sbxm opened (answer 4), skipped

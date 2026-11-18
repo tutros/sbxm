@@ -200,6 +200,7 @@ mod task_loop_child_output;
 mod task_loop_end_rows;
 mod task_loop_fixes_pass;
 mod task_loop_job_children;
+mod task_loop_job_sign_in;
 mod task_loop_jobs;
 mod task_loop_jobs_2b;
 mod task_loop_log;
