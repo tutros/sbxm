@@ -94,30 +94,43 @@ impl Outcome {
             return Self::new(Kind::Ready, None, "");
         };
         let detail = format!("{e:#}");
-        if e.is::<crate::slot::Stopped>() {
-            return Self::new(Kind::Stopped, None, detail);
+        match kind_of(e, output) {
+            Kind::SignedOut => match e.downcast_ref::<pipeline::NotSignedIn>() {
+                Some(stop) => Self::new(Kind::SignedOut, Some(SBX.to_owned()), stop.said()),
+                None => {
+                    let provider = provider_of(&detail, output, pipeline::says_harness_signed_out);
+                    Self::new(Kind::SignedOut, provider, detail)
+                }
+            },
+            Kind::UsageLimit => {
+                let provider = provider_of(&detail, output, queue::is_usage_limit);
+                Self::new(Kind::UsageLimit, provider, detail)
+            }
+            kind => Self::new(kind, None, detail),
         }
-        if e.is::<lock::InUse>() {
-            return Self::new(Kind::Held, None, detail);
-        }
-        if e.is::<pipeline::MissingSecret>() {
-            return Self::new(Kind::MissingSecret, None, detail);
-        }
-        if let Some(stop) = e.downcast_ref::<pipeline::NotSignedIn>() {
-            return Self::new(Kind::SignedOut, Some(SBX.to_owned()), stop.said());
-        }
-        if says_harness_signed_out(e, output) {
-            let provider = provider_of(&detail, output, pipeline::says_harness_signed_out);
-            return Self::new(Kind::SignedOut, provider, detail);
-        }
-        if queue::failure_says_usage_limit(&detail, output) {
-            let provider = provider_of(&detail, output, queue::is_usage_limit);
-            return Self::new(Kind::UsageLimit, provider, detail);
-        }
-        if e.is::<pipeline::SbxUnavailable>() || e.is::<crate::headless::ExecUnavailable>() {
-            return Self::new(Kind::Environment, None, detail);
-        }
-        Self::new(Kind::Failed, None, detail)
+    }
+}
+
+/// How a command that failed with `e` ended; `output` is what it printed, where a harness's
+/// failure line says a usage limit or a lapsed sign-in. The one classifier for a child's
+/// `outcome.json` ([`Outcome::of`]) and a phase `task loop` runs in its own process (issue 711).
+/// Never [`Kind::Ready`].
+pub fn kind_of(e: &anyhow::Error, output: &str) -> Kind {
+    let detail = format!("{e:#}");
+    if e.is::<crate::slot::Stopped>() {
+        Kind::Stopped
+    } else if e.is::<lock::InUse>() {
+        Kind::Held
+    } else if e.is::<pipeline::MissingSecret>() {
+        Kind::MissingSecret
+    } else if e.is::<pipeline::NotSignedIn>() || says_harness_signed_out(e, output) {
+        Kind::SignedOut
+    } else if queue::failure_says_usage_limit(&detail, output) {
+        Kind::UsageLimit
+    } else if e.is::<pipeline::SbxUnavailable>() || e.is::<crate::headless::ExecUnavailable>() {
+        Kind::Environment
+    } else {
+        Kind::Failed
     }
 }
 
