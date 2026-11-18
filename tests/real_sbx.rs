@@ -705,6 +705,122 @@ fn claude_headless_against_real_sbx() {
     assert_eq!(left.exit_code, Some(1), "claude still running: {left:?}");
 }
 
+// Issue 726: `task ready-check --judge` on a fixture issue, with the repo's `ready-check` profile.
+
+#[test]
+#[ignore = "needs a logged-in sbx, the anthropic secret and SBXM_REAL_BASE_DIR"]
+fn ready_check_judge_against_real_sbx() {
+    use sbxm::commands::task_ready_check::{self, Judge};
+    use sbxm::github::fake::{FakeGitHub, GhCall};
+    use sbxm::github::{IssueText, ListedPr, PrFile, PrFiles, PrState};
+
+    let base_dir = real_base_dir();
+    let config_dir = TempDir::new().unwrap();
+    let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
+    let profiles = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("profiles");
+    let profiles = toml::Value::String(profiles.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base}\nprofiles_dir = {profiles}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    // An issue with an open point in its prose and no **Files:** line.
+    let body = "**Size:** S: one function.\n\n\
+                Make `src/project.rs` reject names longer than some limit; we could use 40 or 63, \
+                maybe.\n\n**Depends on:** none\n\n## Acceptance criteria\n\n- [ ] Long names fail\n";
+    let issue = sbxm::github::Issue {
+        number: 1,
+        open: true,
+        title: "Limit project names".into(),
+        labels: vec!["size:S".into()],
+        body: body.into(),
+    };
+    let gh = FakeGitHub::default()
+        .with_default_branch("main")
+        .with_issue_text(IssueText {
+            number: 1,
+            title: issue.title.clone(),
+            state: "OPEN".into(),
+            text: format!(
+                "title:\t{}\nstate:\tOPEN\nlabels:\tsize:S\n--\n{body}",
+                issue.title
+            ),
+        })
+        .with_issue_label_names(1, &["size:S"])
+        .with_issues(vec![issue])
+        .with_repo_files(&[
+            ("src/project.rs", ""),
+            ("src/cli.rs", ""),
+            ("README.md", ""),
+        ])
+        .with_listed_pr(
+            "o/r",
+            ListedPr {
+                number: 2,
+                url: String::new(),
+                head_ref: "issue-2".into(),
+                base_ref: "main".into(),
+                is_cross_repository: false,
+            },
+            PrState::Open,
+        )
+        .with_pr_files(
+            2,
+            PrFiles {
+                changed_files: 1,
+                files: vec![PrFile {
+                    filename: "src/cli.rs".into(),
+                    previous_filename: None,
+                }],
+            },
+        );
+    let mut out = Vec::new();
+    let mut warn = Vec::new();
+
+    let code = task_ready_check::run_judged(
+        &task_ready_check::Options {
+            repo_root: std::env::temp_dir(),
+            repo: Some("o/r".into()),
+            issue: 1,
+            json: false,
+        },
+        &Judge {
+            config_dir: config_dir.path().to_owned(),
+            guard: sbxm::disk::Guard::real(false),
+            time_limit: sbxm::task::ready_judge::TIME_LIMIT,
+            write_files: true,
+            yes: true,
+        },
+        &SbxBackend::LOCAL,
+        &gh,
+        &mut out,
+        &mut warn,
+    );
+
+    let out = String::from_utf8(out).unwrap();
+    let warn = String::from_utf8(warn).unwrap();
+    println!("{out}{warn}");
+    assert_eq!(code.unwrap(), 0, "{out}{warn}");
+    assert!(out.contains("judge (claude, "), "{out}");
+    assert!(out.contains("open_points:"), "{out}");
+    let edited = gh.calls().into_iter().find_map(|c| match c {
+        GhCall::IssueEdit(_, 1, body) => Some(body),
+        _ => None,
+    });
+    let edited = edited.expect("the **Files:** line was written");
+    assert!(edited.contains("**Files:** "), "{edited}");
+    assert!(edited.contains("src/project.rs"), "{edited}");
+    // Nothing of the run is left.
+    let left: Vec<String> = SbxBackend::LOCAL
+        .list()
+        .unwrap()
+        .into_iter()
+        .map(|s| s.name)
+        .filter(|n| n.starts_with("sbxm-ready-issue-1-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
 #[test]
 #[ignore = "needs a logged-in sbx, the openai secret and SBXM_REAL_BASE_DIR"]
 fn codex_headless_against_real_sbx() {
