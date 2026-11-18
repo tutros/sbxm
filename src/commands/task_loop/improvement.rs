@@ -12,7 +12,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::{Loop, first_line};
 use crate::commands::{task_facts, task_queue};
@@ -110,6 +110,16 @@ impl Loop<'_> {
             Ok(data) => data,
             Err(e) => return self.improvement_failed("could not read the run data", &e, warn),
         };
+        if !data.skipped.is_empty() {
+            let line = format!(
+                "the improvement review of {}: `sbxm task facts` skipped {} task records ({}); its \
+                 spec says its run data is incomplete",
+                area.slug,
+                data.skipped.len(),
+                data.skipped[0]
+            );
+            self.improvement_log(&line, warn)?;
+        }
         let spec = match improvement::spec(area, &date, due.since.as_deref(), &data) {
             Ok(spec) => spec,
             Err(e) => return self.improvement_failed("could not write its spec", &e, warn),
@@ -146,7 +156,8 @@ impl Loop<'_> {
         );
         if let Err(e) = queued {
             // A job file written before the error still names the spec, so it stays.
-            if !improvement::queued_spec(&self.base_dir, &name) {
+            // A queue that can't be read can't tell, so the spec stays then too.
+            if matches!(improvement::queued_spec(&self.base_dir, &name), Ok(false)) {
                 let _ = fs::remove_file(&path);
             }
             return self.improvement_failed("could not queue its job", &e, warn);
@@ -164,28 +175,47 @@ impl Loop<'_> {
         self.improvement_row(&line, warn)
     }
 
-    /// The run data since `since`: the table of `sbxm task facts` and this repository's loop-log
-    /// rows ([`improvement::run_data`] keeps those of that day or later).
+    /// The run data since `since`: the table of `sbxm task facts`, with the records it skipped,
+    /// and this repository's loop-log rows ([`improvement::run_data`] keeps those of that day or
+    /// later). A log that can't be read is an error naming it, so nothing goes missing unsaid.
     fn run_data(&self, since: Option<&str>) -> Result<improvement::RunData> {
         let opts = task_facts::Options {
             since: since.unwrap_or("1970-01-01").to_owned(),
             until: None,
             json: false,
         };
-        let (mut facts, mut skipped) = (Vec::new(), Vec::new());
-        task_facts::run(self.config_dir, &opts, self.now(), &mut facts, &mut skipped)?;
+        let (mut facts, mut warned) = (Vec::new(), Vec::new());
+        task_facts::run(self.config_dir, &opts, self.now(), &mut facts, &mut warned)?;
+        let skipped: Vec<String> = String::from_utf8_lossy(&warned)
+            .lines()
+            .map(|l| l.strip_prefix("warning: ").unwrap_or(l).trim().to_owned())
+            .filter(|l| !l.is_empty())
+            .collect();
         let mut logs = Vec::new();
         for (start, path) in loop_log::every(&self.base_dir)? {
-            let Ok(text) = fs::read_to_string(&path) else {
+            let read = fs::read_to_string(&path)
+                .with_context(|| format!("cannot read {}", path.display()))?;
+            if loop_log::repository(&read) != Some(self.repo.as_str()) {
                 continue;
-            };
-            if loop_log::repository(&text) == Some(self.repo.as_str()) {
-                logs.push(LoopLog { start, text });
             }
+            let modified = fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .with_context(|| format!("cannot read when {} was written", path.display()))?;
+            let end = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            logs.push(LoopLog {
+                start,
+                end,
+                text: read,
+            });
         }
+        let anchors = improvement::anchors(&self.base_dir, &self.repo);
         Ok(improvement::run_data(
             &String::from_utf8_lossy(&facts),
+            &skipped,
             &logs,
+            &anchors,
             since,
         ))
     }

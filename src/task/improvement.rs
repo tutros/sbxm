@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 
 use super::jobs::{self, Job, Running};
 use super::record::{self, Kind};
@@ -202,43 +202,64 @@ pub fn next_area(
     }))
 }
 
-/// Whether a spec job of `file` waits in the queue or runs.
-pub fn queued_spec(base_dir: &Path, file: &str) -> bool {
-    let files = jobs::pending(base_dir)
-        .unwrap_or_default()
-        .into_iter()
-        .chain(jobs::left_running(base_dir).unwrap_or_default());
-    files
-        .into_iter()
-        .any(|path| matches!(spec_job(&path), Some(queued) if queued == file))
+/// Whether a spec job of `file` waits in the queue or runs. An error when the queue can't be
+/// read, so a caller never takes "can't tell" for "none".
+pub fn queued_spec(base_dir: &Path, file: &str) -> Result<bool> {
+    for path in queue_files(base_dir)? {
+        if spec_job(&path)?.is_some_and(|queued| queued == file) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
-/// The file of the spec job at `path`; `None` for any other job, or one that can't be read.
-fn spec_job(path: &Path) -> Option<String> {
-    let text = fs::read_to_string(path).ok()?;
-    let value = Running::read(&text).read.job?;
-    match jobs::parse(&value.to_string()).ok()? {
-        Job::Spec { file } => Some(file),
+/// The job files waiting in the queue or running.
+fn queue_files(base_dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut files = jobs::pending(base_dir)?;
+    files.extend(jobs::left_running(base_dir)?);
+    Ok(files)
+}
+
+/// The file of the spec job at `path`; `None` for any other job, a file that isn't a job (the
+/// loop refuses it), or one gone meanwhile (the loop took it). Any other read is an error.
+fn spec_job(path: &Path) -> Result<Option<String>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let Some(value) = Running::read(&text).read.job else {
+        return Ok(None);
+    };
+    Ok(match jobs::parse(&value.to_string()) {
+        Ok(Job::Spec { file }) => Some(file),
         _ => None,
-    }
+    })
 }
 
 /// Whether an improvement job of `repo` is in flight under `base_dir`: a spec job of an
 /// [`SPEC_PREFIX`] file queued or running, or a live spec task of one whose PR GitHub says is
-/// open. A job or record that can't be read counts as none.
+/// open. A job file, or an improvement task's record, that can't be read is an error, not
+/// "none": the check is tried again later rather than queue a second job. A task folder with no
+/// record holds no task.
 pub fn in_flight(base_dir: &Path, repo: &str, github: &dyn GitHubBackend) -> Result<bool> {
-    let files = jobs::pending(base_dir)?
-        .into_iter()
-        .chain(jobs::left_running(base_dir)?);
-    for path in files {
-        if spec_job(&path).is_some_and(|file| file.starts_with(SPEC_PREFIX)) {
+    for path in queue_files(base_dir)? {
+        if spec_job(&path)?.is_some_and(|file| file.starts_with(SPEC_PREFIX)) {
             return Ok(true);
         }
     }
     for dir in record::task_folders(base_dir)? {
-        let Ok(rec) = record::read(&dir.join("task.json")) else {
+        // A task's folder is named by its id: only an improvement task's own record matters.
+        let ours = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(TASK_PREFIX));
+        let path = dir.join("task.json");
+        if !ours || fs::symlink_metadata(&path).is_err() {
             continue;
-        };
+        }
+        let rec = record::read(&path)?;
         if rec.kind != Kind::Spec || rec.repo != repo || !rec.id.starts_with(TASK_PREFIX) {
             continue;
         }
@@ -272,18 +293,49 @@ pub fn findings(text: &str) -> usize {
     text.lines().filter(|l| l.starts_with(FINDING)).count()
 }
 
-/// One loop's log: when the loop started and the file's text.
+/// One loop's log: when the loop started, when its file was last written, and its text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopLog {
     pub start: u64,
+    /// The log file's modified time: no row of it started later.
+    pub end: u64,
     pub text: String,
 }
 
-/// The run data a spec embeds, at most [`CAP`] bytes, and how many rows were left out.
+/// A full time a record holds for a log row's item: `key` is what the row's Issue cell starts
+/// with (`#<issue or PR>`, or a job's label, `job spec <file>`), `at` a stamp of its task's
+/// record or its job's result. Used to tell the day of a row whose clock fits several days.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Anchor {
+    pub key: String,
+    pub at: u64,
+}
+
+/// The run data a spec embeds, at most [`CAP`] bytes, how many rows were left out, and what its
+/// sources skipped (`sbxm task facts`'s warnings), which makes it incomplete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunData {
     pub text: String,
     pub left_out: usize,
+    pub skipped: Vec<String>,
+}
+
+/// When a loop-log row started: a time, or, when neither the log's span nor a record tells the
+/// day, the first and last times its clock could be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum When {
+    At(u64),
+    Unknown { first: u64, last: u64 },
+}
+
+impl When {
+    /// The latest it can be: what the window and the cap go by.
+    fn latest(self) -> u64 {
+        match self {
+            Self::At(at) => at,
+            Self::Unknown { last, .. } => last,
+        }
+    }
 }
 
 /// One row of the run data, with when it happened.
@@ -294,11 +346,20 @@ struct TimedRow {
     line: String,
 }
 
-/// The run data since `since` (`None`: all): `facts`, the Markdown table of `sbxm task facts`,
-/// and the table rows of `logs` from the start of that day (UTC), each prefixed with its loop's
-/// start. When it is longer than
-/// [`CAP`] bytes, the oldest rows of either part are left out until it fits.
-pub fn run_data(facts: &str, logs: &[LoopLog], since: Option<&str>) -> RunData {
+/// The run data since `since` (`None`: all): `facts`, the Markdown table of `sbxm task facts`
+/// (with `skipped`, its warnings), and the table rows of `logs` that started on that day (UTC) or
+/// later, each with its loop's start and its own day. A row's day comes from its clock between
+/// its loop's start and its log's last write, and when that spans more than a day, from the
+/// nearest of `anchors` for its item; a row neither tells is kept with its day shown unknown,
+/// never guessed. When the whole is longer than [`CAP`] bytes, the oldest rows of either part are
+/// left out until it fits.
+pub fn run_data(
+    facts: &str,
+    skipped: &[String],
+    logs: &[LoopLog],
+    anchors: &[Anchor],
+    since: Option<&str>,
+) -> RunData {
     let window = since.map_or_else(|| "all".to_owned(), |d| format!("since {d}"));
     let from = since.and_then(parse_day).unwrap_or(0);
     let mut rows = Vec::new();
@@ -326,21 +387,24 @@ pub fn run_data(facts: &str, logs: &[LoopLog], since: Option<&str>) -> RunData {
         let lines: Vec<&str> = log.text.lines().collect();
         if let Some(sep) = lines.iter().position(|l| l.starts_with("|---")) {
             let head = sep.checked_sub(1).map_or("", |i| lines[i]);
-            log_header = format!("| Loop started {head}\n|---{}\n", lines[sep]);
+            log_header = format!("| Loop started | Day {head}\n|---|---{}\n", lines[sep]);
         }
         for line in table_rows(&log.text) {
-            let at = cells(line)
-                .get(4)
-                .and_then(|clock| clock_at(log.start, clock))
-                .unwrap_or(log.start);
+            let when = when(log, line, anchors);
             // A loop that started before the window logs into it too: only its rows from then.
-            if at < from {
+            if when.latest() < from {
                 continue;
             }
+            let day = match when {
+                When::At(at) => day_of(at),
+                When::Unknown { first, last } => {
+                    format!("unknown ({} to {})", day_of(first), day_of(last))
+                }
+            };
             rows.push(TimedRow {
-                at,
+                at: when.latest(),
                 part: 1,
-                line: format!("| {stamp} {line}\n"),
+                line: format!("| {stamp} | {day} {line}\n"),
             });
         }
     }
@@ -349,7 +413,21 @@ pub fn run_data(facts: &str, logs: &[LoopLog], since: Option<&str>) -> RunData {
         since.unwrap_or("1970-01-01")
     );
     let logs_title = format!("\n### Loop-log rows ({window}, each with its loop's start)\n\n");
-    let fixed = facts_title.len() + facts_header.len() + logs_title.len() + log_header.len();
+    let render = |parts: &[String; 2]| -> String {
+        let mut text = facts_title.clone();
+        text.push_str(&facts_header);
+        text.push_str(&parts[0]);
+        text.push_str(&logs_title);
+        if log_header.is_empty() {
+            text.push_str("No loop log of this repository in the window.\n");
+        } else {
+            text.push_str(&log_header);
+            text.push_str(&parts[1]);
+        }
+        text
+    };
+    // The text around the rows, measured as it is rendered; each row adds its own bytes.
+    let fixed = render(&[String::new(), String::new()]).len();
     // Newest first, kept while they fit; a stable sort keeps a part's own order on a tie.
     let mut order: Vec<usize> = (0..rows.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse((rows[i].at, i)));
@@ -370,17 +448,66 @@ pub fn run_data(facts: &str, logs: &[LoopLog], since: Option<&str>) -> RunData {
     for i in by_time {
         parts[rows[i].part].push_str(&rows[i].line);
     }
-    let mut text = facts_title;
-    text.push_str(&facts_header);
-    text.push_str(&parts[0]);
-    text.push_str(&logs_title);
-    if log_header.is_empty() {
-        text.push_str("No loop log of this repository in the window.\n");
-    } else {
-        text.push_str(&log_header);
-        text.push_str(&parts[1]);
+    RunData {
+        text: render(&parts),
+        left_out,
+        skipped: skipped.to_vec(),
     }
-    RunData { text, left_out }
+}
+
+/// When the loop-log row `line` of `log` started (see [`run_data`]).
+fn when(log: &LoopLog, line: &str, anchors: &[Anchor]) -> When {
+    let unknown = When::Unknown {
+        first: log.start,
+        last: log.end.max(log.start),
+    };
+    let cells = cells(line);
+    let Some(first) = cells.get(4).and_then(|clock| clock_at(log.start, clock)) else {
+        return unknown;
+    };
+    let candidates: Vec<u64> = (0..)
+        .map(|k| first + k * DAY)
+        .take_while(|&t| t <= log.end)
+        .collect();
+    match candidates.as_slice() {
+        [] => unknown,
+        [only] => When::At(*only),
+        [.., last] => {
+            let key = cells.get(1).map(|item| item_key(item)).unwrap_or_default();
+            let near = anchors
+                .iter()
+                .filter(|a| !key.is_empty() && a.key == key)
+                .map(|a| a.at)
+                .collect::<Vec<_>>();
+            if near.is_empty() {
+                return When::Unknown { first, last: *last };
+            }
+            let distance = |t: u64| {
+                near.iter()
+                    .map(|&a| a.abs_diff(t))
+                    .min()
+                    .unwrap_or(u64::MAX)
+            };
+            When::At(
+                *candidates
+                    .iter()
+                    .min_by_key(|&&t| distance(t))
+                    .expect("two or more candidates"),
+            )
+        }
+    }
+}
+
+/// The key of a log row's Issue cell an [`Anchor`] is looked up by: `#<n>` of `#<n> <title>`,
+/// else the whole cell (a job's label).
+fn item_key(item: &str) -> String {
+    match item.strip_prefix('#') {
+        Some(rest) => {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            format!("#{digits}")
+        }
+        None => item.to_owned(),
+    }
 }
 
 /// The table rows of `text`: the `|` lines after its first separator line.
@@ -391,15 +518,83 @@ fn table_rows(text: &str) -> impl Iterator<Item = &str> {
         .filter(|l| l.starts_with('|'))
 }
 
-/// When a row's `HH:MM:SS` clock happened, in a loop that started at `start`: the first such
-/// time at or after the start, so a row past midnight falls on the next day.
+/// The first time at or after `start` whose clock is a row's `HH:MM:SS`.
 fn clock_at(start: u64, clock: &str) -> Option<u64> {
     let mut parts = clock.split(':').map(|p| p.parse::<u64>().ok());
     let (h, m, s) = (parts.next()??, parts.next()??, parts.next()??);
+    if parts.next().is_some() || h > 23 || m > 59 || s > 59 {
+        return None;
+    }
     let of_day = h * 3600 + m * 60 + s;
     let start_of_day = start % DAY;
     Some(start - start_of_day + of_day + if of_day < start_of_day { DAY } else { 0 })
 }
+
+/// The [`Anchor`]s under `base_dir` for `repo`'s loop-log rows: every stage stamp of each task
+/// record, live or archived, keyed by its issue (`#<n>`) and its PR, and each finished job's
+/// start and end, keyed by its label. They only help tell a row's day: a record or result that
+/// can't be read gives none, and such a row is then shown with its day unknown.
+pub fn anchors(base_dir: &Path, repo: &str) -> Vec<Anchor> {
+    let mut found = Vec::new();
+    let mut dirs = record::task_folders(base_dir).unwrap_or_default();
+    if let Ok(entries) = fs::read_dir(super::merged::archive_root(base_dir)) {
+        dirs.extend(entries.flatten().map(|e| e.path()));
+    }
+    for dir in dirs {
+        let Ok(rec) = record::read(&dir.join("task.json")) else {
+            continue;
+        };
+        if rec.repo != repo {
+            continue;
+        }
+        let mut keys = Vec::new();
+        if rec.kind == Kind::Issue {
+            keys.push(format!("#{}", rec.number));
+        }
+        if let Some(pr) = rec.pr.as_deref().and_then(queue::pr_number) {
+            keys.push(format!("#{pr}"));
+        }
+        for stamp in rec.stages.iter().filter_map(|s| parse_timestamp(&s.at)) {
+            for key in &keys {
+                found.push(Anchor {
+                    key: key.clone(),
+                    at: stamp,
+                });
+            }
+        }
+    }
+    let done = fs::read_dir(jobs::done_dir(base_dir))
+        .map(|entries| entries.flatten().map(|e| e.path()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for path in done {
+        let Some(result) = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<jobs::JobResult>(&text).ok())
+        else {
+            continue;
+        };
+        let Some(job) = result
+            .read
+            .job
+            .as_ref()
+            .and_then(|value| jobs::parse(&value.to_string()).ok())
+        else {
+            continue;
+        };
+        for stamp in [&result.started_at, &result.ended_at] {
+            if let Some(at) = parse_timestamp(stamp) {
+                found.push(Anchor {
+                    key: job.label(),
+                    at,
+                });
+            }
+        }
+    }
+    found
+}
+
+/// How many of `sbxm task facts`'s warnings a spec names before it counts the rest.
+const SKIPPED_NAMED: usize = 10;
 
 /// The spec of `area`'s review on `date`, the embedded `prompts/improvement-review.md` filled in.
 pub fn spec(area: &Area, date: &str, since: Option<&str>, data: &RunData) -> Result<String> {
@@ -407,14 +602,32 @@ pub fn spec(area: &Area, date: &str, since: Option<&str>, data: &RunData) -> Res
         || "the first task (no improvement review yet)".to_owned(),
         str::to_owned,
     );
-    let left_out = if data.left_out == 0 {
+    let mut left_out = if data.left_out == 0 && data.skipped.is_empty() {
         format!("All the run data since {since_text} is below.")
+    } else if data.left_out == 0 {
+        "Every row read is below, but the run data is incomplete.".to_owned()
     } else {
         format!(
             "The run data is capped at 30 KB: the {} oldest rows were left out, the newest kept.",
             data.left_out
         )
     };
+    if !data.skipped.is_empty() {
+        left_out.push_str(&format!(
+            " `sbxm task facts` skipped {} task records it could not read, so their tasks are \
+             missing:",
+            data.skipped.len()
+        ));
+        for line in data.skipped.iter().take(SKIPPED_NAMED) {
+            left_out.push_str(&format!("\n- {line}"));
+        }
+        if data.skipped.len() > SKIPPED_NAMED {
+            left_out.push_str(&format!(
+                "\n- and {} more",
+                data.skipped.len() - SKIPPED_NAMED
+            ));
+        }
+    }
     prompts::render_known(
         TEMPLATE_NAME,
         TEMPLATE,

@@ -214,12 +214,24 @@ struct Ran {
 
 /// Runs a `--wait` loop on an empty queue from [`start`], stopped after `waits` idle waits.
 fn run_loop(f: &Fixture, gh: &FakeGitHub, notifier: &FakeNotifier, waits: usize) -> Ran {
+    run_loop_between(f, gh, notifier, waits, &|_| {})
+}
+
+/// [`run_loop`], `between` running at each sleep with the number of sleeps so far.
+fn run_loop_between(
+    f: &Fixture,
+    gh: &FakeGitHub,
+    notifier: &FakeNotifier,
+    waits: usize,
+    between: &dyn Fn(usize),
+) -> Ran {
     let clock = Cell::new(start());
     let sleeps = Cell::new(0usize);
     let now = || clock.get();
     let sleep = |d: Duration| {
         sleeps.set(sleeps.get() + 1);
         clock.set(clock.get() + d.as_secs());
+        between(sleeps.get());
     };
     let stop = || sleeps.get() >= waits;
     let env = Env {
@@ -720,6 +732,17 @@ fn loop_log_with(f: &Fixture, repo: &str, started: &str, issue: u32) {
         idle_before: None,
     };
     queue::append_row(&path, repo, &row).unwrap();
+    written_at(&path, at(started) + 120);
+}
+
+/// Sets `path`'s modified time to `secs`, as when the loop last wrote it.
+fn written_at(path: &Path, secs: u64) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(secs))
+        .unwrap();
 }
 
 #[test]
@@ -749,7 +772,7 @@ fn task_loop_improvement_due_the_spec_embeds_the_task_facts_and_loop_log_rows_si
         "a task before the window: {spec}"
     );
     assert!(
-        spec.contains("| 2026-11-17T09:00:00Z | 1 | #81 issue 81 |"),
+        spec.contains("| 2026-11-17T09:00:00Z | 2026-11-17 | 1 | #81 issue 81 |"),
         "{spec}"
     );
     assert!(!spec.contains("#82"), "a loop before the window: {spec}");
@@ -758,4 +781,88 @@ fn task_loop_improvement_due_the_spec_embeds_the_task_facts_and_loop_log_rows_si
         spec.contains("All the run data since 2026-11-16 is below."),
         "{spec}"
     );
+}
+
+// --- Review M-2 of issue 715: a failed read of the run data ---
+
+/// A posted loop log of `REPO` started 2026-11-17T09:00 that isn't valid UTF-8.
+fn broken_log(f: &Fixture) -> PathBuf {
+    let path = loop_log::path(&f.base(), at("2026-11-17T09:00:00Z"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut text = b"# Loop log\n\nRepository: o/r\n\n".to_vec();
+    text.push(0xff);
+    fs::write(&path, text).unwrap();
+    // Posted, so the loop's start doesn't post it late.
+    loop_log::mark_posted(&path).unwrap();
+    path
+}
+
+#[test]
+fn task_loop_improvement_due_a_log_that_cant_be_read_queues_nothing_and_names_it() {
+    let f = fixture();
+    let log = broken_log(&f);
+    let gh = github(Some(AREAS), &all_reviewed(), merged(20));
+
+    let ran = run_loop(&f, &gh, &FakeNotifier::default(), 1);
+
+    assert!(f.queued().is_empty());
+    assert!(fs::read_dir(f.specs()).unwrap().next().is_none(), "no spec");
+    let notes = f.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let name = log.file_name().unwrap().to_str().unwrap();
+    assert!(notes[0].contains(name), "{notes:?}");
+    assert!(notes[0].contains("tried again in an hour"), "{notes:?}");
+    assert!(ran.warn.contains(name), "{}", ran.warn);
+}
+
+#[test]
+fn task_loop_improvement_due_a_repaired_log_waits_for_the_next_hour_then_queues() {
+    let f = fixture();
+    let log = broken_log(&f);
+    let gh = github(Some(AREAS), &all_reviewed(), merged(20));
+    let repair = |sleeps: usize| {
+        if sleeps == 1 {
+            fs::write(&log, "# Loop log\n\nRepository: o/r\n\n").unwrap();
+        }
+    };
+
+    let ran = run_loop_between(&f, &gh, &FakeNotifier::default(), TWO_CHECKS - 1, &repair);
+    // The loop takes a job it queued at its next pass, so its own line tells.
+    assert!(
+        !ran.out.contains("improvement review of beta queued"),
+        "no check before the hour: {}",
+        ran.out
+    );
+
+    let f = fixture();
+    let log = broken_log(&f);
+    let repair = |sleeps: usize| {
+        if sleeps == 1 {
+            fs::write(&log, "# Loop log\n\nRepository: o/r\n\n").unwrap();
+        }
+    };
+    let ran = run_loop_between(&f, &gh, &FakeNotifier::default(), TWO_CHECKS, &repair);
+    assert!(
+        ran.out.contains("improvement review of beta queued"),
+        "{}\n{}",
+        ran.out,
+        ran.warn
+    );
+}
+
+#[test]
+fn task_loop_improvement_due_a_record_task_facts_skips_makes_the_spec_say_incomplete() {
+    let f = fixture();
+    let dir = record::tasks_root(&f.base()).join("issue-99");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("task.json"), "not json").unwrap();
+    let gh = github(Some(AREAS), &all_reviewed(), merged(20));
+
+    let ran = run_loop(&f, &gh, &FakeNotifier::default(), 1);
+
+    let spec = fs::read_to_string(f.specs().join(spec_name("beta"))).unwrap();
+    assert!(!spec.contains("All the run data"), "{spec}");
+    assert!(spec.contains("the run data is incomplete"), "{spec}");
+    assert!(spec.contains("issue-99"), "{spec}");
+    assert!(ran.warn.contains("skipped 1 task records"), "{}", ran.warn);
 }
