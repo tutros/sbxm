@@ -2,8 +2,11 @@
 //! PRs until the open issue labelled [`LABEL`] holds [`SIZE`] merge comments, then hands them back
 //! to the user until the retro decides. Its record is that issue's comments, read each time: one
 //! per medium PR the loop armed that merged (how it was armed, its `hold` labellings, minutes from
-//! the clean review to the merge, how late the arming was) and one per break. sbxm keeps no state
-//! of its own for it.
+//! the clean review to the merge, how late the arming was) and one per break. The only state sbxm
+//! keeps for it is each arming, in its PR's task record (`medium_armed`, issue 712), so a
+//! restarted loop still posts the merge comment and watches the merge for a break.
+
+use serde::{Deserialize, Serialize};
 
 use crate::github::{GitHubBackend, LabelEvent};
 use crate::task::window::{GO_LABEL, HOLD_LABEL};
@@ -21,7 +24,8 @@ const MERGE_MARK: &str = "Medium trial: merge";
 const BREAK_MARK: &str = "Medium trial: break";
 
 /// What set a medium PR's arming off (#460 answer 5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum How {
     /// The user labelled it `go`.
     Go,
@@ -29,8 +33,9 @@ pub enum How {
     WindowEnd,
 }
 
-/// A medium PR the loop armed, as the trial records it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A medium PR the loop armed, as the trial records it, and as its task's `task.json` keeps it
+/// (`medium_armed`, issue 712) until the trial is done with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Armed {
     pub how: How,
     /// Minutes from the window's end, or from `go` being labelled, to the arming (answer 1).
