@@ -18,8 +18,15 @@ Judge the issue against these readiness rules:
    from `paths.txt`, each in backticks, separated by commas, and a path to add marked `(new)`. Name the files an
    open pull request in `open-prs.md` also changes when the issue needs them: overlap is worth knowing. The line is
    advice, never required.
-5. **The size fits.** `size:S` is a small change in one or two files, `size:M` a feature of a few files with its
-   tests, `size:L` a change across many files or a new subsystem. Say whether the issue's size fits its scope.
+5. **The size fits.** Judge the size from what the issue shows, by the repository's table:
+
+   | Size | Looks like |
+   |---|---|
+   | `size:S` | One module, no new state or file format, no open points |
+   | `size:M` | One command or feature, with tests and docs across a few files |
+   | `size:L` | The state machine, `task.json` or the git trust boundary changes, or three or more open points; consider splitting it |
+
+   Say whether the issue's size fits its scope.
 
 Your final reply must be exactly these five sections, in this order, each starting at the beginning of a line, and
 nothing else (no preamble, no code fence). Write `none` for a section with nothing to report.
@@ -40,4 +47,4 @@ size: fits
 - `boundary_cases:` starts with `needed`, `not needed` or `listed` (needed and already in the issue), then the cases
   the issue is missing, one per line.
 - `acceptance_vs_answers:` lists each mismatch, or says `none`.
-- `size:` is `fits`, or the size you suggest and why (`L: it touches every command`).
+- `size:` is `fits`, or the size you suggest and why (for example `L: it changes the state machine`).

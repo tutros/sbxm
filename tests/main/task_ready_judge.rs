@@ -178,6 +178,24 @@ fn ready_judge_the_prompt_states_the_readiness_rules_and_names_its_inputs() {
     }
 }
 
+#[test]
+fn ready_judge_the_prompt_sizes_by_the_repositorys_table() {
+    // The `sdlc-code-review` skill's "Size" table, section 8 (review S-1).
+    let prompt = ready_judge::PROMPT;
+    for needle in [
+        "One module, no new state or file format, no open points",
+        "One command or feature, with tests and docs across a few files",
+        "The state machine, `task.json` or the git trust boundary changes, or three or more open \
+         points",
+    ] {
+        assert!(prompt.contains(needle), "the prompt doesn't say: {needle}");
+    }
+    assert!(
+        !prompt.contains("one or two files"),
+        "the old size rule is gone"
+    );
+}
+
 // The command: `sbxm task ready-check --issue N --judge [--write-files [--yes]]`.
 
 use std::path::Path;
