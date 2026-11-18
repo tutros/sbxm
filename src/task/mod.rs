@@ -23,6 +23,7 @@ pub mod pipeline;
 pub mod pr_fix;
 pub mod prompts;
 pub mod queue;
+pub mod ready;
 pub mod real_check;
 pub mod record;
 pub mod repo;

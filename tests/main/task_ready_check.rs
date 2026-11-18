@@ -1,0 +1,295 @@
+//! Issue 725, decision 331(1): the readiness rules (`src/task/ready.rs`) one by one with their
+//! boundary cases, then `sbxm task ready-check --issue N [--json]`.
+
+use crate::common;
+
+use common::task_fixture::open_issue;
+use sbxm::github::Issue;
+use sbxm::task::ready::{self, Status, Verdict};
+
+/// A body every rule passes, for a test that changes one part of it.
+const READY_BODY: &str = "**Size:** M: a reason.\n\n\
+**Depends on:** none\n\n\
+## Acceptance criteria\n\n\
+- [ ] It works\n";
+
+fn ready_issue(body: &str) -> Issue {
+    open_issue(7, &["ready-for-worker", "size:M"], body)
+}
+
+fn verdict(issue: &Issue, rule: &str) -> Verdict {
+    ready::body_rules(issue)
+        .into_iter()
+        .find(|v| v.rule == rule)
+        .unwrap_or_else(|| panic!("no verdict for rule {rule}"))
+}
+
+fn status(issue: &Issue, rule: &str) -> Status {
+    verdict(issue, rule).status
+}
+
+#[test]
+fn a_ready_body_passes_every_rule() {
+    let issue = ready_issue(READY_BODY);
+    let verdicts = ready::body_rules(&issue);
+    let rules: Vec<&str> = verdicts.iter().map(|v| v.rule).collect();
+    assert_eq!(
+        rules,
+        [
+            "size",
+            "depends-on",
+            "real-check",
+            "open-points",
+            "acceptance",
+            "files"
+        ]
+    );
+    for v in &verdicts {
+        assert!(
+            matches!(v.status, Status::Pass | Status::Skip),
+            "{} gave {:?}: {}",
+            v.rule,
+            v.status,
+            v.reason
+        );
+    }
+    assert!(ready::failures(&issue).is_empty());
+}
+
+// Rule 1: one size.
+
+#[test]
+fn size_one_label_and_a_matching_line_passes() {
+    assert_eq!(status(&ready_issue(READY_BODY), "size"), Status::Pass);
+}
+
+#[test]
+fn size_a_label_and_a_different_line_fails() {
+    let body = READY_BODY.replace("**Size:** M", "**Size:** L");
+    let v = verdict(&ready_issue(&body), "size");
+    assert_eq!(v.status, Status::Fail);
+    assert!(
+        v.reason.contains("size:M") && v.reason.contains('L'),
+        "{}",
+        v.reason
+    );
+}
+
+#[test]
+fn size_a_label_and_no_line_fails() {
+    let body = READY_BODY.replace("**Size:** M: a reason.\n", "");
+    let v = verdict(&ready_issue(&body), "size");
+    assert_eq!(v.status, Status::Fail);
+    assert!(v.reason.contains("**Size:**"), "{}", v.reason);
+}
+
+#[test]
+fn size_no_label_fails() {
+    let issue = open_issue(7, &["ready-for-worker"], READY_BODY);
+    let v = verdict(&issue, "size");
+    assert_eq!(v.status, Status::Fail);
+    assert!(v.reason.contains("no size label"), "{}", v.reason);
+}
+
+#[test]
+fn size_two_labels_fail() {
+    let issue = open_issue(7, &["size:S", "size:M"], READY_BODY);
+    let v = verdict(&issue, "size");
+    assert_eq!(v.status, Status::Fail);
+    assert!(
+        v.reason.contains("more than one size label"),
+        "{}",
+        v.reason
+    );
+}
+
+// Rule 2: `**Depends on:**`.
+
+fn depends(value: Option<&str>) -> Verdict {
+    let line = value.map_or_else(String::new, |v| format!("**Depends on:**{v}\n"));
+    let body = READY_BODY.replace("**Depends on:** none\n", &line);
+    verdict(&ready_issue(&body), "depends-on")
+}
+
+#[test]
+fn depends_on_missing_fails() {
+    let v = depends(None);
+    assert_eq!(v.status, Status::Fail);
+    assert!(v.reason.contains("no **Depends on:** line"), "{}", v.reason);
+}
+
+#[test]
+fn depends_on_none_passes() {
+    assert_eq!(depends(Some(" none")).status, Status::Pass);
+    assert_eq!(depends(Some(" None.")).status, Status::Pass);
+}
+
+#[test]
+fn depends_on_a_list_of_numbers_passes() {
+    assert_eq!(depends(Some(" #1, #2")).status, Status::Pass);
+}
+
+#[test]
+fn depends_on_a_number_with_text_passes() {
+    assert_eq!(depends(Some(" #1 (why)")).status, Status::Pass);
+    assert_eq!(
+        depends(Some(" #709, #715 (both change it)")).status,
+        Status::Pass
+    );
+}
+
+#[test]
+fn depends_on_malformed_fails() {
+    for value in [" PR #377", " soon", "", " #", " #1, soon", " nonetheless"] {
+        let v = depends(Some(value));
+        assert_eq!(v.status, Status::Fail, "{value:?}");
+        assert!(v.reason.contains("Depends on"), "{}", v.reason);
+    }
+}
+
+// Rule 3: `**Real check:**`.
+
+#[test]
+fn real_check_absent_is_a_skip() {
+    assert_eq!(status(&ready_issue(READY_BODY), "real-check"), Status::Skip);
+}
+
+#[test]
+fn real_check_with_a_value_passes() {
+    let body = format!("{READY_BODY}\n**Real check:** run `just real-test`\n");
+    assert_eq!(status(&ready_issue(&body), "real-check"), Status::Pass);
+}
+
+#[test]
+fn real_check_with_the_check_on_the_next_line_passes() {
+    let body = format!("{READY_BODY}\n**Real check:**\n- run it by hand\n");
+    assert_eq!(status(&ready_issue(&body), "real-check"), Status::Pass);
+}
+
+#[test]
+fn real_check_empty_fails() {
+    let body = format!("{READY_BODY}\n**Real check:**   \n");
+    let v = verdict(&ready_issue(&body), "real-check");
+    assert_eq!(v.status, Status::Fail);
+    assert!(v.reason.contains("empty"), "{}", v.reason);
+}
+
+// Rule 4: nothing left open.
+
+#[test]
+fn open_points_absent_passes() {
+    assert_eq!(
+        status(&ready_issue(READY_BODY), "open-points"),
+        Status::Pass
+    );
+}
+
+#[test]
+fn open_points_to_decide_in_a_heading_fails() {
+    let body = format!("{READY_BODY}\n## To decide when building\n\nsomething\n");
+    let v = verdict(&ready_issue(&body), "open-points");
+    assert_eq!(v.status, Status::Fail);
+    assert!(v.reason.contains("to decide"), "{}", v.reason);
+}
+
+#[test]
+fn open_points_to_decide_in_lower_case_fails() {
+    let body = format!("{READY_BODY}\nThe name is to decide.\n");
+    assert_eq!(status(&ready_issue(&body), "open-points"), Status::Fail);
+}
+
+#[test]
+fn open_points_an_open_line_fails() {
+    let body = format!("{READY_BODY}\n**Open:** which flag name\n");
+    let v = verdict(&ready_issue(&body), "open-points");
+    assert_eq!(v.status, Status::Fail);
+    assert!(v.reason.contains("**Open:**"), "{}", v.reason);
+}
+
+#[test]
+fn open_points_an_open_points_heading_fails() {
+    let body = format!("{READY_BODY}\n## Open points\n\n1. a\n");
+    assert_eq!(status(&ready_issue(&body), "open-points"), Status::Fail);
+}
+
+// Rule 5: acceptance criteria.
+
+#[test]
+fn acceptance_a_heading_with_boxes_passes() {
+    assert_eq!(status(&ready_issue(READY_BODY), "acceptance"), Status::Pass);
+}
+
+#[test]
+fn acceptance_a_heading_with_no_boxes_fails() {
+    let body = READY_BODY.replace("- [ ] It works\n", "It works.\n");
+    let v = verdict(&ready_issue(&body), "acceptance");
+    assert_eq!(v.status, Status::Fail);
+    assert!(v.reason.contains("no `- [ ]` box"), "{}", v.reason);
+}
+
+#[test]
+fn acceptance_boxes_under_a_later_heading_dont_count() {
+    let body = READY_BODY.replace(
+        "- [ ] It works\n",
+        "It works.\n\n## Boundary cases\n\n- [ ] one\n",
+    );
+    assert_eq!(status(&ready_issue(&body), "acceptance"), Status::Fail);
+}
+
+#[test]
+fn acceptance_no_heading_fails() {
+    let body = READY_BODY.replace("## Acceptance criteria\n", "");
+    let v = verdict(&ready_issue(&body), "acceptance");
+    assert_eq!(v.status, Status::Fail);
+    assert!(
+        v.reason.contains("no Acceptance criteria heading"),
+        "{}",
+        v.reason
+    );
+}
+
+// Rule 7: `**Files:**`, advice only.
+
+#[test]
+fn files_absent_is_a_skip() {
+    assert_eq!(status(&ready_issue(READY_BODY), "files"), Status::Skip);
+}
+
+#[test]
+fn files_a_list_of_backticked_paths_passes() {
+    let body = format!("{READY_BODY}\n**Files:** `src/cli.rs`, `src/task/ready.rs` (new)\n");
+    assert_eq!(status(&ready_issue(&body), "files"), Status::Pass);
+}
+
+#[test]
+fn files_a_malformed_line_warns() {
+    for line in [
+        "src/cli.rs, src/main.rs",
+        "`src/cli.rs` and `src/main.rs`",
+        "",
+    ] {
+        let body = format!("{READY_BODY}\n**Files:** {line}\n");
+        let issue = ready_issue(&body);
+        let v = verdict(&issue, "files");
+        assert_eq!(v.status, Status::Warn, "{line:?}");
+        // A warn never makes the issue unready.
+        assert!(ready::failures(&issue).is_empty());
+    }
+}
+
+#[test]
+fn failures_name_every_failed_rule() {
+    let issue = open_issue(7, &[], "nothing here");
+    let failures = ready::failures(&issue);
+    assert_eq!(failures.len(), 3, "{failures:?}");
+    assert!(failures[0].contains("no size label"), "{failures:?}");
+}
+
+#[test]
+fn a_fenced_example_is_not_read() {
+    let body =
+        format!("{READY_BODY}\n```\n**Open:** an example\n**Real check:**\nto decide\n```\n");
+    let issue = ready_issue(&body);
+    assert_eq!(status(&issue, "open-points"), Status::Pass);
+    assert_eq!(status(&issue, "real-check"), Status::Skip);
+}
