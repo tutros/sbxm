@@ -37,6 +37,11 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
   shared doc), and compare them with every open PR and every other issue in the same run. Two that edit the same spot
   either go to one worker as one spec (decision 286) or run one after the other, the second started only after the
   first merges. They never run side by side.
+- Decision 331: **overlap is handled after the work, by the loop.** A task whose changed files overlap an open loop
+  PR, a running resolve or fix, or another task already in review waits after its gates and before its review, then
+  merges the base and runs its gates again before its one review. Decision 296's manual check stays for issues run by
+  hand. A `**Files:**` line in the body is advice only. Once `sbxm task ready-check` exists, run it on each issue
+  before labelling.
 - Decision 295: **re-check a `ready-for-worker` issue right before its task starts** (and before an unattended
   list): read the body back whole; check every file, function, flag and behavior it names against today's `main`;
   list the PRs merged since it was labeled that touch its area (`gh pr list --state merged --search
