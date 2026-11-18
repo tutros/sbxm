@@ -484,6 +484,13 @@ pub struct Record {
     /// records and until then.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub repeat_tolerated: bool,
+    /// How the loop armed the task's medium-risk PR, as the medium trial records it (issue 712):
+    /// written when `task loop` arms it, dropped when the loop disarms it or is done with its
+    /// merge (comment posted, merge commit no longer watched). A restarted loop rebuilds what it
+    /// watches from it. Absent for a PR the loop didn't arm (one armed by hand isn't counted) and
+    /// in older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium_armed: Option<crate::task::trial::Armed>,
     /// Set when the task continues an open PR's branch; absent in older records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continues: Option<PrBranch>,
@@ -710,6 +717,7 @@ impl Record {
             runs: Vec::new(),
             should_fix_round: false,
             repeat_tolerated: false,
+            medium_armed: None,
             continues: None,
             related: Vec::new(),
             notes: Vec::new(),
