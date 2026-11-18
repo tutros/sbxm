@@ -274,6 +274,10 @@ fn loop_view(
         (looping::Lock::Running(_), Some(file)) => looping::NextCheck::of(file, now),
         _ => None,
     };
+    let retro_due = match (&lock, &file) {
+        (looping::Lock::Running(_), Some(file)) => file.retro_due.clone(),
+        _ => None,
+    };
     let dead = match (&lock, &file) {
         (looping::Lock::Stale(_), Some(file)) => Some(looping::dead(base, file, probe)),
         _ => None,
@@ -287,6 +291,7 @@ fn loop_view(
         cloud_first: false,
         dead,
         next_check,
+        retro_due,
     }
 }
 

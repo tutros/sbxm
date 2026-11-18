@@ -611,6 +611,7 @@ fn plant_loop_lock(f: &Fixture) {
         }),
         adopted: Vec::new(),
         idle_check: None,
+        retro_due: None,
     };
     let path = queue::lock_path(&f.env.base_dir());
     fs::create_dir_all(path.parent().unwrap()).unwrap();

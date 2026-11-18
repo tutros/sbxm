@@ -26,6 +26,7 @@ pub mod real_check;
 pub mod record;
 pub mod repo;
 pub mod resume;
+pub mod retro;
 pub mod review;
 pub mod rewrite;
 pub mod risk;

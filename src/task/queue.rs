@@ -59,6 +59,11 @@ pub struct LockFile {
     /// lock an older binary wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_check: Option<String>,
+    /// The line `sbxm status` shows while the loop's last retro check found a retro due (issue
+    /// 714, decision 330(4)): `retro due: 12 PRs since 2026-11-16`. Absent when it isn't due, and
+    /// in a lock an older binary wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retro_due: Option<String>,
 }
 
 /// A child a loop adopted (issue 643): its issue's task, and the owner its record names, the dead
