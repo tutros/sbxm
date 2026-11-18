@@ -758,3 +758,55 @@ fn ready_judge_a_secret_the_profile_names_but_sbx_lacks_fails_before_any_sandbox
     );
     assert_eq!(stored.result.unwrap(), 0);
 }
+
+// The machine's sandbox slot (decision 304): held from before the create until the clean-up ends.
+
+/// Runs the judge with `sandbox_slots = 1` and `backend`, recording whether the slot was held
+/// when the sandbox's removal began; the slot is free again once the command returns.
+fn slot_during_removal(env: &Env, backend: FakeBackend) -> (Ran, Vec<bool>) {
+    use crate::common::slot;
+    let held: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let record = held.clone();
+    let file = slot::slot_file(env);
+    let backend = backend.with_remove_hook(move |_| record.lock().unwrap().push(file.exists()));
+    let judge = Judge {
+        guard: slot::free(env),
+        ..judge(env, false, false)
+    };
+    let result = ran(env, &judge, &backend, &github(READY_BODY));
+    assert!(
+        slot::holder(env).is_none(),
+        "the slot is given back at the end"
+    );
+    let held = held.lock().unwrap().clone();
+    (result, held)
+}
+
+#[test]
+fn ready_judge_the_slot_is_held_while_a_completed_runs_sandbox_is_removed() {
+    let env = env();
+    let (ran, held) = slot_during_removal(&env, backend_answering(FULL));
+    assert_eq!(ran.result.unwrap(), 0);
+    assert_eq!(held, [true]);
+}
+
+#[test]
+fn ready_judge_the_slot_is_held_while_a_failed_creates_sandbox_is_removed() {
+    let env = env();
+    let (ran, held) = slot_during_removal(&env, FakeBackend::failing_create());
+    assert!(ran.result.is_err());
+    assert_eq!(held, [true]);
+}
+
+#[test]
+fn ready_judge_the_slot_is_held_while_a_timed_out_runs_sandbox_is_removed() {
+    let env = env();
+    let backend = FakeBackend::default().with_default_exec_output(ExecOutput {
+        stdout: String::new(),
+        stderr: "timeout: sending signal TERM to command 'claude'\n".into(),
+        exit_code: Some(124),
+    });
+    let (ran, held) = slot_during_removal(&env, backend);
+    assert!(ran.result.is_err());
+    assert_eq!(held, [true]);
+}

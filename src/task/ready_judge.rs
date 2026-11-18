@@ -296,7 +296,7 @@ pub fn run(
         let harness_kits = kit_set
             .get(HARNESS)
             .context("no kits were built for claude")?;
-        let _slot = crate::slot::take(&global, &guard.slot, None, warn)?;
+        made.slot = Some(crate::slot::take(&global, &guard.slot, None, warn)?);
         made.folder(&workspace)?;
         for (name, text) in [
             (PROMPT_FILE, PROMPT),
@@ -376,6 +376,8 @@ pub fn run(
             }
         }
     }
+    // The slot is given back only now, once the sandbox is gone (decision 304).
+    drop(made);
     match (result, removed) {
         (Ok(reply), Ok(())) => Ok(reply),
         (Err(e), Ok(())) => Err(e),
@@ -385,11 +387,13 @@ pub fn run(
 }
 
 /// What a run made, so it removes only that: the folders it created (never one that was there
-/// before) and whether it asked for the sandbox.
+/// before) and whether it asked for the sandbox; and the sandbox slot it took, which lives as long
+/// as this does, so it is held until the clean-up has ended, not only while the run goes on.
 #[derive(Default)]
 struct Made {
     folders: Vec<PathBuf>,
     sandbox: bool,
+    slot: Option<crate::slot::Slot>,
 }
 
 impl Made {

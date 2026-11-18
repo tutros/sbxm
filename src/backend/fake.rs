@@ -141,6 +141,8 @@ pub struct FakeBackend {
     create_hook: Option<CreateHook>,
     /// Called once a `create` succeeded, as `create_hook` is at its start.
     accepted_create_hook: Option<CreateHook>,
+    /// Called at the start of every `remove`, with the sandbox's name.
+    remove_hook: Option<RemoveHook>,
     /// The cloud's sandboxes under [`FakeBackend::with_live_cloud`]: a `create` that succeeds
     /// adds one, a `remove` takes it away, and removing one that isn't there answers as
     /// `sbx --cloud rm` does. `None`: every `remove` succeeds.
@@ -226,6 +228,17 @@ pub enum FakeCopy {
 type HookFn = dyn Fn(&str, &ExecSpec) + Send + Sync;
 
 type CreateHookFn = dyn Fn(&CreateSpec) + Send + Sync;
+
+type RemoveHookFn = dyn Fn(&str) + Send + Sync;
+
+#[derive(Clone)]
+struct RemoveHook(Arc<RemoveHookFn>);
+
+impl std::fmt::Debug for RemoveHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RemoveHook")
+    }
+}
 
 #[derive(Clone)]
 struct CreateHook(Arc<CreateHookFn>);
@@ -469,6 +482,15 @@ impl FakeBackend {
     pub fn with_failing_exec_for(mut self, sandbox: &str) -> Self {
         self.fail_exec_for.push(sandbox.to_owned());
         self
+    }
+
+    /// Calls `hook(name)` at the start of every `remove`, so a test can look at the host while the
+    /// sandbox is being removed.
+    pub fn with_remove_hook(self, hook: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        Self {
+            remove_hook: Some(RemoveHook(Arc::new(hook))),
+            ..self
+        }
     }
 
     /// Calls `hook(spec)` at the start of every `create`, e.g. to look at what exists on the
@@ -1029,6 +1051,9 @@ impl SandboxBackend for FakeBackend {
     }
 
     fn remove(&self, name: &str, log: SbxLog) -> Result<()> {
+        if let Some(hook) = &self.remove_hook {
+            (hook.0)(name);
+        }
         self.removes.lock().unwrap().push(name.to_owned());
         self.record("rm", name);
         print_output(&self.remove_output, name, log);
