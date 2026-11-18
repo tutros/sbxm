@@ -110,7 +110,10 @@ impl Loop<'_> {
             Ok(data) => data,
             Err(e) => return self.improvement_failed("could not read the run data", &e, warn),
         };
-        let spec = improvement::spec(area, &date, due.since.as_deref(), &data)?;
+        let spec = match improvement::spec(area, &date, due.since.as_deref(), &data) {
+            Ok(spec) => spec,
+            Err(e) => return self.improvement_failed("could not write its spec", &e, warn),
+        };
         // Never over a file this check didn't create, and none of its own left half written.
         let written = match fs::OpenOptions::new()
             .write(true)
@@ -130,7 +133,7 @@ impl Loop<'_> {
             repo_root: self.repo_root.clone(),
             repo: Some(self.repo.clone()),
         };
-        let job = Job::Spec { file: name };
+        let job = Job::Spec { file: name.clone() };
         let queued = task_queue::add(
             self.config_dir,
             &opts,
@@ -142,7 +145,10 @@ impl Loop<'_> {
             out,
         );
         if let Err(e) = queued {
-            let _ = fs::remove_file(&path);
+            // A job file written before the error still names the spec, so it stays.
+            if !improvement::queued_spec(&self.base_dir, &name) {
+                let _ = fs::remove_file(&path);
+            }
             return self.improvement_failed("could not queue its job", &e, warn);
         }
         let why = match (&due.since, due.prs) {
@@ -158,8 +164,8 @@ impl Loop<'_> {
         self.improvement_row(&line, warn)
     }
 
-    /// The run data since `since`: the table of `sbxm task facts` and the rows of this
-    /// repository's loop logs of loops started that day or later.
+    /// The run data since `since`: the table of `sbxm task facts` and this repository's loop-log
+    /// rows ([`improvement::run_data`] keeps those of that day or later).
     fn run_data(&self, since: Option<&str>) -> Result<improvement::RunData> {
         let opts = task_facts::Options {
             since: since.unwrap_or("1970-01-01").to_owned(),
@@ -170,10 +176,6 @@ impl Loop<'_> {
         task_facts::run(self.config_dir, &opts, self.now(), &mut facts, &mut skipped)?;
         let mut logs = Vec::new();
         for (start, path) in loop_log::every(&self.base_dir)? {
-            let day = retro::day_of(start);
-            if since.is_some_and(|since| day.as_str() < since) {
-                continue;
-            }
             let Ok(text) = fs::read_to_string(&path) else {
                 continue;
             };

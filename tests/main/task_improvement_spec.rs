@@ -167,3 +167,26 @@ fn task_improvement_spec_run_data_over_the_cap_keeps_the_newest_of_both_parts_an
         "{text}"
     );
 }
+
+#[test]
+fn task_improvement_spec_a_loop_started_before_the_window_gives_only_its_rows_in_it() {
+    let log = "# Loop log\n\nRepository: o/r\n\n| # | Issue | Size | Slot | Started | Ready | W/R | \
+               Rounds | Outcome | Stops | Idle |\n|---|---|---|---|---|---|---|---|---|---|---|\n\
+               | 1 | #801 before | S | - | 23:30:00 | - | - | - | merged | none | - |\n\
+               | 2 | #802 after midnight | S | - | 00:30:00 | - | - | - | merged | none | - |\n";
+    let logs = [LoopLog {
+        start: parse_timestamp("2026-11-15T23:00:00Z").unwrap(),
+        text: log.to_owned(),
+    }];
+
+    let data = improvement::run_data(FACTS_HEADER, &logs, Some("2026-11-16"));
+
+    assert!(!data.text.contains("#801"), "{}", data.text);
+    assert!(
+        data.text
+            .contains("| 2026-11-15T23:00:00Z | 2 | #802 after midnight |"),
+        "{}",
+        data.text
+    );
+    assert_eq!(data.left_out, 0);
+}

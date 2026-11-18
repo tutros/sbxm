@@ -202,6 +202,27 @@ pub fn next_area(
     }))
 }
 
+/// Whether a spec job of `file` waits in the queue or runs.
+pub fn queued_spec(base_dir: &Path, file: &str) -> bool {
+    let files = jobs::pending(base_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .chain(jobs::left_running(base_dir).unwrap_or_default());
+    files
+        .into_iter()
+        .any(|path| matches!(spec_job(&path), Some(queued) if queued == file))
+}
+
+/// The file of the spec job at `path`; `None` for any other job, or one that can't be read.
+fn spec_job(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let value = Running::read(&text).read.job?;
+    match jobs::parse(&value.to_string()).ok()? {
+        Job::Spec { file } => Some(file),
+        _ => None,
+    }
+}
+
 /// Whether an improvement job of `repo` is in flight under `base_dir`: a spec job of an
 /// [`SPEC_PREFIX`] file queued or running, or a live spec task of one whose PR GitHub says is
 /// open. A job or record that can't be read counts as none.
@@ -210,16 +231,7 @@ pub fn in_flight(base_dir: &Path, repo: &str, github: &dyn GitHubBackend) -> Res
         .into_iter()
         .chain(jobs::left_running(base_dir)?);
     for path in files {
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let queued = Running::read(&text)
-            .read
-            .job
-            .and_then(|value| jobs::parse(&value.to_string()).ok());
-        if let Some(Job::Spec { file }) = queued
-            && file.starts_with(SPEC_PREFIX)
-        {
+        if spec_job(&path).is_some_and(|file| file.starts_with(SPEC_PREFIX)) {
             return Ok(true);
         }
     }
@@ -283,10 +295,12 @@ struct TimedRow {
 }
 
 /// The run data since `since` (`None`: all): `facts`, the Markdown table of `sbxm task facts`,
-/// and the table rows of `logs`, each prefixed with its loop's start. When it is longer than
+/// and the table rows of `logs` from the start of that day (UTC), each prefixed with its loop's
+/// start. When it is longer than
 /// [`CAP`] bytes, the oldest rows of either part are left out until it fits.
 pub fn run_data(facts: &str, logs: &[LoopLog], since: Option<&str>) -> RunData {
     let window = since.map_or_else(|| "all".to_owned(), |d| format!("since {d}"));
+    let from = since.and_then(parse_day).unwrap_or(0);
     let mut rows = Vec::new();
     let facts_lines: Vec<&str> = facts.lines().collect();
     let facts_header = facts_lines
@@ -319,6 +333,10 @@ pub fn run_data(facts: &str, logs: &[LoopLog], since: Option<&str>) -> RunData {
                 .get(4)
                 .and_then(|clock| clock_at(log.start, clock))
                 .unwrap_or(log.start);
+            // A loop that started before the window logs into it too: only its rows from then.
+            if at < from {
+                continue;
+            }
             rows.push(TimedRow {
                 at,
                 part: 1,
