@@ -4,6 +4,7 @@
 use crate::common;
 
 use common::task_fixture::open_issue;
+use sbxm::commands::task_ready_check;
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{Issue, LabelEvent, MergedPr, PrFile, PrFiles};
 use sbxm::task::ready::{self, Status, Verdict};
@@ -532,4 +533,123 @@ fn staleness_a_read_that_fails_warns() {
     let v = staleness(&gh, &issue);
     assert_eq!(v.status, Status::Warn);
     assert!(v.reason.contains("events are down"), "{}", v.reason);
+}
+
+// The command: `sbxm task ready-check --issue N [--json]`.
+
+fn command(gh: &FakeGitHub, issue: u32, json: bool) -> (anyhow::Result<bool>, String) {
+    let opts = task_ready_check::Options {
+        repo_root: std::env::temp_dir(),
+        repo: Some("o/r".into()),
+        issue,
+        json,
+    };
+    let mut out = Vec::new();
+    let result = task_ready_check::run(&opts, gh, &mut out);
+    (result, String::from_utf8(out).unwrap())
+}
+
+#[test]
+fn command_prints_one_line_per_rule_and_passes_a_ready_issue() {
+    let gh = FakeGitHub::default()
+        .with_repo_files(&[("src/cli.rs", "")])
+        .with_open_issues(vec![ready_issue(&format!(
+            "{READY_BODY}\nChange `src/cli.rs`.\n"
+        ))]);
+
+    let (result, out) = command(&gh, 7, false);
+
+    assert!(result.unwrap(), "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 8, "{out}");
+    assert!(lines[0].starts_with("pass size: "), "{out}");
+    assert!(lines[2].starts_with("skip real-check: "), "{out}");
+    assert!(lines[5].starts_with("pass paths: "), "{out}");
+}
+
+#[test]
+fn command_fails_an_issue_that_fails_a_rule_but_not_one_that_only_warns() {
+    let failing = open_issue(7, &["size:M"], "**Size:** M\n**Depends on:** none\n");
+    let warning = ready_issue(&format!("{READY_BODY}\n`src/gone.rs`\n"));
+    let gh = FakeGitHub::default()
+        .with_repo_files(&[("src/cli.rs", "")])
+        .with_open_issues(vec![failing]);
+
+    let (result, out) = command(&gh, 7, false);
+    assert!(!result.unwrap(), "{out}");
+    assert!(
+        out.contains("fail acceptance: no Acceptance criteria heading"),
+        "{out}"
+    );
+
+    gh.set_open_issues(vec![warning]);
+    let (result, out) = command(&gh, 7, false);
+    assert!(result.unwrap(), "{out}");
+    assert!(out.contains("warn paths: "), "{out}");
+}
+
+#[test]
+fn command_json_gives_every_rule_with_its_status_and_reason() {
+    let gh = FakeGitHub::default()
+        .with_repo_files(&[("src/cli.rs", "")])
+        .with_open_issues(vec![open_issue(7, &[], READY_BODY)]);
+
+    let (result, out) = command(&gh, 7, true);
+
+    assert!(!result.unwrap(), "{out}");
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(json["issue"], 7);
+    assert_eq!(json["ready"], false);
+    let rules = json["rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 8);
+    assert_eq!(rules[0]["rule"], "size");
+    assert_eq!(rules[0]["status"], "fail");
+    assert!(
+        rules[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no size label")
+    );
+}
+
+#[test]
+fn command_refuses_an_issue_that_isnt_open() {
+    let gh = FakeGitHub::default().with_open_issues(vec![ready_issue(READY_BODY)]);
+    let (result, out) = command(&gh, 8, false);
+    let err = result.unwrap_err();
+    assert!(
+        format!("{err:#}").contains("#8 isn't an open issue"),
+        "{err:#}"
+    );
+    assert!(out.is_empty(), "{out}");
+}
+
+#[test]
+fn command_refuses_issue_0() {
+    let gh = FakeGitHub::default();
+    let (result, _) = command(&gh, 0, false);
+    assert!(format!("{:#}", result.unwrap_err()).contains("start at 1"));
+    assert!(gh.calls().is_empty());
+}
+
+#[test]
+fn command_only_reads() {
+    let gh =
+        stale_repo().with_open_issues(vec![ready_issue(&format!("{READY_BODY}\n`src/cli.rs`\n"))]);
+    let (result, _) = command(&gh, 7, false);
+    assert!(result.unwrap());
+    for call in gh.calls() {
+        assert!(
+            matches!(
+                call,
+                GhCall::IssuesOpen(_)
+                    | GhCall::DefaultBranch(_)
+                    | GhCall::RepoPaths(..)
+                    | GhCall::LabelEvents(..)
+                    | GhCall::PrsMergedSince(..)
+                    | GhCall::PrFiles(..)
+            ),
+            "{call:?}"
+        );
+    }
 }
