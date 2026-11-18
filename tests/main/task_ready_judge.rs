@@ -549,7 +549,9 @@ fn ready_judge_a_missing_profile_fails_before_any_sandbox() {
 
     assert!(ran.result.is_err());
     assert!(backend.creates().is_empty());
-    assert!(entries(&env.base_dir().join("ready-check")).is_empty());
+    // Checked before the first write: not even a parent folder is made.
+    assert!(!env.base_dir().join("ready-check").exists());
+    assert!(!env.base_dir().join(".sbxm").exists());
 }
 
 #[test]
@@ -724,4 +726,35 @@ fn ready_judge_yes_needs_write_files() {
 fn ready_judge_judge_does_not_go_with_json() {
     let err = sbxm_fails(&["task", "ready-check", "--issue", "7", "--judge", "--json"]);
     assert!(err.contains("--json") && err.contains("--judge"), "{err}");
+}
+
+#[test]
+fn ready_judge_a_secret_the_profile_names_but_sbx_lacks_fails_before_any_sandbox() {
+    let env = env();
+    env.write_profile(
+        "ready-check",
+        "description = \"model only\"\n\n[secrets]\nservices = [\"anthropic\"]\n",
+    );
+    let backend = backend_answering(FULL);
+
+    let refused = ran(
+        &env,
+        &judge(&env, false, false),
+        &backend,
+        &github(READY_BODY),
+    );
+
+    let err = format!("{:#}", refused.result.unwrap_err());
+    assert!(err.contains("secret 'anthropic'"), "{err}");
+    assert!(backend.creates().is_empty());
+    assert!(!env.base_dir().join(".sbxm").exists());
+
+    let backend = backend_answering(FULL).and_secrets(&["anthropic"]);
+    let stored = ran(
+        &env,
+        &judge(&env, false, false),
+        &backend,
+        &github(READY_BODY),
+    );
+    assert_eq!(stored.result.unwrap(), 0);
 }

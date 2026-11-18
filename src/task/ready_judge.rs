@@ -14,7 +14,8 @@ use anyhow::{Context, Result, bail};
 use super::finish::next_fence;
 use super::ready::files_well_formed;
 use crate::backend::{CreateSpec, SandboxBackend};
-use crate::config::GlobalConfig;
+use crate::commands::new::require_secrets;
+use crate::config::{GlobalConfig, Profile};
 use crate::disk;
 use crate::github::{GitHubBackend, Issue};
 use crate::harness::Harness;
@@ -265,6 +266,12 @@ pub fn run(
             global.base_dir.display(),
             config_dir.join("config.toml").display()
         );
+    }
+    // The profile and its secrets are checked before anything is written, so a missing one
+    // leaves no trace (decisions 30, 58).
+    let profile = Profile::load(global.profiles_dir(), PROFILE)?;
+    if !profile.secrets.services.is_empty() {
+        require_secrets(&profile.secrets.services, &backend.secret_services()?)?;
     }
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
