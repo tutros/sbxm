@@ -7,7 +7,7 @@
 use serde::Serialize;
 
 use super::finish::next_fence;
-use super::queue;
+use super::queue::{self, READY_LABEL};
 use crate::github::{GitHubBackend, Issue};
 
 /// What a rule found.
@@ -64,12 +64,13 @@ pub fn body_rules(issue: &Issue) -> Vec<Verdict> {
     ]
 }
 
-/// Every rule, in their order: [`body_rules`] with the paths rule before `**Files:**`. Reads
-/// GitHub for the paths; a read that fails is a warn, never a fail.
+/// Every rule, in their order: [`body_rules`] with the paths rule before `**Files:**`, then
+/// staleness. Reads GitHub for the last two; a read that fails is a warn, never a fail.
 pub fn check(repo: &str, github: &dyn GitHubBackend, issue: &Issue) -> Vec<Verdict> {
     let mut verdicts = body_rules(issue);
     let at = verdicts.len() - 1;
     verdicts.insert(at, paths(repo, github, &issue.body));
+    verdicts.push(staleness(repo, github, issue));
     verdicts
 }
 
@@ -424,4 +425,87 @@ fn names(named: &str, path: &str) -> bool {
         || path
             .strip_prefix(named)
             .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Rule 8 (decision 295): the PRs merged since [`READY_LABEL`] was last added that changed a path
+/// the body names, as a warn: the issue may no longer match the code.
+fn staleness(repo: &str, github: &dyn GitHubBackend, issue: &Issue) -> Verdict {
+    const RULE: &str = "staleness";
+    if !issue.labels.iter().any(|l| l == READY_LABEL) {
+        return Verdict::new(RULE, Status::Skip, format!("not labeled {READY_LABEL}"));
+    }
+    let named: Vec<String> = named_paths(&issue.body)
+        .into_iter()
+        .map(|n| n.path)
+        .collect();
+    if named.is_empty() {
+        return Verdict::new(RULE, Status::Skip, "the body names no path");
+    }
+    match changed_since_label(repo, github, issue.number, &named) {
+        Ok(None) => Verdict::new(
+            RULE,
+            Status::Skip,
+            format!("no {READY_LABEL} labelling found in the issue's events"),
+        ),
+        Ok(Some((since, changed))) if changed.is_empty() => Verdict::new(
+            RULE,
+            Status::Pass,
+            format!("no PR merged since it was labeled ({since}) changed a path it names"),
+        ),
+        Ok(Some((since, changed))) => Verdict::new(
+            RULE,
+            Status::Warn,
+            format!(
+                "merged since it was labeled ({since}) and changed paths it names, so check it \
+                 still holds: {}",
+                changed.join(", ")
+            ),
+        ),
+        Err(e) => Verdict::new(
+            RULE,
+            Status::Warn,
+            format!("the PRs merged since the label could not be read ({e:#})"),
+        ),
+    }
+}
+
+/// When issue `number` was last labeled [`READY_LABEL`] (its day) and each PR merged since that
+/// changed a path of `named`, as `#N (path, path)`; `None` without such a labelling.
+fn changed_since_label(
+    repo: &str,
+    github: &dyn GitHubBackend,
+    number: u32,
+    named: &[String],
+) -> anyhow::Result<Option<(String, Vec<String>)>> {
+    let Some(at) = github
+        .label_events(repo, number)?
+        .into_iter()
+        .filter(|e| e.added && e.label == READY_LABEL)
+        .map(|e| e.at)
+        .max()
+    else {
+        return Ok(None);
+    };
+    let stamp = crate::run::results::format_timestamp(at);
+    let day = &stamp[..10];
+    let mut changed = Vec::new();
+    let mut merged = github.prs_merged_since(repo, day)?;
+    merged.retain(|pr| pr.merged_at >= at);
+    merged.sort_by_key(|pr| pr.number);
+    for pr in merged {
+        let files = github.pr_files(repo, pr.number)?;
+        let mut hits: Vec<&str> = Vec::new();
+        for file in &files.files {
+            let paths = std::iter::once(&file.filename).chain(&file.previous_filename);
+            for path in paths {
+                if named.iter().any(|n| names(n, path)) && !hits.contains(&path.as_str()) {
+                    hits.push(path);
+                }
+            }
+        }
+        if !hits.is_empty() {
+            changed.push(format!("#{} ({})", pr.number, hits.join(", ")));
+        }
+    }
+    Ok(Some((day.to_owned(), changed)))
 }

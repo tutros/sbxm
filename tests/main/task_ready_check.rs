@@ -4,8 +4,8 @@
 use crate::common;
 
 use common::task_fixture::open_issue;
-use sbxm::github::Issue;
 use sbxm::github::fake::{FakeGitHub, GhCall};
+use sbxm::github::{Issue, LabelEvent, MergedPr, PrFile, PrFiles};
 use sbxm::task::ready::{self, Status, Verdict};
 
 /// A body every rule passes, for a test that changes one part of it.
@@ -325,7 +325,8 @@ fn check_runs_every_rule_in_order() {
             "open-points",
             "acceptance",
             "paths",
-            "files"
+            "files",
+            "staleness"
         ]
     );
 }
@@ -396,4 +397,139 @@ fn paths_a_listing_that_fails_warns() {
         .unwrap();
     assert_eq!(v.status, Status::Warn);
     assert!(v.reason.contains("not scripted"), "{}", v.reason);
+}
+
+// Rule 8: staleness (decision 295), the PRs merged since the label that changed a named path.
+
+/// 2025-11-10T12:00:00Z, when the issue was last labeled.
+const LABELED_AT: u64 = 1_762_776_000;
+
+fn pr_files(names: &[&str]) -> PrFiles {
+    PrFiles {
+        changed_files: u32::try_from(names.len()).unwrap(),
+        files: names
+            .iter()
+            .map(|n| PrFile {
+                filename: (*n).to_owned(),
+                previous_filename: None,
+            })
+            .collect(),
+    }
+}
+
+/// A repo where #7 was labeled at [`LABELED_AT`] and PR #20 merged an hour before it (touching
+/// `src/cli.rs`), #21 an hour after it (touching `src/cli.rs` and `docs/x.md`) and #22 after it
+/// (touching only `Cargo.toml`).
+fn stale_repo() -> FakeGitHub {
+    let gh = FakeGitHub::default()
+        .with_repo_files(&[("src/cli.rs", ""), ("src/task/queue.rs", "")])
+        .with_merged_prs(vec![
+            MergedPr {
+                number: 20,
+                merged_at: LABELED_AT - 3_600,
+            },
+            MergedPr {
+                number: 21,
+                merged_at: LABELED_AT + 3_600,
+            },
+            MergedPr {
+                number: 22,
+                merged_at: LABELED_AT + 7_200,
+            },
+        ])
+        .with_pr_files(20, pr_files(&["src/cli.rs"]))
+        .with_pr_files(21, pr_files(&["src/cli.rs", "docs/x.md"]))
+        .with_pr_files(22, pr_files(&["Cargo.toml"]));
+    gh.set_label_events(
+        7,
+        vec![
+            LabelEvent {
+                label: "ready-for-worker".into(),
+                added: true,
+                at: LABELED_AT - 86_400,
+            },
+            LabelEvent {
+                label: "ready-for-worker".into(),
+                added: false,
+                at: LABELED_AT - 600,
+            },
+            LabelEvent {
+                label: "ready-for-worker".into(),
+                added: true,
+                at: LABELED_AT,
+            },
+        ],
+    );
+    gh
+}
+
+fn staleness(gh: &FakeGitHub, issue: &Issue) -> Verdict {
+    ready::check("o/r", gh, issue)
+        .into_iter()
+        .find(|v| v.rule == "staleness")
+        .unwrap()
+}
+
+#[test]
+fn staleness_a_pr_merged_since_the_label_that_changed_a_named_path_warns() {
+    let gh = stale_repo();
+    let issue = ready_issue(&format!(
+        "{READY_BODY}\nChange `src/cli.rs` and `src/task/`.\n"
+    ));
+
+    let v = staleness(&gh, &issue);
+
+    assert_eq!(v.status, Status::Warn, "{}", v.reason);
+    assert!(v.reason.contains("#21 (src/cli.rs)"), "{}", v.reason);
+    // Merged before the label was last added, or touching no named path.
+    assert!(
+        !v.reason.contains("#20") && !v.reason.contains("#22"),
+        "{}",
+        v.reason
+    );
+    assert!(ready::failures(&issue).is_empty());
+    // The merged PRs are listed from the day the label was last added.
+    assert!(
+        gh.calls()
+            .contains(&GhCall::PrsMergedSince("o/r".into(), "2025-11-10".into())),
+        "{:?}",
+        gh.calls()
+    );
+}
+
+#[test]
+fn staleness_a_folder_matches_the_files_in_it() {
+    let gh = stale_repo();
+    let issue = ready_issue(&format!("{READY_BODY}\nIn `docs/`.\n"));
+    let v = staleness(&gh, &issue);
+    assert_eq!(v.status, Status::Warn, "{}", v.reason);
+    assert!(v.reason.contains("#21 (docs/x.md)"), "{}", v.reason);
+}
+
+#[test]
+fn staleness_no_pr_changed_a_named_path_passes() {
+    let gh = stale_repo();
+    let issue = ready_issue(&format!("{READY_BODY}\nChange `src/task/queue.rs`.\n"));
+    assert_eq!(staleness(&gh, &issue).status, Status::Pass);
+}
+
+#[test]
+fn staleness_without_the_label_or_a_named_path_is_a_skip() {
+    let gh = stale_repo();
+    let unlabeled = open_issue(7, &["size:M"], &format!("{READY_BODY}\n`src/cli.rs`\n"));
+    assert_eq!(staleness(&gh, &unlabeled).status, Status::Skip);
+    assert_eq!(
+        staleness(&gh, &ready_issue(READY_BODY)).status,
+        Status::Skip
+    );
+}
+
+#[test]
+fn staleness_a_read_that_fails_warns() {
+    let gh = stale_repo();
+    gh.set_label_events_failure(Some("events are down"));
+    let issue = ready_issue(&format!("{READY_BODY}\n`src/cli.rs`\n"));
+    let v = staleness(&gh, &issue);
+    assert_eq!(v.status, Status::Warn);
+    assert!(v.reason.contains("events are down"), "{}", v.reason);
 }
