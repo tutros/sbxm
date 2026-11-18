@@ -1024,37 +1024,6 @@ duplicates issues (a hidden marker in each body); it also fills in the `#n` link
 Afterwards the review's `Issues:` line is rewritten to `Issues: <id> #<n>, ...`. Decision 134 has the details; the
 review format is described in the `sdlc-code-review` skill.
 
-### The scheduled factory check (an experiment)
-
-`scripts/factory-check.ps1` (decision 269, issue 327) starts an agent that prepares recurring work and writes drafts
-to local files. It never opens a PR, sets a label, posts a comment or edits an issue: you work through each draft in
-a session. Three jobs, each at most one agent run a day:
-
-- **Readiness:** open issues without the `ready-for-worker`, `waiting-on-trigger` or `follow-up` label (and never
-  the backlog #405) that have no `issue-<n>.md` draft yet, or were updated after it; at most 5, oldest first. A
-  draft lists the open points with a recommended answer each, the boundary cases and a size check. Delete a draft
-  to ask for a new one.
-- **Recheck:** open `ready-for-worker` issues with PRs merged since the label was added (decision 295): a
-  `recheck-<n>.md` "still valid?" draft each; at most 5.
-- **Retro:** 10 or more PRs merged since the `Window:` end of the newest record in `sdlc/retros/` (or no record):
-  a `retro-after-<date>.md` draft following `sdlc-retro`.
-
-It is skipped while any `sbxm-` sandbox runs or a `task loop` holds `<base_dir>/.sbxm/task-loop.lock` (a lock it
-can't read skips it too), and stops when the drive of `sbx`'s sandbox state has less than `min_free_disk` free.
-Every input is read on the host with `gh`; the agent runs `sbxm task start --spec` from the dedicated checkout
-`<base_dir>/factory/checkout` (its `sbxm-task.toml` is written from `scripts/factory/sbxm-task.toml`: no gates, the
-`factory` profile, which reaches only the model provider), and its `draft.md` is read out of the task's `repo.git`
-before `task rm --spec --yes --force`. Drafts and `summary.md` (with a log line per draft: cost and time, for
-`sdlc/batches/<date>-factory.md`) are in `<base_dir>/.sbxm/factory/drafts/<date>/`; specs and run logs in
-`<base_dir>/.sbxm/factory/specs/`.
-
-```powershell
-just deploy-profiles                        # the factory profile
-git clone https://github.com/tutros/sbxm.git <base_dir>\factory\checkout   # the dedicated checkout, once
-./scripts/factory-check.ps1                 # one run now
-./scripts/factory-trigger.ps1 -Register     # Task Scheduler: daily at 07:00, at the next chance if missed, a toast
-```
-
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your
