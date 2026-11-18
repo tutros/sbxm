@@ -18,7 +18,7 @@ use crate::task::record::{Record, Stage};
 use crate::task::risk::Level;
 use crate::task::trial::{self, Armed, How, Merge, Trial};
 use crate::task::window::{self, Window, Zone};
-use crate::task::{loop_pause, medium, pr_fix};
+use crate::task::{loop_pause, medium};
 
 /// Where a medium-risk PR stands, besides its own task's checks.
 pub(super) enum Medium {
@@ -351,7 +351,7 @@ impl Loop<'_> {
             .chain([review.risk])
             .max_by_key(|&risk| super::awaiting_rank(risk))
             .unwrap_or(review.risk);
-        if !clean(rec) || !clean(own) || !self.fixes_clean(&fixes) {
+        if !clean(rec) || !clean(own) || !self.fixes_clean(number, out, warn)? {
             return Ok(());
         }
         match risk {
@@ -387,18 +387,27 @@ impl Loop<'_> {
         Ok(())
     }
 
-    /// Whether every finished fix of the PR in `fixes` passed the checks its own task must, a
-    /// log-fix also ending clean (review M-2 of decision 300's issue).
-    fn fixes_clean(&self, fixes: &[Record]) -> bool {
-        fixes.iter().all(|fix| {
-            if fix.stage != Stage::Finished {
-                return true;
-            }
-            let dir = crate::task::record::task_dir(&self.base_dir, &fix.id);
-            let log_fix_ok = !dir.join(pr_fix::CHECK_LOG).is_file()
-                || super::log_fix_left(&dir, Some(fix)).is_none();
-            log_fix_ok && clean(fix)
-        })
+    /// Whether every fix task pushed onto PR `number` passed the checks its own task must, by
+    /// [`queue::fixes_pass`]'s rule (issue 707); when one didn't, says so once, with a log row.
+    fn fixes_clean(
+        &mut self,
+        number: u32,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<bool> {
+        if queue::fixes_pass(&self.base_dir, &self.repo, number, None, clean) {
+            return Ok(true);
+        }
+        let why = "an earlier fix task of it didn't pass the arming checks";
+        let line = format!(
+            "{pr_named} awaits you: {why}; see `sbxm task status`",
+            pr_named = self.pr_named(number)
+        );
+        if self.said.insert(line.clone()) {
+            writeln!(out, "{line}")?;
+            self.arm_row(number, not_armed(why, None), warn)?;
+        }
+        Ok(false)
     }
 
     /// A log row for an arming of the step.
