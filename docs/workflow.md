@@ -495,6 +495,13 @@ the binary you built, and waits for job files and labelled issues.
    branch (from the day after, UTC). At 10 or more (or with no retro record) it comments once on the open `loop-log`
    issue, shows a toast once a day and `sbxm status` shows `retro due: N PRs since <end>`, until a newer retro record
    lands on the default branch. A retro needs you, so the loop only reminds; run it with the `sdlc-retro` skill.
+7. At the same waits it queues an improvement review (decision 330(2) and (3), issue 715) once 20 PRs merged since
+   the newest `sdlc/reviews/*-improvement-*.md` on the default branch: a spec job for the area of
+   `sdlc/reviews/areas.md` whose newest review is oldest, its spec written to `specs_dir` from
+   `prompts/improvement-review.md` with the run data since that review (`sbxm task facts` and the loop-log rows, at
+   most 30 KB). Its findings are should-fix and questions only, at most 10. When its PR merges a toast says
+   `Improvement review <slug> merged: sort its N findings`: sort them in a session, filing each or not. Change the
+   areas with a docs PR to `areas.md`; the loop needs `specs_dir` set to queue the job.
 
 ## How a change to sbxm itself goes
 
