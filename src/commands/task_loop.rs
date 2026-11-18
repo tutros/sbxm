@@ -1523,8 +1523,19 @@ impl Loop<'_> {
                 });
                 continue;
             }
-            // Its location's labels (issue 600): a refusal is the issue's to fix, as above.
             let labels = found.map_or(&[][..], |i| i.labels.as_slice());
+            // More than one size label (issue 709): its size is the issue's to fix, as above.
+            if let Err(several @ queue::SizeError::Several(_)) = queue::size(labels) {
+                tried.insert(number);
+                let reason = several.to_string();
+                writeln!(out, "skipped #{number}{title}: {reason}")?;
+                refused.push(Skipped {
+                    issue: number,
+                    reason,
+                });
+                continue;
+            }
+            // Its location's labels (issue 600): a refusal is the issue's to fix, as above.
             let location = match location::for_loop(labels, self.cloud_slots) {
                 Ok(location) => location,
                 Err(reason) => {
@@ -2060,7 +2071,7 @@ impl Loop<'_> {
         let size = |issue: u32| {
             open.iter()
                 .find(|i| i.number == issue)
-                .and_then(|i| queue::size(&i.labels))
+                .and_then(|i| queue::size(&i.labels).ok())
                 .map(str::to_owned)
         };
         for h in due.iter_mut() {
@@ -4629,7 +4640,7 @@ fn work(
                 let found = open.iter().find(|i| i.number == issue);
                 let title = found.map_or_else(|| format!("issue {issue}"), |i| i.title.clone());
                 let size = found
-                    .and_then(|i| queue::size(&i.labels))
+                    .and_then(|i| queue::size(&i.labels).ok())
                     .map(str::to_owned);
                 let labeled = found.is_some_and(|i| i.labels.iter().any(|l| l == READY_LABEL));
 

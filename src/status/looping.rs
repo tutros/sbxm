@@ -715,7 +715,7 @@ pub fn fetch_checking(
             .map(|i| QueueItem {
                 number: i.number,
                 title: i.title.clone(),
-                size: queue::size(&i.labels),
+                size: queue::size(&i.labels).ok(),
             })
             .collect()
     });

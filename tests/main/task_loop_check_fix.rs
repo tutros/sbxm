@@ -605,15 +605,14 @@ fn an_unarmed_medium_risk_pr_says_its_size_and_cargo_lock_reasons_after_a_log_fi
     let mut rec = record::read(&dir.join("task.json")).unwrap();
     rec.review.as_mut().unwrap().risk = Level::Medium;
     record::write(&dir, &rec).unwrap();
-    let mut text = issue_text(1);
-    text.text = "title:\tFix 1\nstate:\tOPEN\nlabels:\tsize:L\n--\nbody\n".to_owned();
     let gh = FakeGitHub::default()
         .with_user("me")
         .with_default_branch("main")
         .with_branch_head("main", MAIN)
         .with_pr(pr(101, OTHER))
         .with_runs(OTHER, vec![run(7, 2, RunStatus::Failed)])
-        .with_issue_text(text)
+        .with_issue_text(issue_text(1))
+        .with_open_issues(vec![open_issue(1, &["size:L"], "")])
         .with_pr_files(
             101,
             PrFiles {
@@ -645,18 +644,19 @@ fn an_unarmed_medium_risk_pr_says_its_size_and_cargo_lock_reasons_after_a_log_fi
 fn a_medium_risk_log_fix_while_paused_says_the_pause_and_its_reasons() {
     let f = fixture();
     f.write_pause();
-    let mut text = issue_text(1);
-    text.text = "title:\tFix 1\nstate:\tOPEN\nlabels:\tsize:L\n--\nbody\n".to_owned();
-    let gh = github().with_issue_text(text).with_pr_files(
-        101,
-        PrFiles {
-            changed_files: 1,
-            files: vec![PrFile {
-                filename: "Cargo.lock".to_owned(),
-                previous_filename: None,
-            }],
-        },
-    );
+    let gh = github()
+        .with_issue_text(issue_text(1))
+        .with_open_issues(vec![open_issue(1, &["size:L"], "")])
+        .with_pr_files(
+            101,
+            PrFiles {
+                changed_files: 1,
+                files: vec![PrFile {
+                    filename: "Cargo.lock".to_owned(),
+                    previous_filename: None,
+                }],
+            },
+        );
     let script = Script::new(&f.base(), &gh, Ends::Clean(Level::Medium));
 
     let ran = run_loop(&f, &script, &gh);

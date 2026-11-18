@@ -889,7 +889,7 @@ fn steps_and_starts<'a>(
         let found = open.iter().find(|i| i.number == issue);
         let title = found.map_or_else(|| format!("issue {issue}"), |i| i.title.clone());
         let size = found
-            .and_then(|i| queue::size(&i.labels))
+            .and_then(|i| queue::size(&i.labels).ok())
             .map(str::to_owned);
         let labeled = found.is_some_and(|i| i.labels.iter().any(|l| l == READY_LABEL));
         let slot = lp

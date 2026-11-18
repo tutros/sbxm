@@ -4,21 +4,19 @@
 
 use crate::common;
 
-use common::task_fixture::issue_text;
+use common::task_fixture::open_issue;
 use sbxm::github::fake::FakeGitHub;
-use sbxm::github::{IssueText, PrFile, PrFiles};
+use sbxm::github::{Issue, PrFile, PrFiles};
 use sbxm::task::medium::{self, Source};
 
 const REPO: &str = "o/r";
 const PR: u32 = 120;
 const ISSUE: u32 = 20;
 
-fn labeled(labels: &str) -> IssueText {
-    let mut text = issue_text(ISSUE);
-    text.text = format!(
-        "title:\tFix {ISSUE}\nstate:\tOPEN\nauthor:\tme\nlabels:\t{labels}\ncomments:\t0\n--\nbody\n"
-    );
-    text
+/// Issue 20, open, with the comma-separated `labels` (issue 709: read from the open issues).
+fn labeled(labels: &str) -> Vec<Issue> {
+    let labels: Vec<&str> = labels.split(", ").filter(|l| !l.is_empty()).collect();
+    vec![open_issue(ISSUE, &labels, "")]
 }
 
 fn file(name: &str) -> PrFile {
@@ -52,14 +50,14 @@ fn reasons(gh: &FakeGitHub, source: Source) -> Vec<String> {
 
 fn sized(labels: &str) -> Vec<String> {
     let gh = FakeGitHub::default()
-        .with_issue_text(labeled(labels))
+        .with_open_issues(labeled(labels))
         .with_pr_files(PR, plain());
     reasons(&gh, Source::Issue(ISSUE))
 }
 
 fn changing(list: PrFiles) -> Vec<String> {
     let gh = FakeGitHub::default()
-        .with_issue_text(labeled("ready-for-worker, size:S"))
+        .with_open_issues(labeled("ready-for-worker, size:S"))
         .with_pr_files(PR, list);
     reasons(&gh, Source::Issue(ISSUE))
 }
@@ -94,12 +92,17 @@ fn no_size_label_is_refused() {
 
 #[test]
 fn no_labels_at_all_is_refused() {
+    assert_eq!(sized(""), ["its issue #20 has no size label"]);
+}
+
+#[test]
+fn an_issue_that_is_not_open_is_refused() {
     let gh = FakeGitHub::default()
-        .with_issue_text(issue_text(ISSUE))
+        .with_open_issues(vec![open_issue(ISSUE + 1, &["size:S"], "")])
         .with_pr_files(PR, plain());
     assert_eq!(
         reasons(&gh, Source::Issue(ISSUE)),
-        ["its issue #20 has no size label"]
+        ["its issue #20 is not open, so its labels could not be read"]
     );
 }
 
@@ -119,7 +122,10 @@ fn a_spec_jobs_pr_counts_as_size_s() {
 
 #[test]
 fn an_issue_whose_labels_cant_be_read_is_refused() {
-    let gh = FakeGitHub::default().with_pr_files(PR, plain());
+    let gh = FakeGitHub::default()
+        .with_open_issues(labeled("size:S"))
+        .failing_issues_open_once("gh failed")
+        .with_pr_files(PR, plain());
     let got = reasons(&gh, Source::Issue(ISSUE));
     assert_eq!(got.len(), 1, "{got:?}");
     assert!(
@@ -228,7 +234,7 @@ fn a_list_shorter_than_changed_files_is_refused() {
 
 #[test]
 fn a_list_that_cant_be_read_is_refused() {
-    let gh = FakeGitHub::default().with_issue_text(labeled("size:S"));
+    let gh = FakeGitHub::default().with_open_issues(labeled("size:S"));
     let got = reasons(&gh, Source::Issue(ISSUE));
     assert_eq!(got.len(), 1, "{got:?}");
     assert!(
@@ -240,7 +246,7 @@ fn a_list_that_cant_be_read_is_refused() {
 #[test]
 fn every_reason_is_given_together() {
     let gh = FakeGitHub::default()
-        .with_issue_text(labeled("size:L"))
+        .with_open_issues(labeled("size:L"))
         .with_pr_files(PR, files(vec![file("Cargo.lock")]));
     assert_eq!(
         reasons(&gh, Source::Issue(ISSUE)),
