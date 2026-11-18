@@ -701,14 +701,27 @@ pub enum TaskCommand {
     /// line, a non-empty **Real check:**, nothing left open, an Acceptance criteria heading with a
     /// box, the paths it names on the default branch, a well-formed **Files:** line and the PRs
     /// merged since its ready-for-worker label that changed them. Exit 1 when a rule fails (warns
-    /// don't). Read-only.
+    /// don't). Read-only, unless --write-files --yes.
     ReadyCheck {
         /// The issue to check.
         #[arg(long, value_name = "N")]
         issue: u32,
         /// Print the rules as a JSON object instead of one line each.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "judge")]
         json: bool,
+        /// Then ask a model, in a fresh sandbox that reaches only its provider (profile
+        /// ready-check): open points in the prose, boundary cases, the acceptance list against the
+        /// answers, a proposed **Files:** line and the size's fit, with the run's cost. Advice
+        /// only. Exit 2 when its answer isn't in the format (printed raw).
+        #[arg(long)]
+        judge: bool,
+        /// With --judge: write the proposed **Files:** line into the issue body (added before
+        /// **Depends on:**, or in place of the old one); only with --yes, else it prints the line.
+        #[arg(long, requires = "judge")]
+        write_files: bool,
+        /// With --write-files: really edit the issue.
+        #[arg(long, requires = "write_files")]
+        yes: bool,
     },
     /// Print one row of facts per task started in a window, for a retro: issue, size, review
     /// rounds and must-fix per round, wall time to ready, the latest worker's and reviewer's

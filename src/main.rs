@@ -1179,16 +1179,46 @@ fn run() -> anyhow::Result<()> {
             )
         }
         Command::Task {
-            command: TaskCommand::ReadyCheck { issue, json },
-        } => {
-            // Read-only (issue 725), like `task facts`: no `task_writers`/`RunLog`, no lock.
-            let ready = commands::task_ready_check::run(
-                &commands::task_ready_check::Options {
-                    repo_root: std::env::current_dir()?,
-                    repo: None,
+            command:
+                TaskCommand::ReadyCheck {
                     issue,
                     json,
+                    judge,
+                    write_files,
+                    yes,
                 },
+        } => {
+            let opts = commands::task_ready_check::Options {
+                repo_root: std::env::current_dir()?,
+                repo: None,
+                issue,
+                json,
+            };
+            if judge {
+                // One sandbox, made and removed here (issue 726): no task record, no lock.
+                let code = commands::task_ready_check::run_judged(
+                    &opts,
+                    &commands::task_ready_check::Judge {
+                        config_dir: config::config_dir()?,
+                        guard: sbxm::disk::Guard::real(false),
+                        time_limit: sbxm::task::ready_judge::TIME_LIMIT,
+                        write_files,
+                        yes,
+                    },
+                    &SbxBackend::LOCAL,
+                    &sbxm::github::gh::GhBackend::default(),
+                    &mut screen::stdout(),
+                    &mut screen::stderr(),
+                )?;
+                if code != 0 {
+                    let _ = screen::stdout().flush();
+                    exit(code);
+                }
+                return Ok(());
+            }
+            // Read-only (issue 725), like `task facts`: no `task_writers`/`RunLog`, no lock.
+            let ready = commands::task_ready_check::run(
+                &opts,
                 &sbxm::github::gh::GhBackend::default(),
                 &mut screen::stdout(),
             )?;
