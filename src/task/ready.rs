@@ -10,6 +10,9 @@ use super::finish::next_fence;
 use super::queue::{self, READY_LABEL};
 use crate::github::{GitHubBackend, Issue};
 
+/// Rule 4's reason for an `## Open points` heading, as the loop has said it since issue 511.
+pub const OPEN_POINTS: &str = "open points not answered";
+
 /// What a rule found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -157,7 +160,8 @@ fn line_size(value: &str) -> Option<&'static str> {
     }
 }
 
-/// Rule 2: a `**Depends on:**` line, `none` or `#N` numbers separated by commas, then any text.
+/// Rule 2: a `**Depends on:**` line, `none` or `#N` numbers (each maybe `PR #N`) separated by
+/// commas, then any text.
 fn depends_on(lines: &[&str]) -> Verdict {
     const RULE: &str = "depends-on";
     let Some(value) = field(lines, "**Depends on:**") else {
@@ -198,7 +202,9 @@ fn dependencies(value: &str) -> Option<Vec<u32>> {
     let mut numbers = Vec::new();
     let mut rest = value;
     loop {
-        let digits_at = rest.strip_prefix('#')?;
+        // A dependency may be a PR (`PR #377`), which the loop waits on as on an issue.
+        let rest_number = rest.strip_prefix("PR ").unwrap_or(rest);
+        let digits_at = rest_number.strip_prefix('#')?;
         let digits: String = digits_at.chars().take_while(char::is_ascii_digit).collect();
         numbers.push(digits.parse().ok()?);
         rest = &digits_at[digits.len()..];
@@ -247,7 +253,7 @@ fn open_points(issue: &Issue, lines: &[&str]) -> Verdict {
         return Verdict::new(RULE, Status::Fail, "an **Open:** line is still there");
     }
     if queue::has_open_points(&issue.body) {
-        return Verdict::new(RULE, Status::Fail, "an Open points heading is still there");
+        return Verdict::new(RULE, Status::Fail, OPEN_POINTS);
     }
     if lines.iter().any(|l| l.to_lowercase().contains("to decide")) {
         return Verdict::new(RULE, Status::Fail, "the body still says \"to decide\"");

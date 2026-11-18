@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::gh::{GhBackend, GhRunner};
@@ -180,8 +180,8 @@ fn a_shorter_fence_or_the_other_character_does_not_close_an_open_block() {
 fn the_loop_passes_over_a_labeled_issue_with_open_points_and_reports_it() {
     let f = fixture();
     let gh = github(vec![
-        open_issue(3, &[READY, "size:S"], OPEN_POINTS),
-        open_issue(7, &[READY, "size:S"], ANSWERED),
+        ready_open_issue(3, &[READY, "size:S"], OPEN_POINTS),
+        ready_open_issue(7, &[READY, "size:S"], ANSWERED),
     ]);
     let script = Script::default();
 
@@ -204,7 +204,7 @@ fn the_loop_passes_over_a_labeled_issue_with_open_points_and_reports_it() {
 #[test]
 fn the_loop_passes_over_a_named_issue_with_open_points() {
     let f = fixture();
-    let gh = github(vec![open_issue(3, &["size:S"], OPEN_POINTS)]);
+    let gh = github(vec![ready_open_issue(3, &["size:S"], OPEN_POINTS)]);
     let script = Script::default();
 
     let (result, out) = run_loop(&f, &opts(&f, &[3]), &script, &gh);
@@ -379,15 +379,15 @@ fn every_reason(f: &Fixture) -> FakeGitHub {
         text: "title:\tFix 13\nstate:\tOPEN\n--\nPR: #50\n\nWhy\n".into(),
     };
     let issues = vec![
-        open_issue(3, &SIZED, ANSWERED),
-        open_issue(10, &SIZED, "**Depends on:** #11\n"),
-        open_issue(11, &["size:M"], ""),
-        open_issue(12, &SIZED, ""),
-        open_issue(13, &SIZED, "PR: #50\n\nWhy\n"),
-        open_issue(14, &SIZED, ""),
-        open_issue(15, &["size:S"], ""),
-        open_issue(16, &[READY], ""),
-        open_issue(17, &SIZED, OPEN_POINTS),
+        ready_open_issue(3, &SIZED, ANSWERED),
+        ready_open_issue(10, &SIZED, "**Depends on:** #11\n"),
+        ready_open_issue(11, &["size:M"], ""),
+        ready_open_issue(12, &SIZED, ""),
+        ready_open_issue(13, &SIZED, "PR: #50\n\nWhy\n"),
+        ready_open_issue(14, &SIZED, ""),
+        ready_open_issue(15, &["size:S"], ""),
+        ready_open_issue(16, &[READY], ""),
+        ready_open_issue(17, &SIZED, OPEN_POINTS),
     ];
     let mut gh = FakeGitHub::default()
         .with_user("me")
@@ -404,7 +404,7 @@ fn every_reason(f: &Fixture) -> FakeGitHub {
 #[test]
 fn check_says_take_for_a_ready_issue_and_prints_its_command() {
     let f = fixture();
-    let gh = github(vec![open_issue(3, &SIZED, ANSWERED)]);
+    let gh = github(vec![ready_open_issue(3, &SIZED, ANSWERED)]);
 
     let (result, out) = check(&f, &[3], &gh);
 
@@ -451,7 +451,7 @@ fn check_says_skip_with_the_reason_for_each_kind_of_issue_the_loop_passes_over()
 #[test]
 fn check_gives_every_reason_an_issue_has() {
     let f = fixture();
-    let gh = github(vec![open_issue(5, &[], OPEN_POINTS)]);
+    let gh = github(vec![ready_open_issue(5, &[], OPEN_POINTS)]);
 
     let (result, out) = check(&f, &[5], &gh);
 
@@ -473,7 +473,7 @@ fn check_gives_every_reason_an_issue_has() {
 fn check_takes_an_issue_whose_open_points_heading_is_only_quoted() {
     let f = fixture();
     let body = "Example:\n\n```md\n## Open points\n```\n\nRename `## Open points` when readied.\n";
-    let gh = github(vec![open_issue(3, &SIZED, body)]);
+    let gh = github(vec![ready_open_issue(3, &SIZED, body)]);
 
     let (result, out) = check(&f, &[3], &gh);
 
@@ -485,8 +485,8 @@ fn check_takes_an_issue_whose_open_points_heading_is_only_quoted() {
 fn check_skips_a_real_heading_after_a_nested_fence_and_takes_one_inside_it() {
     let f = fixture();
     let gh = github(vec![
-        open_issue(3, &SIZED, AFTER_NESTED_FENCE),
-        open_issue(4, &SIZED, INSIDE_NESTED_FENCE),
+        ready_open_issue(3, &SIZED, AFTER_NESTED_FENCE),
+        ready_open_issue(4, &SIZED, INSIDE_NESTED_FENCE),
     ]);
 
     let (result, out) = check(&f, &[3], &gh);
@@ -504,7 +504,7 @@ fn check_skips_a_real_heading_after_a_nested_fence_and_takes_one_inside_it() {
 #[test]
 fn the_loop_never_runs_an_issue_whose_heading_follows_a_nested_fence() {
     let f = fixture();
-    let gh = github(vec![open_issue(3, &SIZED, AFTER_NESTED_FENCE)]);
+    let gh = github(vec![ready_open_issue(3, &SIZED, AFTER_NESTED_FENCE)]);
     let script = Script::default();
 
     let (result, out) = run_loop(&f, &opts(&f, &[3]), &script, &gh);
@@ -520,7 +520,7 @@ fn the_loop_never_runs_an_issue_whose_heading_follows_a_nested_fence() {
 #[test]
 fn check_names_an_issue_that_is_not_open() {
     let f = fixture();
-    let gh = github(vec![open_issue(3, &SIZED, "")]);
+    let gh = github(vec![ready_open_issue(3, &SIZED, "")]);
 
     let (result, out) = check(&f, &[3, 9], &gh);
 
@@ -535,7 +535,10 @@ fn check_names_an_issue_that_is_not_open() {
 #[test]
 fn check_gives_an_issue_named_twice_one_verdict() {
     let f = fixture();
-    let gh = github(vec![open_issue(3, &SIZED, ""), open_issue(4, &SIZED, "")]);
+    let gh = github(vec![
+        ready_open_issue(3, &SIZED, ""),
+        ready_open_issue(4, &SIZED, ""),
+    ]);
 
     let (result, out) = check(&f, &[3, 4, 3], &gh);
 
@@ -561,11 +564,11 @@ fn check_refuses_issue_zero_before_reading_anything() {
 fn check_without_issues_takes_the_labeled_queue_in_the_loop_s_order() {
     let f = fixture();
     let gh = github(vec![
-        open_issue(9, &[READY, "size:M"], ""),
-        open_issue(7, &SIZED, ""),
-        open_issue(4, &[READY], ""),
-        open_issue(2, &["size:S"], ""),
-        open_issue(8, &SIZED, OPEN_POINTS),
+        ready_open_issue(9, &[READY, "size:M"], ""),
+        ready_open_issue(7, &SIZED, ""),
+        ready_open_issue(4, &[READY], ""),
+        ready_open_issue(2, &["size:S"], ""),
+        ready_open_issue(8, &SIZED, OPEN_POINTS),
     ]);
 
     let (result, out) = check(&f, &[], &gh);
@@ -584,7 +587,7 @@ fn check_without_issues_takes_the_labeled_queue_in_the_loop_s_order() {
 #[test]
 fn check_of_an_empty_queue_says_so_and_passes() {
     let f = fixture();
-    let gh = github(vec![open_issue(2, &["size:S"], "")]);
+    let gh = github(vec![ready_open_issue(2, &["size:S"], "")]);
 
     let (result, out) = check(&f, &[], &gh);
 
@@ -623,8 +626,8 @@ fn check_while_a_loop_runs_names_it_first_and_still_gives_every_verdict() {
     let f = fixture();
     plant_loop_lock(&f);
     let gh = github(vec![
-        open_issue(5, &SIZED, ""),
-        open_issue(6, &["size:S"], ""),
+        ready_open_issue(5, &SIZED, ""),
+        ready_open_issue(6, &["size:S"], ""),
     ]);
     let lock = fs::read_to_string(queue::lock_path(&f.env.base_dir())).unwrap();
 
@@ -651,7 +654,7 @@ fn check_while_a_loop_runs_names_it_first_and_still_gives_every_verdict() {
 fn check_while_a_loop_runs_still_passes_when_every_issue_would_be_taken() {
     let f = fixture();
     plant_loop_lock(&f);
-    let gh = github(vec![open_issue(5, &SIZED, "")]);
+    let gh = github(vec![ready_open_issue(5, &SIZED, "")]);
 
     let (result, out) = check(&f, &[5], &gh);
 

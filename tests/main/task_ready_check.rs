@@ -132,6 +132,15 @@ fn depends_on_a_list_of_numbers_passes() {
 }
 
 #[test]
+fn depends_on_a_pr_passes() {
+    assert_eq!(depends(Some(" PR #377")).status, Status::Pass);
+    assert_eq!(
+        depends(Some(" #1, PR #377 (merged first)")).status,
+        Status::Pass
+    );
+}
+
+#[test]
 fn depends_on_a_number_with_text_passes() {
     assert_eq!(depends(Some(" #1 (why)")).status, Status::Pass);
     assert_eq!(
@@ -142,7 +151,7 @@ fn depends_on_a_number_with_text_passes() {
 
 #[test]
 fn depends_on_malformed_fails() {
-    for value in [" PR #377", " soon", "", " #", " #1, soon", " nonetheless"] {
+    for value in [" PR", " soon", "", " #", " #1, soon", " nonetheless"] {
         let v = depends(Some(value));
         assert_eq!(v.status, Status::Fail, "{value:?}");
         assert!(v.reason.contains("Depends on"), "{}", v.reason);

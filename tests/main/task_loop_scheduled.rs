@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use assert_cmd::Command;
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, PAUSE_POLL, Steps};
 use sbxm::github::Issue;
 use sbxm::github::fake::FakeGitHub;
@@ -214,7 +214,7 @@ impl Fixture {
 }
 
 fn labeled(number: u32) -> Issue {
-    open_issue(number, &[READY, "size:S"], "")
+    ready_open_issue(number, &[READY, "size:S"], "")
 }
 
 fn github(issues: Vec<Issue>) -> FakeGitHub {

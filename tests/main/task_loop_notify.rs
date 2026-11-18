@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState, RunStatus, WorkflowRun};
@@ -251,7 +251,7 @@ fn github(issues: &[u32], head: &str) -> FakeGitHub {
     let mut open = Vec::new();
     for &n in issues {
         gh = gh.with_issue_text(issue_text(n)).with_pr(pr(100 + n, head));
-        open.push(open_issue(n, &[READY, "size:S"], ""));
+        open.push(ready_open_issue(n, &[READY, "size:S"], ""));
     }
     gh.with_open_issues(open)
 }

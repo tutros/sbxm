@@ -82,7 +82,7 @@ fn set_placement(env: &common::Env, value: &str) {
 mod routing {
     use sbxm::github::fake::FakeGitHub;
 
-    use super::common::task_fixture::{issue_text, open_issue};
+    use super::common::task_fixture::{issue_text, ready_open_issue};
     use super::set_placement;
     use crate::task_loop_parallel::several::{Act, Fixture, Play, fixture, run_loop};
 
@@ -113,7 +113,7 @@ mod routing {
             let mut labels = vec!["ready-for-worker"];
             labels.extend(size.as_deref());
             labels.extend_from_slice(extra);
-            open.push(open_issue(*n, &labels, "Why\n"));
+            open.push(ready_open_issue(*n, &labels, "Why\n"));
         }
         gh.with_open_issues(open)
     }
@@ -271,7 +271,7 @@ mod routing {
     }
 
     #[test]
-    fn an_s_issue_goes_to_the_cloud_before_an_unsized_one() {
+    fn an_s_issue_goes_to_the_cloud_and_an_unsized_one_is_skipped() {
         let f = cloud_first(Some(1));
         let gh = github(&[(5, None, &[]), (10, Some("S"), &[])]);
         let play = Play::new(&f.base());
@@ -279,9 +279,10 @@ mod routing {
         let run = run_loop(&f, &play, &gh, &never);
 
         run.result.unwrap();
-        assert_eq!(
-            starts(&play),
-            ["start 10 run cloud", "start 5 run local"],
+        // An unsized issue fails the readiness rules (issue 725): it no longer runs last.
+        assert_eq!(starts(&play), ["start 10 run cloud"], "{}", run.out);
+        assert!(
+            run.out.contains("skipped #5 Fix 5: no size label"),
             "{}",
             run.out
         );

@@ -20,7 +20,7 @@ use sbxm::github::{Issue, PrInfo, PrState};
 use sbxm::task::outcome::{Kind, Outcome};
 use sbxm::task::record::{self, NewTask, Process, Record, ReviewResult, Stage, Status};
 
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 
 const REPO: &str = "o/r";
 const READY: &str = "ready-for-worker";
@@ -349,7 +349,7 @@ fn fixture(cloud_slots: Option<u32>, roles: &str) -> Fixture {
 fn ready(number: u32, extra: &[&str], body: &str) -> Issue {
     let mut labels = vec![READY, "size:S"];
     labels.extend_from_slice(extra);
-    open_issue(number, &labels, body)
+    ready_open_issue(number, &labels, body)
 }
 
 /// GitHub with these issues open, each one's text scripted, and PRs 101 to 109 open.

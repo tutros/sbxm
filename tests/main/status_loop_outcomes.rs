@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
-use common::task_fixture::{Probe, issue_text, open_issue};
+use common::task_fixture::{Probe, issue_text, ready_open_issue};
 use sbxm::backend::FakeBackend;
 use sbxm::commands::status::{self, LoopSource};
 use sbxm::commands::task_loop::{self, Options, Steps};
@@ -251,7 +251,7 @@ fn github(issues: &[u32]) -> FakeGitHub {
     gh.with_open_issues(
         issues
             .iter()
-            .map(|&n| open_issue(n, &["size:S"], ""))
+            .map(|&n| ready_open_issue(n, &["size:S"], ""))
             .collect(),
     )
 }

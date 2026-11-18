@@ -52,6 +52,7 @@ use crate::task::loop_pause::{self, Pause};
 use crate::task::outcome;
 use crate::task::queue::awaiting_rank;
 use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
+use crate::task::ready;
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
@@ -102,8 +103,6 @@ impl Owed {
 pub const PAUSE_POLL: Duration = Duration::from_secs(5 * 60);
 /// How often a task's first phase is looked at for its record, to take its label off.
 const LABEL_POLL: Duration = Duration::from_secs(2);
-/// Why an issue whose body still has a `## Open points` heading is passed over (issue 511).
-const OPEN_POINTS: &str = "open points not answered";
 
 pub struct Options {
     /// The target repo's root, where `sbxm-task.toml` is (the loop writes nothing there).
@@ -1538,10 +1537,13 @@ impl Loop<'_> {
             let found = open.iter().find(|i| i.number == number);
             let title = found.map_or_else(String::new, |i| format!(" {}", i.title));
             let body = found.map_or("", |i| i.body.as_str());
-            // The label alone isn't enough (issue 511): a worker can't answer open points.
-            if queue::has_open_points(body) {
+            // The label alone isn't enough (issues 511, 709, 725): a worker can't answer open
+            // points or guess a size, so an issue that fails a readiness rule is the issue's to
+            // fix. A named issue that isn't open is refused below, as before.
+            let failures = found.map(ready::failures).unwrap_or_default();
+            if !failures.is_empty() {
                 tried.insert(number);
-                let reason = OPEN_POINTS.to_owned();
+                let reason = failures.join("; also: ");
                 writeln!(out, "skipped #{number}{title}: {reason}")?;
                 refused.push(Skipped {
                     issue: number,
@@ -1550,17 +1552,6 @@ impl Loop<'_> {
                 continue;
             }
             let labels = found.map_or(&[][..], |i| i.labels.as_slice());
-            // More than one size label (issue 709): its size is the issue's to fix, as above.
-            if let Err(several @ queue::SizeError::Several(_)) = queue::size(labels) {
-                tried.insert(number);
-                let reason = several.to_string();
-                writeln!(out, "skipped #{number}{title}: {reason}")?;
-                refused.push(Skipped {
-                    issue: number,
-                    reason,
-                });
-                continue;
-            }
             // Its location's labels (issue 600): a refusal is the issue's to fix, as above.
             let location = match location::for_loop(labels, self.cloud_slots) {
                 Ok(location) => location,
