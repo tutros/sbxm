@@ -682,3 +682,321 @@ mod release {
         assert_eq!(reviews_run(&backend), 0, "no review without the merge");
     }
 }
+
+// The loop: a held task ends its phase without a row, is checked again at each pass, and is
+// released (from its record alone, after a restart too) once nothing overlaps.
+
+mod looping {
+    use super::*;
+    use anyhow::{Result, anyhow};
+    use common::Env as TestEnv;
+    use common::task_fixture::{issue_text, ready_open_issue};
+    use sbxm::commands::task_loop::{self, Env, Options, Steps};
+    use sbxm::task::pipeline::OnHold;
+    use std::cell::{Cell, RefCell};
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    const READY: &str = "ready-for-worker";
+
+    /// Plays `task run` (the task is held on PR #30), `task resume` (ready) and `task finish`.
+    struct Script<'a> {
+        base: PathBuf,
+        gh: &'a FakeGitHub,
+        calls: RefCell<Vec<String>>,
+        clock: Cell<u64>,
+        /// Run after each `task run`: GitHub changing meanwhile.
+        after_run: Box<dyn Fn(&FakeGitHub) + 'a>,
+    }
+
+    impl Steps for Script<'_> {
+        fn run(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+            self.calls.borrow_mut().push(format!("run {issue}"));
+            self.clock.set(self.clock.get() + 300);
+            held_task(&self.base, issue, &["src/a.rs"], START, 30);
+            (self.after_run)(self.gh);
+            Err(OnHold::new(format!("issue-{issue} is held before its review")).into())
+        }
+
+        fn resume(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+            self.calls.borrow_mut().push(format!("resume {issue}"));
+            self.clock.set(self.clock.get() + 600);
+            let dir = record::task_dir(&self.base, &format!("issue-{issue}"));
+            let mut rec = record::read(&dir.join("task.json")).unwrap();
+            if hold::waiting(&rec).is_some() {
+                return Err(anyhow!("resumed while still waiting"));
+            }
+            rec.stage = Stage::Ready;
+            rec.status = Status::Ok;
+            record::write(&dir, &rec).unwrap();
+            Ok(())
+        }
+
+        fn finish(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+            self.calls.borrow_mut().push(format!("finish {issue}"));
+            let dir = record::task_dir(&self.base, &format!("issue-{issue}"));
+            let mut rec = record::read(&dir.join("task.json")).unwrap();
+            rec.stage = Stage::Finished;
+            rec.pr = Some(format!("https://github.com/{REPO}/pull/{}", 100 + issue));
+            record::write(&dir, &rec).unwrap();
+            Ok(())
+        }
+
+        fn file_findings(&self, _: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Ok(())
+        }
+
+        fn fix_pr(&self, pr: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("unexpected fix of PR #{pr}"))
+        }
+
+        fn fix_check(&self, pr: u32, _: u64, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("unexpected log-fix of PR #{pr}"))
+        }
+
+        fn rm_merged(&self, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Ok(())
+        }
+
+        fn room(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Issue task `n`'s record at `held`, waiting on PR `pr` since `since`, its branch changing
+    /// `files`; no process (its command ended).
+    fn held_task(base: &Path, n: u32, files: &[&str], since: u64, pr: u32) -> Record {
+        let mut rec = task(base, n, files, Stage::Held, Status::Ok, since);
+        rec.process = None;
+        hold::start(
+            &mut rec,
+            since,
+            vec![Wait::Pr {
+                number: pr,
+                armed: false,
+            }],
+        );
+        record::write(&record::task_dir(base, &rec.id), &rec).unwrap();
+        rec
+    }
+
+    struct Fixture {
+        env: TestEnv,
+        repo_root: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let env = TestEnv::new();
+        let repo_root = env.tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        fs::write(
+            repo_root.join("sbxm-task.toml"),
+            "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = []\n",
+        )
+        .unwrap();
+        Fixture { env, repo_root }
+    }
+
+    impl Fixture {
+        fn base(&self) -> PathBuf {
+            self.env.base_dir()
+        }
+
+        fn opts(&self) -> Options {
+            Options {
+                repo_root: self.repo_root.clone(),
+                issues: Vec::new(),
+                cap: None,
+                repo: Some(REPO.into()),
+                wait: false,
+            }
+        }
+
+        fn script<'a>(&self, gh: &'a FakeGitHub) -> Script<'a> {
+            Script {
+                base: self.base(),
+                gh,
+                calls: RefCell::default(),
+                clock: Cell::new(START + 3600),
+                after_run: Box::new(|_| {}),
+            }
+        }
+
+        fn saved(&self, n: u32) -> Record {
+            record::read(&record::task_dir(&self.base(), &format!("issue-{n}")).join("task.json"))
+                .unwrap()
+        }
+    }
+
+    /// GitHub with open issues `issues` and PR #30 (issue 3's, a loop's) in `state`, changing
+    /// `src/a.rs`.
+    fn github(f: &Fixture, issues: &[u32], state: PrState) -> FakeGitHub {
+        loop_pr(&f.base(), 3, 30);
+        let mut gh = FakeGitHub::default()
+            .with_user("me")
+            .with_default_branch("main")
+            .with_pr(pr(30, state))
+            .with_pr_files(30, files(&["src/a.rs"]));
+        let mut open = Vec::new();
+        for &n in issues {
+            gh = gh
+                .with_issue_text(issue_text(n))
+                .with_pr(pr(100 + n, PrState::Open));
+            open.push(ready_open_issue(n, &[READY, "size:S"], ""));
+        }
+        gh.with_open_issues(open)
+    }
+
+    struct Run {
+        result: Result<()>,
+        out: String,
+    }
+
+    fn run_loop(f: &Fixture, script: &Script, gh: &FakeGitHub) -> Run {
+        let sleeps = Cell::new(0usize);
+        let now = || script.clock.get();
+        let sleep = |d: Duration| {
+            sleeps.set(sleeps.get() + 1);
+            script.clock.set(script.clock.get() + d.as_secs());
+        };
+        let stop = || sleeps.get() > 3;
+        let env = Env {
+            now: &now,
+            sleep: &sleep,
+            stop_requested: &stop,
+        };
+        let (mut out, mut warn) = (Vec::new(), Vec::new());
+        let result = task_loop::run(
+            &f.env.config_dir(),
+            &f.opts(),
+            script,
+            gh,
+            &Probe,
+            &env,
+            &mut out,
+            &mut warn,
+        );
+        Run {
+            result,
+            out: String::from_utf8(out).unwrap() + &String::from_utf8(warn).unwrap(),
+        }
+    }
+
+    #[test]
+    fn task_loop_hold_a_held_task_ends_its_phase_and_the_loop_moves_on() {
+        let f = fixture();
+        let gh = github(&f, &[9], PrState::Open);
+        let script = f.script(&gh);
+        let run = run_loop(&f, &script, &gh);
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert_eq!(*script.calls.borrow(), vec!["run 9"], "{}", run.out);
+        assert!(
+            run.out
+                .contains("held before its review: waits on #30 (PR, awaits your merge)"),
+            "{}",
+            run.out
+        );
+        assert!(
+            run.out.contains("is held before its review (waits on #30"),
+            "the stop names it: {}",
+            run.out
+        );
+        assert_eq!(f.saved(9).stage, Stage::Held);
+    }
+
+    #[test]
+    fn task_loop_hold_the_pr_it_waits_on_merges_releases_it_to_its_review_and_finish() {
+        let f = fixture();
+        let gh = github(&f, &[9], PrState::Open);
+        let mut script = f.script(&gh);
+        script.after_run =
+            Box::new(|gh| gh.set_merged(30, "cccccccccccccccccccccccccccccccccccccccc"));
+        let run = run_loop(&f, &script, &gh);
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert_eq!(
+            *script.calls.borrow(),
+            vec!["run 9", "resume 9", "finish 9"],
+            "{}",
+            run.out
+        );
+        assert!(run.out.contains("released from its hold"), "{}", run.out);
+        let rec = f.saved(9);
+        assert!(rec.holds[0].released.is_some());
+    }
+
+    #[test]
+    fn task_loop_hold_the_pr_closed_unmerged_releases_it_too() {
+        let f = fixture();
+        held_task(&f.base(), 9, &["src/a.rs"], START, 30);
+        let gh = github(&f, &[], PrState::Closed);
+        let script = f.script(&gh);
+        let run = run_loop(&f, &script, &gh);
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert_eq!(*script.calls.borrow(), vec!["resume 9", "finish 9"]);
+    }
+
+    #[test]
+    fn task_loop_hold_a_restarted_loop_checks_the_held_task_again_and_releases_it() {
+        let f = fixture();
+        // Held by an earlier loop; the PR merged since.
+        held_task(&f.base(), 9, &["src/a.rs"], START, 30);
+        let gh = github(&f, &[], PrState::Merged);
+        let script = f.script(&gh);
+        let run = run_loop(&f, &script, &gh);
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert_eq!(
+            *script.calls.borrow(),
+            vec!["resume 9", "finish 9"],
+            "{}",
+            run.out
+        );
+        // Its row has the minutes it was held: an hour.
+        assert!(
+            run.out.contains("released from its hold after 60 min"),
+            "{}",
+            run.out
+        );
+    }
+
+    #[test]
+    fn task_loop_hold_a_restarted_loop_leaves_a_task_still_overlapping_held() {
+        let f = fixture();
+        held_task(&f.base(), 9, &["src/a.rs"], START, 30);
+        let gh = github(&f, &[], PrState::Open);
+        let script = f.script(&gh);
+        let run = run_loop(&f, &script, &gh);
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        assert!(
+            script.calls.borrow().is_empty(),
+            "{:?}",
+            script.calls.borrow()
+        );
+        assert_eq!(
+            hold::waiting(&f.saved(9)).map(|h| h.released.clone()),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn task_loop_hold_of_two_released_by_one_merge_the_first_held_goes_first() {
+        let f = fixture();
+        // Both wait on PR #30 and share src/a.rs; issue 9 was held first.
+        held_task(&f.base(), 9, &["src/a.rs"], START, 30);
+        held_task(&f.base(), 8, &["src/a.rs"], START + 60, 30);
+        let gh = github(&f, &[], PrState::Merged).with_pr(pr(109, PrState::Open));
+        let gh = gh.with_pr_files(109, files(&["src/a.rs"]));
+        let script = f.script(&gh);
+        let run = run_loop(&f, &script, &gh);
+        assert!(run.result.is_ok(), "{:?}\n{}", run.result, run.out);
+        // Issue 9 goes on to its PR (#109); issue 8 checks again against it and stays held.
+        assert_eq!(
+            *script.calls.borrow(),
+            vec!["resume 9", "finish 9"],
+            "{}",
+            run.out
+        );
+        let eight = f.saved(8);
+        assert!(hold::waiting(&eight).is_some(), "{}", run.out);
+    }
+}

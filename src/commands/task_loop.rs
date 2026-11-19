@@ -708,6 +708,10 @@ enum End {
     /// Cut short by a stop request after one of its phases ran: logged, never counted as parked
     /// (a requested stop exits 0, decision 310; review M-1 of issue 570).
     Stopped(String),
+    /// Held before its review while its changed files overlap other open work (issue 727): no
+    /// row yet, not counted; the loop releases it at a later pass ([`Loop::release_holds`]). The
+    /// line saying so.
+    OnHold(String),
 }
 
 /// A child of a dead loop that outlived it, adopted by this loop (issue 643).
@@ -1743,6 +1747,10 @@ impl Loop<'_> {
                 return self.stopped(issue, out).map_err(io);
             }
             ran = true;
+            if let Some(line) = self.on_hold(issue, kind) {
+                self.usage_waited = Duration::ZERO;
+                return Ok(End::OnHold(line));
+            }
             let ready = self.record(issue).filter(|r| r.stage == Stage::Ready);
             if kind == outcome::Kind::Ready && ready.is_some() {
                 self.usage_waited = Duration::ZERO;
@@ -2236,6 +2244,164 @@ impl Loop<'_> {
             r.hooks[LOOP_HOOK] = serde_json::Value::Bool(true);
         })?;
         Ok(Claimed::Marked)
+    }
+
+    /// The line for task `issue` whose phase ended with `kind`, when that end held it before its
+    /// review (issue 727): its record at `held`, naming what it waits on.
+    fn on_hold(&self, issue: u32, kind: outcome::Kind) -> Option<String> {
+        if kind != outcome::Kind::OnHold {
+            return None;
+        }
+        let rec = self.record(issue)?;
+        let hold = crate::task::hold::waiting(&rec)?;
+        Some(format!(
+            "{}: held before its review: {}; the loop releases it once that work has merged or \
+             ended",
+            self.issue_named(issue),
+            crate::task::hold::waits_line(&hold.on)
+        ))
+    }
+
+    /// The held tasks of this repo the loop may release now (issue 727), from their records
+    /// alone, so a restarted loop finds them too: issue tasks at `held` that wait (`ok`) or were
+    /// released and not resumed yet, with no live process, none of them `due` or running
+    /// already. In the order they were held, so the one held first goes first.
+    fn held_tasks(&self, due: &VecDeque<Held>) -> Result<Vec<Record>> {
+        let mut found = Vec::new();
+        for dir in record::task_folders(&self.base_dir)? {
+            if check_own_folder(&self.base_dir, &dir).is_err() {
+                continue;
+            }
+            let Ok(rec) = record::read(&dir.join("task.json")) else {
+                continue;
+            };
+            let ours = rec.kind == Kind::Issue
+                && rec.repo == self.repo
+                && rec.id == format!("issue-{}", rec.number)
+                && rec.stage == Stage::Held
+                && rec.status == record::Status::Ok
+                && !rec.process_alive(self.probe)
+                && !due.iter().any(|h| h.issue == rec.number)
+                && !self.running_issues.contains(&rec.number);
+            if ours {
+                found.push(rec);
+            }
+        }
+        found.sort_by_key(|r| {
+            let since = r.holds.last().map(|h| h.since.clone()).unwrap_or_default();
+            (since, r.number)
+        });
+        Ok(found)
+    }
+
+    /// Decision 331(3), issue 727: each held task is checked again, the one held first first;
+    /// one that no longer overlaps any open work is released (stamped in its record, under its
+    /// lock) and put at the end of `due`, so its `task resume` merges the base, runs its gates
+    /// again and gets its review. Each released one counts for those checked after it. A check
+    /// that can't be made leaves the task held, with a warning; a task a live command holds is
+    /// left for the next pass.
+    fn release_holds(
+        &mut self,
+        due: &mut VecDeque<Held>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        for rec in self.held_tasks(due)? {
+            let issue = rec.number;
+            if crate::task::hold::waiting(&rec).is_some() {
+                let paths = rec.changed_paths(&self.task_dir(issue).join("repo.git"));
+                let checker = crate::task::hold::Checker {
+                    base_dir: &self.base_dir,
+                    repo: &self.repo,
+                    github: self.github,
+                    probe: self.probe,
+                };
+                use crate::task::hold::Check;
+                let waits = paths.and_then(|paths| checker.waits(&rec, &paths));
+                let waits = match waits {
+                    Ok(waits) => waits,
+                    Err(e) => {
+                        self.warn_once(
+                            warn,
+                            format!(
+                                "{} stays held: its overlap could not be checked ({e:#})",
+                                self.issue_named(issue)
+                            ),
+                        )?;
+                        continue;
+                    }
+                };
+                if !waits.is_empty() {
+                    continue;
+                }
+                match self.mark_released(issue) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(e) if e.is::<lock::InUse>() => continue,
+                    Err(e) => return Err(e),
+                }
+                let minutes = self
+                    .record(issue)
+                    .map_or(0, |r| crate::task::hold::minutes(&r, self.now()));
+                writeln!(
+                    out,
+                    "{}: released from its hold after {minutes} min; it merges {} in, runs its \
+                     gates again, then gets its review",
+                    self.issue_named(issue),
+                    rec.base
+                )?;
+            }
+            let started = rec
+                .stages
+                .first()
+                .and_then(|s| crate::run::results::parse_timestamp(&s.at))
+                .unwrap_or_else(|| self.now());
+            due.push_back(Held {
+                issue,
+                title: rec.title.clone(),
+                size: None,
+                started,
+                stops: Vec::new(),
+                // A release whose merge fails stops for the user (decision 298), not resumed again.
+                retry: Retry::Resume { failures: 1 },
+                cut_off: false,
+            });
+        }
+        Ok(())
+    }
+
+    /// Stamps the release of task `issue`'s hold in its record, under its lock: `false` when it
+    /// has no hold waiting any more (a command run by hand released it).
+    fn mark_released(&self, issue: u32) -> Result<bool> {
+        let _lock = pipeline::lock_task(&self.base_dir, &format!("issue-{issue}"), self.probe)?;
+        let dir = self.task_dir(issue);
+        let mut rec = record::read(&dir.join("task.json"))?;
+        if crate::task::hold::waiting(&rec).is_none() {
+            return Ok(false);
+        }
+        let now = self.now();
+        record::write_change(&dir, &mut rec, |r| {
+            crate::task::hold::release(r, now);
+        })?;
+        Ok(true)
+    }
+
+    /// The line for each task still held as the loop stops (issue 727): the next loop checks it
+    /// again.
+    fn holds_left(&self, out: &mut dyn Write) -> Result<()> {
+        for rec in self.held_tasks(&VecDeque::new())? {
+            if let Some(hold) = crate::task::hold::waiting(&rec) {
+                writeln!(
+                    out,
+                    "{} is held before its review ({}); the next loop checks it again, or \
+                     continue it with `sbxm task resume --issue {}`",
+                    self.issue_named(rec.number),
+                    crate::task::hold::waits_line(&hold.on),
+                    rec.number
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// A task whose lock was held, tried again (issue 409): it goes on from what its record says
@@ -4483,12 +4649,13 @@ fn work(
     // task, then moves to `due`, tried before the next new issue. A task held again goes back to
     // `held`, so the loop never tries one twice with nothing run in between.
     let mut held: Vec<Held> = Vec::new();
-    let left = |held: &[Held], due: &VecDeque<Held>, out: &mut dyn Write| -> Result<()> {
-        for h in due.iter().chain(held) {
-            writeln!(out, "{}", h.left())?;
-        }
-        Ok(())
-    };
+    let left =
+        |lp: &Loop, held: &[Held], due: &VecDeque<Held>, out: &mut dyn Write| -> Result<()> {
+            for h in due.iter().chain(held) {
+                writeln!(out, "{}", h.left())?;
+            }
+            lp.holds_left(out)
+        };
     loop {
         let (issue, title, size, started, stops, ended, retried) = if let Some(a) =
             adopted.pop_front()
@@ -4543,13 +4710,13 @@ fn work(
         } else {
             if (env.stop_requested)() {
                 writeln!(out, "stopped on request")?;
-                left(&held, &due, out)?;
+                left(&*lp, &held, &due, out)?;
                 return Ok("stopped on request".to_owned());
             }
             if opts.cap.is_some_and(|cap| tasks_run >= cap) {
                 let stop = format!("--cap {} reached", opts.cap.unwrap_or_default());
                 writeln!(out, "{stop}")?;
-                left(&held, &due, out)?;
+                left(&*lp, &held, &due, out)?;
                 return Ok(stop);
             }
             lp.clean_merged(out, warn)?;
@@ -4565,9 +4732,10 @@ fn work(
             };
             if !go_on {
                 writeln!(out, "stopped on request")?;
-                left(&held, &due, out)?;
+                left(&*lp, &held, &due, out)?;
                 return Ok("stopped on request".to_owned());
             }
+            lp.release_holds(&mut due, out, warn)?;
             if let Some(again) = due.pop_front() {
                 let Held {
                     issue,
@@ -4631,7 +4799,7 @@ fn work(
                             })
                         )?;
                     }
-                    left(&held, &due, out)?;
+                    left(&*lp, &held, &due, out)?;
                     return Ok(stop.to_owned());
                 };
                 idle = false;
@@ -4715,12 +4883,12 @@ fn work(
                     });
                 }
                 writeln!(out, "stopped on request")?;
-                left(&held, &due, out)?;
+                left(&*lp, &held, &due, out)?;
                 return Ok("stopped on request".to_owned());
             }
             Next::NeedsUser(cause, e) => {
                 if cause == Cause::SignIn {
-                    left(&held, &due, out)?;
+                    left(&*lp, &held, &due, out)?;
                 }
                 return Err(e);
             }
@@ -4855,7 +5023,7 @@ impl Loop<'_> {
             End::Done { .. } => Outcome::Done,
             End::Parked { .. } | End::Stopped(_) => Outcome::Parked,
             End::Refused(_) | End::Taken(_) => Outcome::Skipped,
-            End::Held(_) => Outcome::Held,
+            End::Held(_) | End::OnHold(_) => Outcome::Held,
         };
         note(lock, self, warn, |p| {
             if p.current == Some(issue) {
@@ -4880,6 +5048,10 @@ impl Loop<'_> {
                 return Ok(Next::Taken);
             }
             End::Held(retry) => return Ok(Next::Held(retry)),
+            End::OnHold(line) => {
+                writeln!(out, "{tag}{line}")?;
+                return Ok(Next::Taken);
+            }
             End::Done { ready, outcome } => (Some(ready), outcome, false),
             End::Parked { ready, outcome } => (ready, outcome, true),
             End::Stopped(outcome) => (None, outcome, false),

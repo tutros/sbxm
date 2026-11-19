@@ -1149,6 +1149,9 @@ impl Loop<'_> {
                 "its lock is held by a command run by hand; queue it again once that ends",
             ),
             Ok(End::Taken(line)) => Ended::new(Outcome::Skipped, line),
+            // Held before its review (issue 727): the loop releases its task later, as any
+            // issue task's, and its log row comes then.
+            Ok(End::OnHold(line)) => Ended::new(Outcome::Skipped, line),
             Ok(End::Stopped(_)) | Err(Halt::Stopped) => {
                 Ended::new(Outcome::Stopped, "stopped on request")
             }
