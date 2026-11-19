@@ -3872,6 +3872,10 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
             "task {id} is already being reviewed or has been (stage reviewing); if the sbxm \
              process that ran it is gone, continue it with `{resume}`, or see `{status_hint}`"
         ),
+        (Stage::Held, _) => bail!(
+            "task {id} is held before its review while its changed files overlap other open \
+             work; the loop releases it, or continue it with `{resume}`; see `{status_hint}`"
+        ),
         (Stage::Prepared, _) if matches!(task.kind, record::Kind::Spec | record::Kind::Fix) => {
             bail!(
                 "no worker has run for task {id}; see `{status_hint}`, and remove its folders under the base dir to start it again"

@@ -33,6 +33,10 @@ pub enum Stage {
     Gating,
     Reviewing,
     Fixing,
+    /// Held before its review while its changed files overlap other open work (decision
+    /// 331(3), issue 727): waiting (`ok`), merging the base after its release (`running`, then
+    /// `completed` or `timed-out`), or that merge failed (`failed`).
+    Held,
     Ready,
     Finished,
 }
@@ -45,6 +49,7 @@ impl Stage {
             Self::Gating => "gating",
             Self::Reviewing => "reviewing",
             Self::Fixing => "fixing",
+            Self::Held => "held",
             Self::Ready => "ready",
             Self::Finished => "finished",
         }
@@ -66,9 +71,14 @@ impl Stage {
             (Self::Prepared, Kind::Pr) => &[Self::Gating, Self::Reviewing],
             (Self::Working | Self::Fixing, Kind::Issue | Kind::Spec | Kind::Fix) => &[Self::Gating],
             (Self::Working | Self::Fixing, Kind::Pr) => &[],
-            (Self::Gating, Kind::Issue | Kind::Spec | Kind::Fix) => {
-                &[Self::Reviewing, Self::Fixing]
+            // Only an issue or spec task is held before its review (issue 727): a fix task is the
+            // work others wait on.
+            (Self::Gating, Kind::Issue | Kind::Spec) => {
+                &[Self::Reviewing, Self::Fixing, Self::Held]
             }
+            (Self::Gating, Kind::Fix) => &[Self::Reviewing, Self::Fixing],
+            (Self::Held, Kind::Issue | Kind::Spec) => &[Self::Gating],
+            (Self::Held, Kind::Pr | Kind::Fix) => &[],
             (Self::Gating, Kind::Pr) => &[Self::Reviewing],
             (Self::Reviewing, Kind::Issue | Kind::Spec | Kind::Fix) => &[Self::Fixing, Self::Ready],
             (Self::Reviewing, Kind::Pr) => &[Self::Ready],
@@ -86,6 +96,7 @@ impl Stage {
             Self::Prepared => &[Running, Failed],
             Self::Working | Self::Fixing => &[Running, Completed, TimedOut, Failed],
             Self::Gating => &[Running, Passed, GatesFailed],
+            Self::Held => &[Ok, Running, Completed, TimedOut, Failed],
             Self::Reviewing => &[Running, Completed, Failed],
             Self::Ready | Self::Finished => &[Ok],
         }
@@ -101,6 +112,8 @@ impl Stage {
             (Self::Gating, _) => &[Passed],
             (Self::Prepared, _) => &[Running],
             (Self::Working | Self::Fixing, _) => &[Completed, TimedOut],
+            // Released with nothing to merge (`ok`), or once its merge of the base ended.
+            (Self::Held, _) => &[Ok, Completed, TimedOut],
             (Self::Reviewing, _) => &[Completed],
             (Self::Ready, _) => &[Ok],
             (Self::Finished, _) => &[],
@@ -491,6 +504,11 @@ pub struct Record {
     /// in older records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub medium_armed: Option<crate::task::trial::Armed>,
+    /// Every hold before review the task had (issue 727), in order: the last one is in effect
+    /// while the task is `held` and not released. Absent in older records and for a task never
+    /// held.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holds: Vec<super::hold::Hold>,
     /// Set when the task continues an open PR's branch; absent in older records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continues: Option<PrBranch>,
@@ -718,6 +736,7 @@ impl Record {
             should_fix_round: false,
             repeat_tolerated: false,
             medium_armed: None,
+            holds: Vec::new(),
             continues: None,
             related: Vec::new(),
             notes: Vec::new(),

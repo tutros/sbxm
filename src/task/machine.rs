@@ -200,12 +200,13 @@ impl Row {
     }
 }
 
-pub const STAGES: [Stage; 7] = [
+pub const STAGES: [Stage; 8] = [
     Stage::Prepared,
     Stage::Working,
     Stage::Gating,
     Stage::Reviewing,
     Stage::Fixing,
+    Stage::Held,
     Stage::Ready,
     Stage::Finished,
 ];
@@ -214,6 +215,10 @@ const ISSUE: &[Kind] = &[Kind::Issue];
 const PR: &[Kind] = &[Kind::Pr];
 const SPEC: &[Kind] = &[Kind::Spec];
 const FIX: &[Kind] = &[Kind::Fix];
+/// The tasks a loop holds before their review (issue 727): a fix task is the work others wait on.
+const HOLDABLE: &[Kind] = &[Kind::Issue, Kind::Spec];
+/// A held task that waits, or whose merge of the base ended: it may go on to its gates.
+const HELD_DONE: &[Status] = &[Status::Ok, Status::Completed, Status::TimedOut];
 /// Issue and spec tasks both have a worker and go through gates, review and fix rounds the same
 /// way (issue 142, decision 174(d)): a spec source adds this one answer set, no new rows.
 /// A fix task of a PR (issue 313) runs them the same way too.
@@ -298,6 +303,33 @@ pub const TABLE: &[Row] = &[
         event: Event::Advance(Stage::Reviewing),
         to: Some(Stage::Reviewing),
         action: "run the reviewer",
+    },
+    // Decision 331(3), issue 727: a loop task whose changed files overlap other open work once
+    // its gates pass waits before its review; released, it merges the base, then its gates run
+    // again.
+    Row {
+        stages: &[Stage::Gating],
+        statuses: &[Status::Passed],
+        live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
+        kinds: HOLDABLE,
+        event: Event::Advance(Stage::Held),
+        to: Some(Stage::Held),
+        action: "hold the task before its review while its changed files overlap other open work",
+    },
+    Row {
+        stages: &[Stage::Held],
+        statuses: HELD_DONE,
+        live: Live::Any,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
+        kinds: HOLDABLE,
+        event: Event::Advance(Stage::Gating),
+        to: Some(Stage::Gating),
+        action: "run the gates again on the base merged in",
     },
     // A gate failure feeds a fix round when the round budget allows it (issue 117, decision
     // 173(d)); `Record::advance` enforces the budget itself through `done_for`, so this row only
@@ -798,6 +830,37 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Fixing),
         action: "replay the recorded review: a fix round for its findings, else ready",
     },
+    // A held task (issue 727): `task resume`, or the loop's release, merges the base in, runs
+    // the gates again, then the reviewer; a merge that failed or was cut off runs again.
+    Row {
+        stages: &[Stage::Held],
+        statuses: &[
+            Status::Ok,
+            Status::Completed,
+            Status::TimedOut,
+            Status::Failed,
+        ],
+        live: Live::Gone,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
+        kinds: HOLDABLE,
+        event: Event::Resume,
+        to: Some(Stage::Held),
+        action: "merge the base in, run the gates again, then the reviewer",
+    },
+    Row {
+        stages: &[Stage::Held],
+        statuses: &[Status::Running],
+        live: Live::Interrupted,
+        pr: RecordedPr::Any,
+        stops: &STOPS,
+        should_fix: &SHOULD_FIX_ROUNDS,
+        kinds: HOLDABLE,
+        event: Event::Resume,
+        to: Some(Stage::Held),
+        action: "merge the base in again, run the gates again, then the reviewer",
+    },
     // A task that stopped `ready` with findings left (`stopped`): another fix round, after
     // `--rounds N` added to the budget when it was used (decisions 173(c), 177(b)(q)); `--rounds`
     // is for these states only (issue 513).
@@ -907,6 +970,10 @@ pub fn states(kind: Kind) -> Vec<State> {
     let mut all = Vec::new();
     for stage in STAGES {
         if kind == Kind::Pr && matches!(stage, Stage::Working | Stage::Fixing) {
+            continue;
+        }
+        // Only an issue or spec task is ever held (issue 727).
+        if !HOLDABLE.contains(&kind) && stage == Stage::Held {
             continue;
         }
         for &status in stage.statuses() {
