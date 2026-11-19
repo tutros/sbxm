@@ -1105,3 +1105,160 @@ mod shown {
         assert!(eight.ends_with("| - | - | - |"), "{eight}");
     }
 }
+
+// A cloud task held past its sandbox's lifetime: its worker sandbox, stopped and kept while it
+// waited, is gone by its release, and is made again from the saved branch, as `task resume`
+// makes it.
+
+mod cloud {
+    use super::*;
+    use common::cloud_task::{
+        CLEAN, cloud_backend, cloud_backend_listing, identity, spec, task_record, worker_sandbox,
+    };
+    use common::task_fixture::fixture_with;
+    use sbxm::backend::Location;
+    use sbxm::commands::task_resume::{self, Options, Target};
+    use sbxm::task::pipeline::{self, OnHold, Prepared, TaskEnv};
+    use sbxm::task::record::ProcessProbe;
+
+    struct Gone;
+
+    impl ProcessProbe for Gone {
+        fn start_time(&self, _pid: u32) -> Option<u64> {
+            None
+        }
+    }
+
+    const TOML: &str = "[sandbox]\nprofile = \"default\"\nlocation = \"local\"\n\n[gates]\nsandbox = [\"cargo test\"]\n";
+
+    /// A cloud spec task worked, then held after its gates: its worker sandbox stopped, kept.
+    fn held_cloud_task() -> (common::task_fixture::Fixture, std::path::PathBuf, String) {
+        let f = fixture_with(TOML);
+        let (spec, id) = spec(&f);
+        let worker = worker_sandbox(&id);
+        let root = f.env.tmp.path().join("cloud-fs");
+        let backend = cloud_backend(&root, &id, &[CLEAN]);
+        sbxm::commands::task_start::run_spec(
+            &f.env.config_dir(),
+            &sbxm::commands::task_start::SpecOptions {
+                repo_root: f.env.tmp.path().join("target-repo"),
+                spec: spec.clone(),
+                worker_harness: None,
+                worker_model: None,
+                time_limit: None,
+                reviewer_time_limit: None,
+                profile: None,
+                base: Some("main".into()),
+                repo: Some("o/r".into()),
+                clone_source: Some(common::task_fixture::source(&f)),
+                identity: Some(identity()),
+                disk: Default::default(),
+                location: Some(Location::Cloud),
+            },
+            &backend,
+            &FakeGitHub::default(),
+            &Gone,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let mut prepared = Prepared::open(&f.env.base_dir(), &id).unwrap();
+        let check = FakeCheck::new(vec![Wait::Pr {
+            number: 30,
+            armed: false,
+        }]);
+        let who = identity();
+        let env = TaskEnv {
+            progress: &pipeline::quiet,
+            config_dir: &f.env.config_dir(),
+            config: &f.config,
+            backend: &backend,
+            probe: &Gone,
+            host: &sbxm::task::gates::FakeHostRunner::default(),
+            sleep: &|_| {},
+            scoped_secrets: &[],
+            disk: Box::leak(Box::default()),
+            identity: Some(&who),
+            clone_source: None,
+            hold: Some(&check),
+        };
+        let err = pipeline::review_issue(&env, &mut prepared).unwrap_err();
+        assert!(err.is::<OnHold>(), "{err:#}");
+        let log = backend.log();
+        assert!(log.contains(&format!("stop {worker}")), "{log:?}");
+        assert!(!log.contains(&format!("rm {worker}")), "{log:?}");
+        let held = task_record(&f, &id);
+        assert_eq!(held.stage, Stage::Held);
+        assert!(held.has_open_sandbox(&worker), "{:?}", held.sandboxes);
+        (f, spec, id)
+    }
+
+    /// `task resume --spec FILE` of the held task against `backend`: its result and output.
+    fn release(
+        f: &common::task_fixture::Fixture,
+        spec: std::path::PathBuf,
+        backend: &sbxm::backend::FakeBackend,
+    ) -> (anyhow::Result<()>, String) {
+        let (mut out, mut warn) = (Vec::new(), Vec::new());
+        let result = task_resume::run(
+            &f.env.config_dir(),
+            &Options {
+                repo_root: f.env.tmp.path().join("target-repo"),
+                target: Target::Spec(spec),
+                rounds: None,
+                should_fix: false,
+                disk: Default::default(),
+                identity: Some(identity()),
+                forget_ambiguous: false,
+            },
+            backend,
+            &FakeGitHub::default(),
+            &Gone,
+            &sbxm::task::gates::FakeHostRunner::default(),
+            &mut out,
+            &mut warn,
+        );
+        (
+            result,
+            String::from_utf8(out).unwrap() + &String::from_utf8(warn).unwrap(),
+        )
+    }
+
+    #[test]
+    fn task_loop_hold_a_cloud_task_held_past_its_sandbox_lifetime_gets_its_sandbox_made_again() {
+        let (f, spec, id) = held_cloud_task();
+        let worker = worker_sandbox(&id);
+        // Released after its lifetime: the cloud no longer lists the sandbox.
+        let gone = cloud_backend_listing(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN], false);
+        let (result, out) = release(&f, spec, &gone);
+        result.expect(&out);
+        let creates: Vec<String> = gone.creates().into_iter().map(|c| c.name).collect();
+        assert_eq!(creates.first(), Some(&worker), "{creates:?}");
+        let task = task_record(&f, &id);
+        assert_eq!(task.stage, Stage::Ready, "{out}");
+        assert!(task.holds[0].released.is_some());
+        assert!(
+            task.sandboxes.iter().all(|e| e.removed_at.is_some()),
+            "{:?}",
+            task.sandboxes
+        );
+    }
+
+    #[test]
+    fn task_loop_hold_a_cloud_task_whose_sandbox_cant_be_made_again_says_why_and_stays_held() {
+        let (f, spec, id) = held_cloud_task();
+        let before = fs::read(record::task_dir(&f.env.base_dir(), &id).join("task.json")).unwrap();
+        // Gone, and the cloud preflight of its rebuild now fails (`sbx` under the cloud minimum).
+        let gone = cloud_backend_listing(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN], false)
+            .with_version("0.45.0");
+        let (result, _) = release(&f, spec, &gone);
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("0.46.0"), "{err}");
+        assert!(gone.creates().is_empty());
+        assert_eq!(
+            fs::read(record::task_dir(&f.env.base_dir(), &id).join("task.json")).unwrap(),
+            before,
+            "nothing changed: it stays held"
+        );
+    }
+}
