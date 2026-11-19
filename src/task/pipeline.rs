@@ -4069,7 +4069,6 @@ fn review_checked(
             return Ok(report);
         }
     }
-    hold_if_overlapping(env, prepared)?;
 
     let round = next_review_round(prepared)?;
     review_rounds(env, prepared, report, round, None, false)
@@ -4078,8 +4077,10 @@ fn review_checked(
 /// Decision 331(3), issue 727: a loop task (`env.hold` set) whose gates passed before its first
 /// review is held there while its changed files overlap other open work: the record goes to
 /// `held`, naming what it waits on and since when, and [`OnHold`] ends the command, which frees
-/// its sandbox slot. A check that can't be made (GitHub not answering) holds nothing: the task
-/// goes on to its review, with a warning.
+/// its sandbox slot. Called where every route to a first review meets ([`review_rounds`]), so a
+/// resumed gate-fix round is checked too. A task released from a hold goes on to its review
+/// without another check. A check that can't be made (GitHub not answering) holds nothing: the
+/// task goes on to its review, with a warning.
 fn hold_if_overlapping(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     let Some(check) = env.hold else {
         return Ok(());
@@ -4088,6 +4089,7 @@ fn hold_if_overlapping(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     let before_review = task.stage == Stage::Gating
         && task.status == Status::Passed
         && task.review.is_none()
+        && task.holds.is_empty()
         && matches!(task.kind, Kind::Issue | Kind::Spec);
     if !before_review {
         return Ok(());
@@ -4208,6 +4210,9 @@ pub(super) fn review_rounds(
     mut first: Option<record::ReviewResult>,
     mut ignore_repeat: bool,
 ) -> Result<ReviewReport> {
+    if first.is_none() {
+        hold_if_overlapping(env, prepared)?;
+    }
     loop {
         let (must_fix, full, repeat) = match first.take() {
             Some(replayed) => {

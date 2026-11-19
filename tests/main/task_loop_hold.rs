@@ -483,6 +483,7 @@ mod release {
     fn backend(f: &Fixture, merge: Merge, merges: Arc<AtomicUsize>) -> FakeBackend {
         let workspace = f.env.base_dir().join("tasks").join("issue-41");
         let reviewer = play_reviews(&f.env.base_dir(), "issue-41", vec![CLEAN.to_owned()]);
+        let runs = AtomicUsize::new(0);
         FakeBackend::with_secrets(&["anthropic", "openai"])
             .with_exec_output_matching("claude", ok(CLAUDE_DONE))
             .with_exec_output_matching("codex", ok(CODEX_DONE))
@@ -496,7 +497,10 @@ mod release {
                     let merging =
                         fs::read_to_string(&prompt).is_ok_and(|p| p.contains("Merge the base"));
                     if !merging {
-                        fs::write(workspace.join("a.txt"), "the task's line\n").unwrap();
+                        // Each worker or fix-round run writes its own line, so each commits.
+                        let run = runs.fetch_add(1, Ordering::SeqCst);
+                        fs::write(workspace.join("a.txt"), format!("the task's line {run}\n"))
+                            .unwrap();
                         git(&workspace, &["add", "-A"]);
                         git(&workspace, &["commit", "-q", "-m", "Add a"]);
                         return;
@@ -780,6 +784,48 @@ mod release {
     #[test]
     fn task_loop_hold_a_timed_out_merge_cut_off_before_its_collection_is_collected_on_resume() {
         merge_ended_uncollected(Status::TimedOut);
+    }
+
+    #[test]
+    fn task_loop_hold_a_resumed_gate_fix_round_before_the_first_review_is_held_too() {
+        let f = config();
+        let merges = Arc::new(AtomicUsize::new(0));
+        let backend = backend(&f, Merge::Merges, merges);
+        let mut prepared = worked_task(&f, &backend);
+        // Its first gates failed and the fix round for them failed: no review yet.
+        let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+        fs::write(meta.join("gate-failure.md"), "`cargo test` failed\n").unwrap();
+        fs::write(meta.join("fix-prompt.md"), "Fix the gate.\n").unwrap();
+        change_record(&f, |r| {
+            r.stage = Stage::Fixing;
+            r.status = Status::Failed;
+        });
+        prepared.record = saved(&f);
+        let check = FakeCheck::new(vec![Wait::Pr {
+            number: 30,
+            armed: false,
+        }]);
+        let err =
+            resume::resume(&env(&f, &backend, Some(&check)), &mut prepared, None).unwrap_err();
+        assert!(err.is::<pipeline::OnHold>(), "{err:#}");
+        assert_eq!(check.calls.get(), 1);
+        assert_eq!(saved(&f).stage, Stage::Held);
+        assert_eq!(reviews_run(&backend), 0);
+    }
+
+    #[test]
+    fn task_loop_hold_a_released_task_is_not_held_again_before_its_review() {
+        let f = config();
+        let merges = Arc::new(AtomicUsize::new(0));
+        let backend = backend(&f, Merge::Merges, merges);
+        let mut prepared = held(&f, &backend);
+        let check = FakeCheck::new(vec![Wait::Pr {
+            number: 30,
+            armed: false,
+        }]);
+        resume::resume(&env(&f, &backend, Some(&check)), &mut prepared, None).unwrap();
+        assert_eq!(check.calls.get(), 0);
+        assert_eq!(saved(&f).stage, Stage::Ready);
     }
 }
 
