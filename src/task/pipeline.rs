@@ -4281,6 +4281,136 @@ pub(super) fn continue_after_fix(env: &TaskEnv, prepared: &mut Prepared) -> Resu
     after_fix(env, prepared, false)
 }
 
+/// A task released from its hold before review (decision 331(3), issue 727), by the loop or by
+/// `task resume`: it merges the default branch in, as `task fix` does (decision 292): an agent in
+/// the worker's sandbox, which resolves any conflict (decision 298); then its gates run again
+/// and it gets its review, to `ready`. Nothing is merged when the branch has the base already
+/// (the PR it waited on was closed). A merge the agent didn't make stops the task for the user,
+/// `held` and `failed`. The hold records whether the merge had a conflict.
+pub(super) fn release_hold(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewReport> {
+    if matches!(
+        prepared.record.status,
+        Status::Ok | Status::Running | Status::Failed
+    ) {
+        merge_base_round(env, prepared)?;
+    }
+    let repo_git = prepared.meta.join("repo.git");
+    let base = repo::branch_tip(&repo_git, &prepared.record.base)?;
+    let tip = repo::branch_tip(&repo_git, &prepared.record.branch)?;
+    if !repo::is_ancestor(&repo_git, &base, &tip)? {
+        let line = format!(
+            "the merge of {} (at {base}) into {} wasn't made, so {} stops here for you: see {} \
+             for what the agent handed back, merge it in the worker's clone, then `{}`",
+            prepared.record.base,
+            prepared.record.branch,
+            prepared.record.id,
+            prepared.meta.join("result.md").display(),
+            next::resume(&prepared.record)
+        );
+        prepared.record.notes.push(format!("hold: {line}"));
+        prepared.record.finish(Status::Failed)?;
+        record::write(&prepared.meta, &prepared.record)?;
+        release_local_worker_into(env, prepared);
+        bail!("{line}");
+    }
+    let mut report = ReviewReport::default();
+    check_branch_locks(env, prepared)?;
+    ensure_local_worker(env, prepared)?;
+    if pass_gates(env, prepared, &mut report, "after-merge")? {
+        return Ok(report);
+    }
+    let round = next_review_round(prepared)?;
+    review_rounds(env, prepared, report, round, None, false)
+}
+
+/// The merge round of [`release_hold`]: the hold is stamped released, `repo.git`'s base moves to
+/// origin's, and when the branch doesn't have it yet, the base goes into the worker's clone as
+/// `.sbxm-task/base.bundle` with the merge prompt, and the worker merges it, its commits
+/// collected as a fix round's are.
+fn merge_base_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+    let at = now();
+    let repo_git = prepared.meta.join("repo.git");
+    let base_name = prepared.record.base.clone();
+    let known = repo::branch_tip(&repo_git, &base_name)?;
+    repo::fetch_base_branch(&repo_git, &base_name)?;
+    let base = repo::branch_tip(&repo_git, &base_name)?;
+    let tip = repo::branch_tip(&repo_git, &prepared.record.branch)?;
+    if repo::is_ancestor(&repo_git, &base, &tip)? {
+        record::write_change(&prepared.meta, &mut prepared.record, |t| {
+            super::hold::release(t, at);
+            if let Some(hold) = t.holds.last_mut() {
+                hold.conflict.get_or_insert(false);
+            }
+            t.status = Status::Ok;
+            t.ended_at = None;
+        })?;
+        (env.progress)(&format!(
+            "{}: released; {} has {base_name} already, nothing to merge",
+            prepared.record.id, prepared.record.branch
+        ));
+        return Ok(());
+    }
+    let conflict = repo::merge_conflicts(&repo_git, &base, &tip)?;
+    let bundle = prepared.meta.join("base.bundle");
+    let known = repo::is_ancestor(&repo_git, &known, &base)?.then_some(known);
+    repo::bundle_base(&repo_git, &base_name, known.as_deref(), &bundle)?;
+    let bundle_bytes =
+        fs::read(&bundle).with_context(|| format!("cannot read {}", bundle.display()))?;
+    let template = prompts::template(Role::MergeBase, &env.config.prompts)?;
+    let prompt = prompts::render(
+        &template.name,
+        &template.text,
+        &[
+            ("branch", &prepared.record.branch),
+            ("base", &base_name),
+            ("gates_sandbox", &bullets(&env.config.gates.sandbox)),
+        ],
+    )?;
+    super::resume::refuse_ambiguous(&prepared.record, "merge the base")?;
+    let process = Process::current(env.probe);
+    record::write_change(&prepared.meta, &mut prepared.record, |t| {
+        super::hold::release(t, at);
+        if let Some(hold) = t.holds.last_mut() {
+            hold.conflict = Some(conflict);
+        }
+        // Checked above: the task is held.
+        let _ = t.begin_merge(at, process);
+    })?;
+    (env.progress)(&format!(
+        "{}: released; merging {base_name} in{}",
+        prepared.record.id,
+        if conflict { ", which conflicts" } else { "" }
+    ));
+    let ensured = match prepared.record.location {
+        Location::Cloud => ensure_cloud_worker(env, prepared, SandboxRole::Fix, "the merge"),
+        Location::Local => ensure_worker_sandbox(env, prepared, false),
+    };
+    if let Err(e) = ensured {
+        prepared
+            .record
+            .notes
+            .push(format!("merge of the base: the worker sandbox: {e:#}"));
+        prepared.record.finish(Status::Failed)?;
+        record::write(&prepared.meta, &prepared.record)?;
+        return Err(e);
+    }
+    let files: [(&str, &[u8]); 2] = [
+        ("base.bundle", &bundle_bytes),
+        ("fix-prompt.md", prompt.as_bytes()),
+    ];
+    let merged = place_agent_files(env.backend, prepared, &files, "merge-input")
+        .and_then(|()| fix_as(env, prepared, true));
+    if let Err(e) = merged {
+        if prepared.record.status == Status::Running {
+            prepared.record.finish(Status::Failed)?;
+            record::write(&prepared.meta, &prepared.record)?;
+        }
+        release_local_worker_into(env, prepared);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// A task that stopped `ready` with must-fix findings, reopened by `task resume` (issue 118,
 /// decisions 173(c), 177(b)(q)): a fix round from the recorded review (its `input`, read and
 /// placed before anything changed), then as after any fix round, except that the first review
@@ -4743,24 +4873,35 @@ impl FixInput {
             ("fix-prompt.md", self.prompt.as_bytes()),
             (self.source_name, self.source_text.as_slice()),
         ];
-        if prepared.record.location == Location::Local {
-            return repo::write_agent_files(&prepared.workspace, &files, Existing::Refuse);
-        }
-        let worker = prepared
-            .record
-            .worker
-            .as_ref()
-            .context("the task has no worker")?;
-        let staging = Staged::fresh(&prepared.meta, "fix-input")?;
-        let mut staged = Vec::new();
-        for (name, bytes) in files {
-            let host = staging.dir().join(name);
-            fs::write(&host, bytes).with_context(|| format!("cannot write {}", host.display()))?;
-            staged.push((host, name));
-        }
-        let control = format!("{}/{AGENT_DIR}", prepared.sandbox_clone().to_string_lossy());
-        copy_in_all(backend, &worker.sandbox, &control, &staged)
+        place_agent_files(backend, prepared, &files, "fix-input")
     }
+}
+
+/// Writes `files` into the worker's clone's `.sbxm-task`, refusing a link the agent left; into a
+/// cloud clone they go by copy, from a fresh staging folder named `staging` (milestone 4 slice 5).
+fn place_agent_files(
+    backend: &dyn SandboxBackend,
+    prepared: &Prepared,
+    files: &[(&str, &[u8])],
+    staging: &str,
+) -> Result<()> {
+    if prepared.record.location == Location::Local {
+        return repo::write_agent_files(&prepared.workspace, files, Existing::Refuse);
+    }
+    let worker = prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?;
+    let staging = Staged::fresh(&prepared.meta, staging)?;
+    let mut staged = Vec::new();
+    for &(name, bytes) in files {
+        let host = staging.dir().join(name);
+        fs::write(&host, bytes).with_context(|| format!("cannot write {}", host.display()))?;
+        staged.push((host, name));
+    }
+    let control = format!("{}/{AGENT_DIR}", prepared.sandbox_clone().to_string_lossy());
+    copy_in_all(backend, &worker.sandbox, &control, &staged)
 }
 
 /// A fix round's [`FixInput`]: the review in the task's folder, or `gate_failure`'s output.
@@ -4967,6 +5108,12 @@ fn read_source(prepared: &Prepared) -> Result<(&'static str, Vec<u8>)> {
 /// The fix round's run itself, in a task at `fixing/running` whose prompt is in the clone: the
 /// worker, its transcript and status, then its commits collected.
 fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+    fix_as(env, prepared, false)
+}
+
+/// [`fix`]; with `merge`, the round is a released task's merge of the base (issue 727): said as
+/// such, and not one of the task's fix rounds on its issue (`fix_runs`).
+fn fix_as(env: &TaskEnv, prepared: &mut Prepared, merge: bool) -> Result<()> {
     let worker = &env.config.worker;
     let sandbox = prepared
         .record
@@ -4976,11 +5123,18 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
         .sandbox
         .clone();
     // The caller counts the round once it is over.
-    (env.progress)(&format!(
-        "{}: fix round {} started",
-        prepared.record.id,
-        prepared.record.round.saturating_add(1)
-    ));
+    (env.progress)(&if merge {
+        format!(
+            "{}: the merge of {} started",
+            prepared.record.id, prepared.record.base
+        )
+    } else {
+        format!(
+            "{}: fix round {} started",
+            prepared.record.id,
+            prepared.record.round.saturating_add(1)
+        )
+    });
     let clone = prepared.sandbox_clone();
     let run = |resume: Option<String>| {
         headless::run(
@@ -5023,12 +5177,14 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     if let Ok(result) = &ran {
         record_run(prepared, SandboxRole::Fix, round, result, started);
         // Issue 430: `task finish` says on the issue how each fix round ran. A round run again
-        // by `task resume` replaces its entry.
-        prepared.record.fix_runs.retain(|r| r.round != round);
-        prepared
-            .record
-            .fix_runs
-            .push(record::FixRun { round, resumed });
+        // by `task resume` replaces its entry. A merge of the base is no fix round.
+        if !merge {
+            prepared.record.fix_runs.retain(|r| r.round != round);
+            prepared
+                .record
+                .fix_runs
+                .push(record::FixRun { round, resumed });
+        }
     }
     let result = match ran {
         Ok(result) => result,
@@ -5060,7 +5216,12 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
             ))
             .into());
         }
-        bail!("the fix round failed ({why}); the worker's clone keeps whatever it did");
+        let what = if merge {
+            "merge of the base"
+        } else {
+            "fix round"
+        };
+        bail!("the {what} failed ({why}); the worker's clone keeps whatever it did");
     }
 
     let mut notes = Vec::new();

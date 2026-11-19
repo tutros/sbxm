@@ -827,6 +827,28 @@ impl Record {
         Ok(())
     }
 
+    /// Starts the merge of the base into a task released from its hold before review (issue
+    /// 727): `held` and running, owned by `process`. Refused for a task that isn't held, or whose
+    /// merge is running already, with nothing changed.
+    pub fn begin_merge(&mut self, now: u64, process: Process) -> Result<()> {
+        if self.stage != Stage::Held {
+            bail!(
+                "task {} is {} in stage {}, so it has no hold to release; see `sbxm task status`",
+                self.id,
+                self.status.name(),
+                self.stage.name()
+            );
+        }
+        self.status = Status::Running;
+        self.ended_at = None;
+        self.stages.push(Stamp {
+            stage: Stage::Held,
+            at: format_timestamp(now),
+        });
+        self.take(process);
+        Ok(())
+    }
+
     /// Whether this is a PR task stuck where `task review --pr` starts its gates over (issue 379,
     /// decision 282): a preparation that failed, or gates or a review left `running`. Whether a
     /// `running` one's process is really gone is the caller's check (`check_can_review_pr`).

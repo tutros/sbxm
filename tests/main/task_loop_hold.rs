@@ -421,3 +421,264 @@ mod pipeline_hold {
         assert_eq!(saved(&f).stage, Stage::Ready);
     }
 }
+
+// The release: the base merged in by the worker, the gates again, then the one review.
+
+mod release {
+    use super::pipeline_hold::{CLEAN, config, reviews_run, saved};
+    use super::*;
+    use common::task_fixture::{CLAUDE_DONE, CODEX_DONE, Fixture, is_bundle, is_headless, ok};
+    use common::task_fixture::{play_reviews, worked_task};
+    use sbxm::backend::FakeBackend;
+    use sbxm::task::gates::FakeHostRunner;
+    use sbxm::task::pipeline::{self, TaskEnv};
+    use sbxm::task::record::ProcessProbe;
+    use sbxm::task::resume;
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// No recorded process is alive: the held task's command has ended.
+    struct Gone;
+
+    impl ProcessProbe for Gone {
+        fn start_time(&self, _pid: u32) -> Option<u64> {
+            None
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Merge {
+        /// The agent merges the bundled base, keeping both sides of a conflict.
+        Merges,
+        /// The agent hands the merge back without making it.
+        HandsBack,
+    }
+
+    fn env<'a>(
+        f: &'a Fixture,
+        backend: &'a FakeBackend,
+        hold: Option<&'a dyn Check>,
+    ) -> TaskEnv<'a> {
+        let host: &'static FakeHostRunner = Box::leak(Box::default());
+        TaskEnv {
+            progress: &pipeline::quiet,
+            config_dir: Box::leak(Box::new(f.env.config_dir())),
+            config: &f.config,
+            backend,
+            probe: &Gone,
+            host,
+            sleep: &std::thread::sleep,
+            scoped_secrets: &[],
+            disk: Box::leak(Box::default()),
+            identity: Some(&f.identity),
+            clone_source: None,
+            hold,
+        }
+    }
+
+    /// The worker of issue 41: its first run commits `a.txt`; a merge round merges the base from
+    /// `.sbxm-task/base.bundle` as the prompt says (or not, with `HandsBack`). Every review is
+    /// clean. Counts the merge rounds.
+    fn backend(f: &Fixture, merge: Merge, merges: Arc<AtomicUsize>) -> FakeBackend {
+        let workspace = f.env.base_dir().join("tasks").join("issue-41");
+        let reviewer = play_reviews(&f.env.base_dir(), "issue-41", vec![CLEAN.to_owned()]);
+        FakeBackend::with_secrets(&["anthropic", "openai"])
+            .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+            .with_exec_output_matching("codex", ok(CODEX_DONE))
+            .with_exec_hook(move |sandbox, spec| {
+                reviewer(sandbox, spec);
+                if sandbox.contains("-review-") {
+                    return;
+                }
+                if is_headless(spec) {
+                    let prompt = workspace.join(".sbxm-task").join("fix-prompt.md");
+                    let merging =
+                        fs::read_to_string(&prompt).is_ok_and(|p| p.contains("Merge the base"));
+                    if !merging {
+                        fs::write(workspace.join("a.txt"), "the task's line\n").unwrap();
+                        git(&workspace, &["add", "-A"]);
+                        git(&workspace, &["commit", "-q", "-m", "Add a"]);
+                        return;
+                    }
+                    merges.fetch_add(1, Ordering::SeqCst);
+                    if merge == Merge::HandsBack {
+                        return;
+                    }
+                    git(
+                        &workspace,
+                        &[
+                            "fetch",
+                            "-q",
+                            ".sbxm-task/base.bundle",
+                            "+refs/heads/main:refs/remotes/origin/main",
+                        ],
+                    );
+                    let merged = Command::new("git")
+                        .args(["merge", "--no-edit", "-q", "origin/main"])
+                        .current_dir(&workspace)
+                        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                        .env("GIT_AUTHOR_NAME", "t")
+                        .env("GIT_AUTHOR_EMAIL", "t@t")
+                        .env("GIT_COMMITTER_NAME", "t")
+                        .env("GIT_COMMITTER_EMAIL", "t@t")
+                        .output()
+                        .unwrap();
+                    if !merged.status.success() {
+                        // Both sides kept, one after the other.
+                        let text = fs::read_to_string(workspace.join("a.txt")).unwrap();
+                        let resolved: String = text
+                            .lines()
+                            .filter(|l| {
+                                !l.starts_with("<<<<<<<")
+                                    && !l.starts_with("=======")
+                                    && !l.starts_with(">>>>>>>")
+                            })
+                            .map(|l| format!("{l}\n"))
+                            .collect();
+                        fs::write(workspace.join("a.txt"), resolved).unwrap();
+                        git(&workspace, &["add", "a.txt"]);
+                        git(&workspace, &["commit", "-q", "--no-edit"]);
+                    }
+                } else if is_bundle(spec) {
+                    git(
+                        &workspace,
+                        &[
+                            "bundle",
+                            "create",
+                            ".sbxm-task/branch.bundle",
+                            "issue-41",
+                            "^origin/main",
+                        ],
+                    );
+                }
+            })
+    }
+
+    /// `main` on the stand-in origin gets a commit writing `file`; returns its tip.
+    fn move_main(f: &Fixture, file: &str, text: &str) -> String {
+        let dir = f
+            .env
+            .tmp
+            .path()
+            .join(format!("main-{}", file.replace('.', "-")));
+        git(
+            f.env.tmp.path(),
+            &[
+                "clone",
+                "-q",
+                f.origin.to_str().unwrap(),
+                dir.to_str().unwrap(),
+            ],
+        );
+        fs::write(dir.join(file), text).unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "main moves"]);
+        git(&dir, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        git(&dir, &["rev-parse", "HEAD"])
+    }
+
+    /// Issue 41 worked, then held before its review on PR #30.
+    fn held(f: &Fixture, backend: &FakeBackend) -> pipeline::Prepared {
+        let mut prepared = worked_task(f, backend);
+        let check = FakeCheck::new(vec![Wait::Pr {
+            number: 30,
+            armed: false,
+        }]);
+        let err =
+            pipeline::review_issue(&env(f, backend, Some(&check)), &mut prepared).unwrap_err();
+        assert!(err.is::<pipeline::OnHold>(), "{err:#}");
+        assert_eq!(saved(f).stage, Stage::Held);
+        prepared
+    }
+
+    fn branch_has(f: &Fixture, commit: &str) -> bool {
+        let repo_git = record::task_dir(&f.env.base_dir(), "issue-41").join("repo.git");
+        Command::new("git")
+            .args(["merge-base", "--is-ancestor", commit, "refs/heads/issue-41"])
+            .current_dir(&repo_git)
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    fn gate_runs(backend: &FakeBackend) -> usize {
+        backend
+            .execs()
+            .iter()
+            .filter(|(sandbox, spec)| {
+                !sandbox.contains("-review-") && spec.argv.iter().any(|a| a.contains("cargo test"))
+            })
+            .count()
+    }
+
+    #[test]
+    fn task_loop_hold_released_after_the_pr_merged_merges_the_base_runs_the_gates_then_reviews() {
+        let f = config();
+        let merges = Arc::new(AtomicUsize::new(0));
+        let backend = backend(&f, Merge::Merges, merges.clone());
+        let mut prepared = held(&f, &backend);
+        let gates_before = gate_runs(&backend);
+        let main = move_main(&f, "b.txt", "the merged PR's file\n");
+        resume::resume(&env(&f, &backend, None), &mut prepared, None).unwrap();
+        let rec = saved(&f);
+        assert_eq!((rec.stage, rec.status), (Stage::Ready, Status::Ok));
+        assert_eq!(merges.load(Ordering::SeqCst), 1, "one merge round");
+        assert!(branch_has(&f, &main), "the branch has main's new tip");
+        assert_eq!(gate_runs(&backend), gates_before + 1, "the gates ran again");
+        assert_eq!(reviews_run(&backend), 1, "one review");
+        assert!(rec.holds[0].released.is_some());
+        assert_eq!(rec.holds[0].conflict, Some(false));
+        assert!(rec.fix_runs.is_empty(), "a merge is no fix round");
+    }
+
+    #[test]
+    fn task_loop_hold_released_after_the_pr_closed_unmerged_reviews_with_nothing_to_merge() {
+        let f = config();
+        let merges = Arc::new(AtomicUsize::new(0));
+        let backend = backend(&f, Merge::Merges, merges.clone());
+        let mut prepared = held(&f, &backend);
+        let gates_before = gate_runs(&backend);
+        resume::resume(&env(&f, &backend, None), &mut prepared, None).unwrap();
+        let rec = saved(&f);
+        assert_eq!(rec.stage, Stage::Ready);
+        assert_eq!(merges.load(Ordering::SeqCst), 0, "nothing to merge");
+        assert_eq!(gate_runs(&backend), gates_before + 1);
+        assert_eq!(reviews_run(&backend), 1);
+        assert_eq!(rec.holds[0].conflict, Some(false));
+    }
+
+    #[test]
+    fn task_loop_hold_a_conflicting_merge_is_resolved_by_the_agent_then_gated_and_reviewed() {
+        let f = config();
+        let merges = Arc::new(AtomicUsize::new(0));
+        let backend = backend(&f, Merge::Merges, merges.clone());
+        let mut prepared = held(&f, &backend);
+        let main = move_main(&f, "a.txt", "main's own line\n");
+        resume::resume(&env(&f, &backend, None), &mut prepared, None).unwrap();
+        let rec = saved(&f);
+        assert_eq!(rec.stage, Stage::Ready);
+        assert_eq!(merges.load(Ordering::SeqCst), 1);
+        assert!(branch_has(&f, &main));
+        assert_eq!(rec.holds[0].conflict, Some(true));
+        assert_eq!(reviews_run(&backend), 1);
+    }
+
+    #[test]
+    fn task_loop_hold_a_merge_the_agent_hands_back_stops_the_task_for_the_user() {
+        let f = config();
+        let merges = Arc::new(AtomicUsize::new(0));
+        let backend = backend(&f, Merge::HandsBack, merges.clone());
+        let mut prepared = held(&f, &backend);
+        move_main(&f, "a.txt", "main's own line\n");
+        let err = resume::resume(&env(&f, &backend, None), &mut prepared, None).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("wasn't made, so issue-41 stops here for you"),
+            "{err:#}"
+        );
+        let rec = saved(&f);
+        assert_eq!((rec.stage, rec.status), (Stage::Held, Status::Failed));
+        assert_eq!(rec.holds[0].conflict, Some(true));
+        assert_eq!(reviews_run(&backend), 0, "no review without the merge");
+    }
+}

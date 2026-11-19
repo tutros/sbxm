@@ -393,6 +393,7 @@ fn resume_runs_worker(task: &Record) -> bool {
         (Stage::Prepared, _)
             | (Stage::Working, Status::Running | Status::Failed)
             | (Stage::Fixing, Status::Running | Status::Failed)
+            | (Stage::Held, Status::Ok | Status::Running | Status::Failed)
             | (Stage::Ready, _)
     )
 }
@@ -649,6 +650,12 @@ fn resume_checked(
                 );
             }
         },
+        // Held before its review (issue 727): released, it merges the base, runs its gates
+        // again and gets its review.
+        (Stage::Held, _) => {
+            resumed.review = Some(pipeline::release_hold(env, prepared)?);
+            return Ok(resumed);
+        }
         // Gates (ended or cut off) and a failed review: what `review_issue` already continues.
         (Stage::Gating, _) | (Stage::Reviewing, Status::Failed) => {}
         (stage, status) => bail!(

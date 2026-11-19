@@ -499,6 +499,66 @@ pub fn is_ancestor(repo_git: &Path, ancestor: &str, tip: &str) -> Result<bool> {
     Ok(out.status.success())
 }
 
+/// Moves `refs/heads/<base>` in `repo_git` to origin's `base` now (issue 727): a task released
+/// from its hold before review merges the base as it is now, and its own commits then count from
+/// there, so its review and its changed paths leave out what the base brought in.
+pub fn fetch_base_branch(repo_git: &Path, base: &str) -> Result<()> {
+    check_ref("base", base)?;
+    let refspec = format!("+refs/heads/{base}:refs/heads/{base}");
+    git::user_run(
+        repo_git,
+        &[
+            "--git-dir",
+            text(repo_git)?,
+            "-c",
+            "fetch.fsckObjects=true",
+            "-c",
+            "transfer.fsckObjects=true",
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "origin",
+            &refspec,
+        ],
+    )
+    .with_context(|| format!("cannot fetch {base} from origin"))?;
+    Ok(())
+}
+
+/// Whether merging commits `a` and `b` (full ids) of `repo_git` conflicts, worked out without a
+/// worktree (`git merge-tree --write-tree`, issue 727).
+pub fn merge_conflicts(repo_git: &Path, a: &str, b: &str) -> Result<bool> {
+    let out = git::output(
+        repo_git,
+        Some(repo_git),
+        None,
+        &["merge-tree", "--write-tree", "--no-messages", a, b],
+    )?;
+    match out.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => bail!(
+            "cannot tell whether {a} and {b} merge cleanly: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    }
+}
+
+/// Writes a bundle of `refs/heads/<base>` from `repo_git` to `dest`, leaving out what `known` (a
+/// full commit id the agent's clone has, when `base` contains it) already brings (issue 727).
+pub fn bundle_base(repo_git: &Path, base: &str, known: Option<&str>, dest: &Path) -> Result<()> {
+    check_ref("base", base)?;
+    let head = format!("refs/heads/{base}");
+    let exclude = known.map(|k| format!("^{k}"));
+    let mut args = vec!["bundle", "create", text(dest)?, &head];
+    if let Some(exclude) = &exclude {
+        args.push(exclude);
+    }
+    git::run(repo_git, Some(repo_git), None, &args)
+        .with_context(|| format!("cannot bundle {base} from the task repo"))?;
+    Ok(())
+}
+
 /// The best common ancestor of commits `a` and `b` in `repo_git` (both full ids), where two
 /// lines of work parted.
 pub fn merge_base(repo_git: &Path, a: &str, b: &str) -> Result<String> {
