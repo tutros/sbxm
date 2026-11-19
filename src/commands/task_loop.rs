@@ -2263,9 +2263,11 @@ impl Loop<'_> {
     }
 
     /// The held tasks of this repo the loop may release now (issue 727), from their records
-    /// alone, so a restarted loop finds them too: issue tasks at `held` that wait (`ok`) or were
-    /// released and not resumed yet, with no live process, none of them `due` or running
-    /// already. In the order they were held, so the one held first goes first.
+    /// alone, so a restarted loop finds them too: issue tasks at `held` that wait (`ok`), or were
+    /// released and not resumed yet, or whose merge of the base ended before their process went
+    /// (`completed`, `timed-out`), with no live process, none of them `due` or running already.
+    /// One whose merge failed (`failed`) is the user's. In the order they were held, so the one
+    /// held first goes first.
     fn held_tasks(&self, due: &VecDeque<Held>) -> Result<Vec<Record>> {
         let mut found = Vec::new();
         for dir in record::task_folders(&self.base_dir)? {
@@ -2279,7 +2281,10 @@ impl Loop<'_> {
                 && rec.repo == self.repo
                 && rec.id == format!("issue-{}", rec.number)
                 && rec.stage == Stage::Held
-                && rec.status == record::Status::Ok
+                && matches!(
+                    rec.status,
+                    record::Status::Ok | record::Status::Completed | record::Status::TimedOut
+                )
                 && !rec.process_alive(self.probe)
                 && !due.iter().any(|h| h.issue == rec.number)
                 && !self.running_issues.contains(&rec.number);

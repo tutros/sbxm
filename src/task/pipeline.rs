@@ -4337,6 +4337,19 @@ fn merge_base_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     let at = now();
     let repo_git = prepared.meta.join("repo.git");
     let base_name = prepared.record.base.clone();
+    // Every input is read before `repo.git`'s base moves: the merge prompt, and no ambiguous
+    // create in the way of the worker's sandbox (decision 268).
+    super::resume::refuse_ambiguous(&prepared.record, "merge the base")?;
+    let template = prompts::template(Role::MergeBase, &env.config.prompts)?;
+    let prompt = prompts::render(
+        &template.name,
+        &template.text,
+        &[
+            ("branch", &prepared.record.branch),
+            ("base", &base_name),
+            ("gates_sandbox", &bullets(&env.config.gates.sandbox)),
+        ],
+    )?;
     let known = repo::branch_tip(&repo_git, &base_name)?;
     repo::fetch_base_branch(&repo_git, &base_name)?;
     let base = repo::branch_tip(&repo_git, &base_name)?;
@@ -4362,17 +4375,6 @@ fn merge_base_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     repo::bundle_base(&repo_git, &base_name, known.as_deref(), &bundle)?;
     let bundle_bytes =
         fs::read(&bundle).with_context(|| format!("cannot read {}", bundle.display()))?;
-    let template = prompts::template(Role::MergeBase, &env.config.prompts)?;
-    let prompt = prompts::render(
-        &template.name,
-        &template.text,
-        &[
-            ("branch", &prepared.record.branch),
-            ("base", &base_name),
-            ("gates_sandbox", &bullets(&env.config.gates.sandbox)),
-        ],
-    )?;
-    super::resume::refuse_ambiguous(&prepared.record, "merge the base")?;
     let process = Process::current(env.probe);
     record::write_change(&prepared.meta, &mut prepared.record, |t| {
         super::hold::release(t, at);
