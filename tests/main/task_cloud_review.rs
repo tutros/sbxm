@@ -1382,6 +1382,7 @@ fn a_reviewer_sandbox_gets_the_scoped_secrets_and_its_removal_is_retried_then_th
         disk: Box::leak(Box::default()),
         identity: Some(&who),
         clone_source: None,
+        hold: None,
     };
 
     sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
@@ -1746,6 +1747,7 @@ fn a_strict_reviewer_with_a_host_left_is_removed_then_its_secret_then_refused() 
         disk: Box::leak(Box::default()),
         identity: Some(&who),
         clone_source: None,
+        hold: None,
     };
 
     let result = sbxm::task::pipeline::review_issue(&env, &mut prepared);
@@ -1833,6 +1835,7 @@ fn a_rebuilt_strict_fix_sandbox_whose_list_cannot_be_read_is_removed_then_refuse
         disk: Box::leak(Box::default()),
         identity: Some(&who),
         clone_source: None,
+        hold: None,
     };
     let headless_before = backend
         .execs()

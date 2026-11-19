@@ -109,6 +109,7 @@ fn a_local_issue_task_s_fix_round_gets_the_issue_md_updated_since_the_start() {
         disk: Box::leak(Box::default()),
         identity: None,
         clone_source: None,
+        hold: None,
     };
     sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
     let clone = prepared.workspace.clone();

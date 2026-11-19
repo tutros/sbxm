@@ -124,6 +124,7 @@ fn env<'a>(f: &'a Fixture, backend: &'a FakeBackend, probe: &'a dyn ProcessProbe
         disk: Box::leak(Box::default()),
         identity: None,
         clone_source: None,
+        hold: None,
     }
 }
 
@@ -353,6 +354,7 @@ fn the_worker_s_sandbox_is_remade_from_the_profile_recorded_at_start_not_the_cur
         disk: Box::leak(Box::default()),
         identity: None,
         clone_source: None,
+        hold: None,
     };
 
     resume::resume(&env, &mut prepared, None).unwrap();

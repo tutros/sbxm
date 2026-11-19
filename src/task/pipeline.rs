@@ -355,6 +355,10 @@ pub struct TaskEnv<'a> {
     /// Prints a line the moment a phase starts (issue 538): the worker, the gates, a review
     /// round, a fix round. The command's `out`, so the line reaches `run.log` then too.
     pub progress: &'a dyn Fn(&str),
+    /// What a loop task's changed files are checked against once its gates pass, before its
+    /// review (issue 727, decision 331(3)): set only for a child of `task loop`; `None` holds
+    /// nothing.
+    pub hold: Option<&'a dyn super::hold::Check>,
 }
 
 /// A [`TaskEnv::progress`] that prints nothing.
@@ -465,6 +469,7 @@ impl Ctx<'_> {
             disk: self.disk,
             identity: Some(self.identity),
             clone_source: Some(self.clone_source),
+            hold: None,
             progress,
         }
     }
@@ -784,6 +789,19 @@ impl std::fmt::Display for SbxUnavailable {
 }
 
 impl std::error::Error for SbxUnavailable {}
+
+/// A loop task held before its review (issue 727, decision 331(3)): not a failure. Its record is
+/// at `held`, naming what it waits on; the loop releases it once nothing overlaps.
+#[derive(Debug)]
+pub struct OnHold(String);
+
+impl std::fmt::Display for OnHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OnHold {}
 
 /// The words a harness's lapsed sign-in is recorded with (issue 445, answer 2), lowercase: Claude
 /// Code's "OAuth session expired and could not be refreshed" (G64, 2026-10-27).
@@ -4016,7 +4034,7 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
     next_review_round(prepared)?;
     let _slot = take_cloud_slot(env, &prepared.record)?;
     let reviewed = review_checked(env, prepared, report);
-    stop_cloud_worker(env, prepared);
+    stop_or_keep_cloud_worker(env, prepared);
     // A fix round that failed, or gates that stopped the task, end its phase too (issue 341).
     release_local_worker_into(env, prepared);
     reviewed
@@ -4045,9 +4063,65 @@ fn review_checked(
             return Ok(report);
         }
     }
+    hold_if_overlapping(env, prepared)?;
 
     let round = next_review_round(prepared)?;
     review_rounds(env, prepared, report, round, None, false)
+}
+
+/// Decision 331(3), issue 727: a loop task (`env.hold` set) whose gates passed before its first
+/// review is held there while its changed files overlap other open work: the record goes to
+/// `held`, naming what it waits on and since when, and [`OnHold`] ends the command, which frees
+/// its sandbox slot. A check that can't be made (GitHub not answering) holds nothing: the task
+/// goes on to its review, with a warning.
+fn hold_if_overlapping(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+    let Some(check) = env.hold else {
+        return Ok(());
+    };
+    let task = &prepared.record;
+    let before_review = task.stage == Stage::Gating
+        && task.status == Status::Passed
+        && task.review.is_none()
+        && matches!(task.kind, Kind::Issue | Kind::Spec);
+    if !before_review {
+        return Ok(());
+    }
+    let waits = task
+        .changed_paths(&prepared.meta.join("repo.git"))
+        .and_then(|paths| check.waits(task, &paths));
+    let waits = match waits {
+        Ok(waits) => waits,
+        Err(e) => {
+            prepared.warnings.push(format!(
+                "{}: could not check its changed files against other open work ({e:#}); it goes \
+                 on to its review",
+                task.id
+            ));
+            return Ok(());
+        }
+    };
+    if waits.is_empty() {
+        return Ok(());
+    }
+    let line = format!(
+        "{} is held before its review: {}; the loop releases it once that work has merged or \
+         ended",
+        task.id,
+        super::hold::waits_line(&waits)
+    );
+    let at = now();
+    record::write_change(&prepared.meta, &mut prepared.record, |t| {
+        if t.advance(Stage::Held, at, Process::current(env.probe))
+            .is_ok()
+        {
+            super::hold::start(t, at, waits);
+        }
+    })?;
+    if prepared.record.stage != Stage::Held {
+        bail!("{} could not be held before its review", prepared.record.id);
+    }
+    (env.progress)(&line);
+    Err(OnHold(line).into())
 }
 
 /// The number for a review round that is about to start: after the last recorded review and
@@ -5837,6 +5911,31 @@ fn release_cloud_sandbox(env: &TaskEnv, prepared: &mut Prepared, sandbox: &str) 
 
 /// The task stops (ready, or for any reason): its cloud worker sandbox goes now (P5 (d),
 /// decision 263), then its scoped secrets; nothing for a local task.
+/// [`stop_cloud_worker`], except for a task held before its review (issue 727): its cloud worker
+/// sandbox is only stopped, and kept for its release within its lifetime; one gone by then is
+/// made again from the saved branch, as `task resume` makes it.
+pub(super) fn stop_or_keep_cloud_worker(env: &TaskEnv, prepared: &mut Prepared) {
+    if super::hold::waiting(&prepared.record).is_none() {
+        return stop_cloud_worker(env, prepared);
+    }
+    let Some(sandbox) = prepared.record.worker.as_ref().map(|w| w.sandbox.clone()) else {
+        return;
+    };
+    if prepared.record.location != Location::Cloud || !prepared.record.has_open_sandbox(&sandbox) {
+        return;
+    }
+    match env.backend.stop(&sandbox) {
+        Ok(()) => prepared.events.push(format!(
+            "{}: its cloud sandbox {sandbox} is stopped and kept while it is held",
+            prepared.record.id
+        )),
+        Err(e) => prepared.warnings.push(format!(
+            "could not stop cloud sandbox {sandbox} while {} is held: {e:#}",
+            prepared.record.id
+        )),
+    }
+}
+
 pub(super) fn stop_cloud_worker(env: &TaskEnv, prepared: &mut Prepared) {
     let stopped = lifetime::release_worker(
         env.backend,

@@ -269,3 +269,155 @@ fn task_loop_hold_two_tasks_whose_gates_pass_together_the_first_holds_the_second
     record::write(&record::task_dir(base, &held.id), &held).unwrap();
     assert_eq!(waits(base, &github, &first), Vec::<Wait>::new());
 }
+
+// The hold point in the pipeline: after the gates pass, before the first review.
+
+/// A [`Check`] that answers `waits` and counts its calls.
+struct FakeCheck {
+    waits: Vec<Wait>,
+    calls: std::cell::Cell<u32>,
+}
+
+impl FakeCheck {
+    fn new(waits: Vec<Wait>) -> Self {
+        Self {
+            waits,
+            calls: std::cell::Cell::new(0),
+        }
+    }
+}
+
+impl Check for FakeCheck {
+    fn waits(&self, _task: &Record, paths: &[String]) -> anyhow::Result<Vec<Wait>> {
+        self.calls.set(self.calls.get() + 1);
+        assert!(!paths.is_empty(), "the task's changed paths are checked");
+        Ok(self.waits.clone())
+    }
+}
+
+mod pipeline_hold {
+    use super::*;
+    use common::task_fixture::{
+        CLAUDE_DONE, CODEX_DONE, Fixture, Play, fixture_with, ok, play_reviews, play_tasks,
+        worked_task,
+    };
+    use sbxm::backend::FakeBackend;
+    use sbxm::task::gates::FakeHostRunner;
+    use sbxm::task::outcome;
+    use sbxm::task::pipeline::{self, TaskEnv};
+
+    pub const CLEAN: &str = "Must-fix findings: 0\nRisk: low\n\nNothing.\n";
+
+    pub fn config() -> Fixture {
+        fixture_with(
+            "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\n\
+             [reviewer]\nharness = \"codex\"\n",
+        )
+    }
+
+    /// The worker commits `a.txt`; every review is clean.
+    pub fn backend(f: &Fixture) -> FakeBackend {
+        let worker = play_tasks(
+            &f.env.base_dir(),
+            "main",
+            Play {
+                commits: vec!["a.txt".into()],
+                result_md: Some(b"done\n".to_vec()),
+                bundle_bytes: None,
+            },
+        );
+        let reviewer = play_reviews(&f.env.base_dir(), "issue-41", vec![CLEAN.to_owned()]);
+        FakeBackend::with_secrets(&["anthropic", "openai"])
+            .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+            .with_exec_output_matching("codex", ok(CODEX_DONE))
+            .with_exec_hook(move |sandbox, spec| {
+                worker(sandbox, spec);
+                reviewer(sandbox, spec);
+            })
+    }
+
+    pub fn env<'a>(
+        f: &'a Fixture,
+        backend: &'a FakeBackend,
+        hold: Option<&'a dyn Check>,
+    ) -> TaskEnv<'a> {
+        let host: &'static FakeHostRunner = Box::leak(Box::default());
+        TaskEnv {
+            progress: &pipeline::quiet,
+            config_dir: Box::leak(Box::new(f.env.config_dir())),
+            config: &f.config,
+            backend,
+            probe: &Probe,
+            host,
+            sleep: &std::thread::sleep,
+            scoped_secrets: &[],
+            disk: Box::leak(Box::default()),
+            identity: Some(&f.identity),
+            clone_source: None,
+            hold,
+        }
+    }
+
+    pub fn saved(f: &Fixture) -> Record {
+        record::read(&record::task_dir(&f.env.base_dir(), "issue-41").join("task.json")).unwrap()
+    }
+
+    pub fn reviews_run(backend: &FakeBackend) -> usize {
+        backend
+            .execs()
+            .iter()
+            .filter(|(sandbox, spec)| {
+                sandbox.contains("-review-") && spec.argv.iter().any(|a| a == "codex")
+            })
+            .count()
+    }
+
+    #[test]
+    fn task_loop_hold_an_overlap_after_the_gates_holds_the_task_before_its_review() {
+        let f = config();
+        let backend = backend(&f);
+        let mut prepared = worked_task(&f, &backend);
+        let check = FakeCheck::new(vec![Wait::Pr {
+            number: 30,
+            armed: false,
+        }]);
+        let err =
+            pipeline::review_issue(&env(&f, &backend, Some(&check)), &mut prepared).unwrap_err();
+        assert!(err.is::<pipeline::OnHold>(), "{err:#}");
+        assert_eq!(outcome::kind_of(&err, ""), outcome::Kind::OnHold);
+        assert!(
+            format!("{err:#}").contains("waits on #30 (PR, awaits your merge)"),
+            "{err:#}"
+        );
+        let rec = saved(&f);
+        assert_eq!((rec.stage, rec.status), (Stage::Held, Status::Ok));
+        assert_eq!(rec.holds.len(), 1);
+        assert_eq!(rec.holds[0].on, check.waits);
+        assert_eq!(rec.holds[0].released, None);
+        assert_eq!(check.calls.get(), 1);
+        assert_eq!(reviews_run(&backend), 0, "no review while held");
+    }
+
+    #[test]
+    fn task_loop_hold_no_overlap_after_the_gates_goes_on_to_the_review() {
+        let f = config();
+        let backend = backend(&f);
+        let mut prepared = worked_task(&f, &backend);
+        let check = FakeCheck::new(vec![]);
+        pipeline::review_issue(&env(&f, &backend, Some(&check)), &mut prepared).unwrap();
+        let rec = saved(&f);
+        assert_eq!(rec.stage, Stage::Ready);
+        assert!(rec.holds.is_empty());
+        assert_eq!(check.calls.get(), 1);
+        assert_eq!(reviews_run(&backend), 1);
+    }
+
+    #[test]
+    fn task_loop_hold_a_task_run_by_hand_is_never_held() {
+        let f = config();
+        let backend = backend(&f);
+        let mut prepared = worked_task(&f, &backend);
+        pipeline::review_issue(&env(&f, &backend, None), &mut prepared).unwrap();
+        assert_eq!(saved(&f).stage, Stage::Ready);
+    }
+}

@@ -465,9 +465,10 @@ pub fn resume_forgetting(
         ));
     }
     let resumed = resume_checked(env, prepared, rounds, small.as_deref());
-    // The task stops here, whichever way: a cloud worker sandbox goes (P5 (d), decision 263).
-    // A local one goes where the phase that used it ends (issue 341), never after a refusal.
-    pipeline::stop_cloud_worker(env, prepared);
+    // The task stops here, whichever way: a cloud worker sandbox goes (P5 (d), decision 263),
+    // or is only stopped while the task is held before its review (issue 727). A local one goes
+    // where the phase that used it ends (issue 341), never after a refusal.
+    pipeline::stop_or_keep_cloud_worker(env, prepared);
     resumed
 }
 

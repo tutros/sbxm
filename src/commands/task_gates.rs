@@ -123,6 +123,7 @@ pub fn run(
         disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
+        hold: None,
         // Each line as it comes: a wait for the sandbox slot before a cloud task's host tier.
         progress: &|line: &str| {
             let _ = writeln!(out.borrow_mut(), "{line}");

@@ -20,6 +20,7 @@ use crate::slot;
 use crate::task::config::{self, TaskConfig};
 use crate::task::finish;
 use crate::task::gates::HostRunner;
+use crate::task::hold;
 use crate::task::outcome;
 use crate::task::pipeline::{self, Ctx, Prepared, TaskEnv};
 use crate::task::record::{self, GateResult, ProcessProbe};
@@ -186,7 +187,7 @@ fn run_unrecorded(
     }
     match &opts.target {
         Target::Issue(n) => run_issue(
-            config_dir, opts, &config, *n, backend, probe, host, out, warn,
+            config_dir, opts, &config, *n, backend, github, probe, host, out, warn,
         ),
         Target::Pr(n) => run_pr(
             config_dir, opts, &config, *n, backend, github, probe, host, out, warn,
@@ -257,6 +258,7 @@ fn run_issue(
     config: &TaskConfig,
     number: u32,
     backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
     probe: &dyn ProcessProbe,
     host: &dyn HostRunner,
     out: &mut dyn Write,
@@ -281,6 +283,15 @@ fn run_issue(
         config.worker.model.clone_from(&worker.model);
     }
     let config = &config;
+    // A child of `task loop` is held before its review while its changed files overlap other
+    // open work (issue 727); a review run by hand never is.
+    let repo = prepared.record.repo.clone();
+    let checker = hold::Checker {
+        base_dir: &base_dir,
+        repo: &repo,
+        github,
+        probe,
+    };
     let env = TaskEnv {
         config_dir,
         config,
@@ -292,6 +303,7 @@ fn run_issue(
         disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
+        hold: record::in_loop().then_some(&checker as &dyn hold::Check),
         progress: &pipeline::quiet,
     };
     let reviewed = task_log::live(out, |progress| {
@@ -505,6 +517,7 @@ fn run_spec(
         disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
+        hold: None,
         progress: &pipeline::quiet,
     };
     let reviewed = task_log::live(out, |progress| {

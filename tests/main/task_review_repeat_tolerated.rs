@@ -101,6 +101,7 @@ fn env<'a>(f: &'a Fixture, backend: &'a FakeBackend, progress: &'a dyn Fn(&str))
         disk: Box::leak(Box::default()),
         identity: None,
         clone_source: None,
+        hold: None,
     }
 }
 

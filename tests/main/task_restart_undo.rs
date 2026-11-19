@@ -86,6 +86,7 @@ fn env<'a>(f: &'a Fixture, backend: &'a FakeBackend) -> TaskEnv<'a> {
         disk: Box::leak(Box::default()),
         identity: None,
         clone_source: None,
+        hold: None,
     }
 }
 

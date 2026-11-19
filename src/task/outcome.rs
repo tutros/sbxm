@@ -48,6 +48,9 @@ pub enum Kind {
     Held,
     /// Refused before the task had a record.
     Refused,
+    /// Held before its review while its changed files overlap other open work (issue 727): the
+    /// loop releases it later.
+    OnHold,
 }
 
 impl Kind {
@@ -63,6 +66,7 @@ impl Kind {
             Self::Stopped => "stopped",
             Self::Held => "held",
             Self::Refused => "refused",
+            Self::OnHold => "on_hold",
         }
     }
 }
@@ -121,6 +125,8 @@ pub fn kind_of(e: &anyhow::Error, output: &str) -> Kind {
         Kind::Stopped
     } else if e.is::<lock::InUse>() {
         Kind::Held
+    } else if e.is::<pipeline::OnHold>() {
+        Kind::OnHold
     } else if e.is::<pipeline::MissingSecret>() {
         Kind::MissingSecret
     } else if e.is::<pipeline::NotSignedIn>() || says_harness_signed_out(e, output) {
