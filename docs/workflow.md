@@ -301,8 +301,9 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
 - **`task loop` holds overlapping work before review (decision 331(3), issue 727):** once a loop task's gates pass,
   before its first review, its changed files (its branch against the merge base with the default branch) are checked
   against the open PRs a loop opened (their files on GitHub), a running fix or resolve of a PR (that PR's files), and
-  every other task past its gates and not finished (in review, a fix round or `ready`; of two whose gates pass at
-  once, the first holds the second). A shared path holds the task: its record goes to stage `held`, naming what it
+  every other task past its gates and not finished (in review, `ready`, a fix round after a review, or one whose check
+  already sent it to its review; the checks take turns under `<base_dir>/.sbxm/hold-check/`, so of two whose gates
+  pass at once the first to decide holds the second, never both each other). A shared path holds the task: its record goes to stage `held`, naming what it
   waits on and since when, its child ends (`outcome.json` says `on_hold`), its sandbox slot is freed, a cloud worker
   sandbox is stopped and kept, and the loop starts other work. At each pass the loop checks the held tasks again, the
   one held first first, from their records alone (a restarted loop does the same). Once nothing overlaps (the PR
