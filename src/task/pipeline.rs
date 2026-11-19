@@ -4294,6 +4294,15 @@ pub(super) fn continue_after_fix(env: &TaskEnv, prepared: &mut Prepared) -> Resu
 /// (the PR it waited on was closed). A merge the agent didn't make stops the task for the user,
 /// `held` and `failed`. The hold records whether the merge had a conflict.
 pub(super) fn release_hold(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewReport> {
+    // A merge that ended before its process went may not have had its commits collected: they
+    // are collected again, as after a worker or fix round that ended (a fetch of what `repo.git`
+    // has already changes nothing).
+    if matches!(prepared.record.status, Status::Completed | Status::TimedOut)
+        && let Err(e) = recollect_commits(env, prepared)
+    {
+        release_local_worker_into(env, prepared);
+        return Err(e);
+    }
     if matches!(
         prepared.record.status,
         Status::Ok | Status::Running | Status::Failed
@@ -4350,7 +4359,6 @@ fn merge_base_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
             ("gates_sandbox", &bullets(&env.config.gates.sandbox)),
         ],
     )?;
-    let known = repo::branch_tip(&repo_git, &base_name)?;
     repo::fetch_base_branch(&repo_git, &base_name)?;
     let base = repo::branch_tip(&repo_git, &base_name)?;
     let tip = repo::branch_tip(&repo_git, &prepared.record.branch)?;
@@ -4371,8 +4379,11 @@ fn merge_base_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     }
     let conflict = repo::merge_conflicts(&repo_git, &base, &tip)?;
     let bundle = prepared.meta.join("base.bundle");
-    let known = repo::is_ancestor(&repo_git, &known, &base)?.then_some(known);
-    repo::bundle_base(&repo_git, &base_name, known.as_deref(), &bundle)?;
+    // What the worker's clone has for sure is the branch's own history: the bundle leaves out
+    // only where it parted from the base, never what `repo.git`'s base ref said before (a retry
+    // finds it moved already).
+    let known = repo::merge_base(&repo_git, &base, &tip)?;
+    repo::bundle_base(&repo_git, &base_name, Some(&known), &bundle)?;
     let bundle_bytes =
         fs::read(&bundle).with_context(|| format!("cannot read {}", bundle.display()))?;
     let process = Process::current(env.probe);

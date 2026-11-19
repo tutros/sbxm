@@ -681,6 +681,106 @@ mod release {
         assert_eq!(rec.holds[0].conflict, Some(true));
         assert_eq!(reviews_run(&backend), 0, "no review without the merge");
     }
+
+    /// The held record of issue 41, changed by `change` and saved.
+    fn change_record(f: &Fixture, change: impl FnOnce(&mut Record)) {
+        let dir = record::task_dir(&f.env.base_dir(), "issue-41");
+        let mut rec = record::read(&dir.join("task.json")).unwrap();
+        change(&mut rec);
+        record::write(&dir, &rec).unwrap();
+    }
+
+    /// `repo.git`'s `main` moved to origin's, as the release's fetch moves it.
+    fn fetch_base(f: &Fixture) {
+        let repo_git = record::task_dir(&f.env.base_dir(), "issue-41").join("repo.git");
+        git(
+            &repo_git,
+            &[
+                "fetch",
+                "-q",
+                f.origin.to_str().unwrap(),
+                "+refs/heads/main:refs/heads/main",
+            ],
+        );
+    }
+
+    #[test]
+    fn task_loop_hold_a_merge_handed_back_then_resumed_on_the_same_base_runs_the_merge_again() {
+        let f = config();
+        let merges = Arc::new(AtomicUsize::new(0));
+        let first = backend(&f, Merge::HandsBack, merges.clone());
+        let mut prepared = held(&f, &first);
+        let main = move_main(&f, "a.txt", "main's own line\n");
+        resume::resume(&env(&f, &first, None), &mut prepared, None).unwrap_err();
+        // The user resumes it with main unchanged; this time the worker merges.
+        let second = backend(&f, Merge::Merges, merges.clone());
+        resume::resume(&env(&f, &second, None), &mut prepared, None).unwrap();
+        assert_eq!(merges.load(Ordering::SeqCst), 2);
+        assert_eq!(saved(&f).stage, Stage::Ready);
+        assert!(branch_has(&f, &main));
+    }
+
+    #[test]
+    fn task_loop_hold_a_merge_cut_off_after_the_base_fetch_runs_again_on_resume() {
+        let f = config();
+        let merges = Arc::new(AtomicUsize::new(0));
+        let backend = backend(&f, Merge::Merges, merges.clone());
+        let mut prepared = held(&f, &backend);
+        let main = move_main(&f, "b.txt", "the merged PR's file\n");
+        // Cut off after the fetch moved repo.git's base, while the merge ran.
+        fetch_base(&f);
+        change_record(&f, |r| {
+            hold::release(r, START);
+            r.status = Status::Running;
+        });
+        prepared.record = saved(&f);
+        resume::resume(&env(&f, &backend, None), &mut prepared, None).unwrap();
+        assert_eq!(merges.load(Ordering::SeqCst), 1);
+        assert_eq!(saved(&f).stage, Stage::Ready);
+        assert!(branch_has(&f, &main));
+    }
+
+    /// The merge made and committed in the worker's clone, its run recorded as `status`, and its
+    /// process gone before its commits were collected.
+    fn merge_ended_uncollected(status: Status) {
+        let f = config();
+        let merges = Arc::new(AtomicUsize::new(0));
+        let backend = backend(&f, Merge::Merges, merges.clone());
+        let mut prepared = held(&f, &backend);
+        let main = move_main(&f, "b.txt", "the merged PR's file\n");
+        fetch_base(&f);
+        let workspace = f.env.base_dir().join("tasks").join("issue-41");
+        git(
+            &workspace,
+            &[
+                "fetch",
+                "-q",
+                f.origin.to_str().unwrap(),
+                "+refs/heads/main:refs/remotes/origin/main",
+            ],
+        );
+        git(&workspace, &["merge", "--no-edit", "-q", "origin/main"]);
+        change_record(&f, |r| {
+            hold::release(r, START);
+            r.status = status;
+        });
+        prepared.record = saved(&f);
+        assert!(!branch_has(&f, &main), "not collected yet");
+        resume::resume(&env(&f, &backend, None), &mut prepared, None).unwrap();
+        assert_eq!(merges.load(Ordering::SeqCst), 0, "no second merge run");
+        assert_eq!(saved(&f).stage, Stage::Ready);
+        assert!(branch_has(&f, &main));
+    }
+
+    #[test]
+    fn task_loop_hold_a_completed_merge_cut_off_before_its_collection_is_collected_on_resume() {
+        merge_ended_uncollected(Status::Completed);
+    }
+
+    #[test]
+    fn task_loop_hold_a_timed_out_merge_cut_off_before_its_collection_is_collected_on_resume() {
+        merge_ended_uncollected(Status::TimedOut);
+    }
 }
 
 // The loop: a held task ends its phase without a row, is checked again at each pass, and is
