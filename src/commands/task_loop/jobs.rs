@@ -271,7 +271,11 @@ impl Loop<'_> {
                     }
                 };
                 self.mark(&taken, &read, started, Some(id.clone()))?;
-                let step = JobStep::RunSpec(spec.clone());
+                let step = if self.held_spec(&id) {
+                    JobStep::ResumeSpec(spec.clone())
+                } else {
+                    JobStep::RunSpec(spec.clone())
+                };
                 let what = QueuedWhat::Spec {
                     spec,
                     id,
@@ -488,6 +492,7 @@ impl Loop<'_> {
                 halt: Some(needs_user(Cause::Secret, anyhow!("{e:#}"))),
                 ..Ended::new(Outcome::Failed, format!("{what}{e:#}"))
             }),
+            ChildKind::OnHold => Some(on_hold(&e)),
             _ => Some(Ended::new(Outcome::Failed, format!("{what}{e:#}"))),
         }
     }
@@ -798,6 +803,13 @@ impl Loop<'_> {
         })
     }
 
+    /// Whether spec task `id` is held before its review (issue 727): its job then resumes it,
+    /// merging the base, instead of running it from the start.
+    fn held_spec(&self, id: &str) -> bool {
+        self.record_of(id)
+            .is_some_and(|r| r.stage == Stage::Held && r.kind == crate::task::record::Kind::Spec)
+    }
+
     /// A `spec` job's file `file` in `specs_dir` and its task's id; `Err`: how the job ends
     /// without running.
     fn spec_ready(&self, file: &str) -> std::result::Result<(PathBuf, String), Ended> {
@@ -817,8 +829,13 @@ impl Loop<'_> {
     ) -> Result<Ended> {
         let flag = spec_flag(spec);
         let resume = Some((id, format!("sbxm task resume {flag}")));
+        let held = self.held_spec(id);
         if let Err(ended) = self.phase("", resume.clone(), out, warn, |steps, out, warn| {
-            steps.run_spec(spec, out, warn)
+            if held {
+                steps.resume_spec(spec, out, warn)
+            } else {
+                steps.run_spec(spec, out, warn)
+            }
         }) {
             return Ok(ended);
         }
@@ -1003,6 +1020,7 @@ impl Loop<'_> {
                 halt: Some(needs_user(Cause::Secret, anyhow!("{e:#}"))),
                 ..Ended::new(Outcome::Failed, format!("{what}{e:#}"))
             }),
+            ChildKind::OnHold => Err(on_hold(&e)),
             _ => Err(Ended::new(Outcome::Failed, format!("{what}{e:#}"))),
         }
     }
@@ -1269,6 +1287,11 @@ impl Queued {
         matches!(self.what, QueuedWhat::Spec { .. })
     }
 
+    /// Whether it is a `spec` job whose task is `id` (issue 727).
+    pub(super) fn runs_spec_task(&self, id: &str) -> bool {
+        matches!(&self.what, QueuedWhat::Spec { id: own, .. } if own == id)
+    }
+
     /// Whether it is a `spec` job of `file` in `specs_dir`.
     pub(super) fn runs_spec(&self, file: &str) -> bool {
         matches!(&self.what, QueuedWhat::Spec { spec, .. }
@@ -1325,4 +1348,16 @@ fn file_label(taken: &Path) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     format!("job {name}")
+}
+
+/// How a spec job ends when its task was held before its review (issue 727): stopped, not
+/// failed; the loop queues the spec again once nothing overlaps it any more.
+fn on_hold(e: &anyhow::Error) -> Ended {
+    Ended::new(
+        Outcome::Stopped,
+        format!(
+            "{e:#}; the loop queues the spec again once released, to merge the base, run the \
+             gates again and review it"
+        ),
+    )
 }

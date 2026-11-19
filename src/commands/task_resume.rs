@@ -155,8 +155,8 @@ fn run_unrecorded(
         (Location::Cloud, Some(identity)) => Some(identity.clone()),
         (Location::Cloud, None) => Identity::read_from(None).ok(),
     };
-    // A loop's issue task is held before its first review while its changed files overlap other
-    // open work (issue 727); a resume run by hand never holds it.
+    // A loop's issue or spec task is held before its first review while its changed files
+    // overlap other open work (issue 727); a resume run by hand never holds it.
     let repo = prepared.record.repo.clone();
     let checker = hold::Checker {
         base_dir: &base_dir,
@@ -164,7 +164,11 @@ fn run_unrecorded(
         github,
         probe,
     };
-    let holds = record::in_loop() && prepared.record.kind == record::Kind::Issue;
+    let holds = record::in_loop()
+        && matches!(
+            prepared.record.kind,
+            record::Kind::Issue | record::Kind::Spec
+        );
     let env = TaskEnv {
         config_dir,
         config: &config,

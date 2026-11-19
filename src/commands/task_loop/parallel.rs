@@ -825,7 +825,7 @@ fn steps_and_starts<'a>(
     let mut started_any = false;
     // The tasks held before their review that no longer overlap other work (issue 727) join the
     // tasks tried again.
-    lp.release_holds(&mut pass.due, out, warn)?;
+    let queued = lp.release_holds(&mut pass.due, out, warn)?;
     // The tasks tried again first: held or cut off, each in the slot its record names.
     let mut later = VecDeque::new();
     while let Some(again) = pass.due.pop_front() {
@@ -859,7 +859,12 @@ fn steps_and_starts<'a>(
             out,
         )?;
         let Some(issue) = next else {
-            if !live.is_empty() || !lp.jobs.is_empty() || started_any || !pass.due.is_empty() {
+            if !live.is_empty()
+                || !lp.jobs.is_empty()
+                || started_any
+                || queued
+                || !pass.due.is_empty()
+            {
                 break;
             }
             if opts.wait {

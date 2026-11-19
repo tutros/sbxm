@@ -34,11 +34,35 @@ fn task(
     status: Status,
     gates_at: u64,
 ) -> Record {
-    let id = format!("issue-{n}");
+    task_as(
+        base,
+        Kind::Issue,
+        &format!("issue-{n}"),
+        n,
+        files,
+        stage,
+        status,
+        gates_at,
+    )
+}
+
+/// [`task`] of `kind`, with the id `id` (a spec task's has no number).
+#[allow(clippy::too_many_arguments)]
+fn task_as(
+    base: &Path,
+    kind: Kind,
+    id: &str,
+    n: u32,
+    files: &[&str],
+    stage: Stage,
+    status: Status,
+    gates_at: u64,
+) -> Record {
+    let id = id.to_owned();
     let dir = record::task_dir(base, &id);
     let repo_git = dir.join("repo.git");
     fs::create_dir_all(&repo_git).unwrap();
-    let scratch = base.join(format!("scratch-{n}"));
+    let scratch = base.join(format!("scratch-{id}"));
     fs::create_dir_all(&scratch).unwrap();
     git(&scratch, &["init", "-q", "-b", "main"]);
     fs::write(scratch.join("README.md"), "base\n").unwrap();
@@ -65,14 +89,14 @@ fn task(
     );
     let mut rec = Record::new(
         &NewTask {
-            kind: Kind::Issue,
+            kind,
             number: n,
             repo: REPO,
             title: "",
             base: "main",
             branch: &id,
             config_hash: "h",
-            id: None,
+            id: Some(&id),
         },
         START,
         alive(),
@@ -1506,5 +1530,307 @@ mod cloud {
             before,
             "nothing changed: it stays held"
         );
+    }
+}
+
+// A queued spec job's task is held at the same point (review M-1): its job ends `stopped`, and
+// once released the loop queues the spec again, which resumes it (base merge, gates, review)
+// and finishes it, after a restart too.
+
+mod spec_jobs {
+    use super::*;
+    use anyhow::{Result, anyhow};
+    use common::Env as TestEnv;
+    use sbxm::commands::task_loop::{self, Env, Options, Steps};
+    use sbxm::task::jobs;
+    use sbxm::task::pipeline::OnHold;
+    use std::cell::{Cell, RefCell};
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    const SPEC_PR: u32 = 120;
+
+    /// Plays `task run --spec` (held on PR #30), `task resume --spec` (ready, clean) and
+    /// `task finish --spec`.
+    struct Script<'a> {
+        base: PathBuf,
+        gh: &'a FakeGitHub,
+        calls: RefCell<Vec<String>>,
+        clock: Cell<u64>,
+        after_run: Box<dyn Fn(&FakeGitHub) + 'a>,
+    }
+
+    fn name(spec: &Path) -> String {
+        spec.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    impl Steps for Script<'_> {
+        fn run(&self, issue: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("unexpected run of {issue}"))
+        }
+
+        fn resume(&self, issue: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("unexpected resume of {issue}"))
+        }
+
+        fn finish(&self, issue: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("unexpected finish of {issue}"))
+        }
+
+        fn run_spec(&self, spec: &Path, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            self.calls.borrow_mut().push(format!("run {}", name(spec)));
+            held_spec(&self.base, spec);
+            (self.after_run)(self.gh);
+            Err(OnHold::new(format!("{} is held before its review", spec_id(spec))).into())
+        }
+
+        fn resume_spec(&self, spec: &Path, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            self.calls
+                .borrow_mut()
+                .push(format!("resume {}", name(spec)));
+            let dir = record::task_dir(&self.base, &spec_id(spec));
+            let mut rec = record::read(&dir.join("task.json")).unwrap();
+            if hold::waiting(&rec).is_some() {
+                return Err(anyhow!("resumed while still waiting"));
+            }
+            rec.stage = Stage::Ready;
+            rec.status = Status::Ok;
+            rec.review = Some(record::ReviewResult {
+                round: 1,
+                risk: sbxm::task::risk::Level::High,
+                ..Default::default()
+            });
+            record::write(&dir, &rec).unwrap();
+            Ok(())
+        }
+
+        fn finish_spec(&self, spec: &Path, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            self.calls
+                .borrow_mut()
+                .push(format!("finish {}", name(spec)));
+            let dir = record::task_dir(&self.base, &spec_id(spec));
+            let mut rec = record::read(&dir.join("task.json")).unwrap();
+            rec.stage = Stage::Finished;
+            rec.pr = Some(format!("https://github.com/{REPO}/pull/{SPEC_PR}"));
+            record::write(&dir, &rec).unwrap();
+            Ok(())
+        }
+
+        fn file_findings(&self, _: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Ok(())
+        }
+
+        fn fix_pr(&self, pr: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("unexpected fix of PR #{pr}"))
+        }
+
+        fn fix_check(&self, pr: u32, _: u64, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("unexpected log-fix of PR #{pr}"))
+        }
+
+        fn rm_merged(&self, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Ok(())
+        }
+
+        fn room(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn spec_id(spec: &Path) -> String {
+        record::spec_id(spec).unwrap().0
+    }
+
+    /// The spec task of `spec` at `held`, waiting on PR #30, its branch changing `src/a.rs`; no
+    /// process.
+    fn held_spec(base: &Path, spec: &Path) -> Record {
+        let id = spec_id(spec);
+        let mut rec = task_as(
+            base,
+            Kind::Spec,
+            &id,
+            0,
+            &["src/a.rs"],
+            Stage::Held,
+            Status::Ok,
+            START,
+        );
+        rec.process = None;
+        hold::start(
+            &mut rec,
+            START,
+            vec![Wait::Pr {
+                number: 30,
+                armed: false,
+            }],
+        );
+        record::write(&record::task_dir(base, &id), &rec).unwrap();
+        rec
+    }
+
+    struct Fixture {
+        env: TestEnv,
+        repo_root: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let env = TestEnv::new();
+            let repo_root = env.tmp.path().join("repo");
+            fs::create_dir_all(&repo_root).unwrap();
+            fs::write(
+                repo_root.join("sbxm-task.toml"),
+                "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = []\n",
+            )
+            .unwrap();
+            let specs = env.tmp.path().join("specs");
+            fs::create_dir_all(&specs).unwrap();
+            fs::write(specs.join("retro.md"), "# Retro\n").unwrap();
+            let value = toml::Value::String(specs.to_str().unwrap().to_owned());
+            env.set_config(&format!("specs_dir = {value}"));
+            Self { env, repo_root }
+        }
+
+        fn base(&self) -> PathBuf {
+            self.env.base_dir()
+        }
+
+        fn spec(&self) -> PathBuf {
+            fs::canonicalize(self.env.tmp.path().join("specs").join("retro.md")).unwrap()
+        }
+
+        fn queue_spec(&self) {
+            let queue = jobs::queue_dir(&self.base());
+            fs::create_dir_all(&queue).unwrap();
+            fs::write(
+                queue.join("s.json"),
+                r#"{"kind": "spec", "file": "retro.md"}"#,
+            )
+            .unwrap();
+        }
+
+        fn result(&self, name: &str) -> serde_json::Value {
+            let path = jobs::done_dir(&self.base()).join(name);
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("no result {}: {e}", path.display()));
+            serde_json::from_str(&text).unwrap()
+        }
+
+        fn script<'a>(&self, gh: &'a FakeGitHub) -> Script<'a> {
+            Script {
+                base: self.base(),
+                gh,
+                calls: RefCell::default(),
+                clock: Cell::new(START + 3600),
+                after_run: Box::new(|_| {}),
+            }
+        }
+
+        fn run(&self, script: &Script, gh: &FakeGitHub) -> (Result<()>, String) {
+            let sleeps = Cell::new(0usize);
+            let now = || script.clock.get();
+            let sleep = |d: Duration| {
+                sleeps.set(sleeps.get() + 1);
+                script.clock.set(script.clock.get() + d.as_secs());
+            };
+            let stop = || sleeps.get() > 3;
+            let env = Env {
+                now: &now,
+                sleep: &sleep,
+                stop_requested: &stop,
+            };
+            let (mut out, mut warn) = (Vec::new(), Vec::new());
+            let result = task_loop::run(
+                &self.env.config_dir(),
+                &Options {
+                    repo_root: self.repo_root.clone(),
+                    issues: Vec::new(),
+                    cap: None,
+                    repo: Some(REPO.into()),
+                    wait: false,
+                },
+                script,
+                gh,
+                &Probe,
+                &env,
+                &mut out,
+                &mut warn,
+            );
+            (
+                result,
+                String::from_utf8(out).unwrap() + &String::from_utf8(warn).unwrap(),
+            )
+        }
+    }
+
+    /// GitHub with PR #30 (issue 3's, a loop's) in `state`, changing `src/a.rs`, and the spec's
+    /// PR once finished.
+    fn github(f: &Fixture, state: PrState) -> FakeGitHub {
+        loop_pr(&f.base(), 3, 30);
+        FakeGitHub::default()
+            .with_user("me")
+            .with_default_branch("main")
+            .with_pr(pr(30, state))
+            .with_pr_files(30, files(&["src/a.rs"]))
+            .with_pr(pr(SPEC_PR, PrState::Open))
+    }
+
+    #[test]
+    fn task_loop_hold_a_held_spec_job_is_queued_again_once_released_and_finished() {
+        let f = Fixture::new();
+        f.queue_spec();
+        let gh = github(&f, PrState::Open);
+        let mut script = f.script(&gh);
+        script.after_run =
+            Box::new(|gh| gh.set_merged(30, "cccccccccccccccccccccccccccccccccccccccc"));
+        let (result, out) = f.run(&script, &gh);
+        assert!(result.is_ok(), "{result:?}\n{out}");
+        assert_eq!(
+            *script.calls.borrow(),
+            vec!["run retro.md", "resume retro.md", "finish retro.md"],
+            "{out}"
+        );
+        let held = f.result("s.json");
+        assert_eq!(held["outcome"], "stopped", "{held}");
+        assert!(
+            held["reason"]
+                .as_str()
+                .unwrap()
+                .contains("held before its review"),
+            "{held}"
+        );
+        let id = spec_id(&f.spec());
+        let released = f.result(&format!("release-{id}.json"));
+        assert_eq!(released["outcome"], "done", "{released}");
+        assert_eq!(released["task"], id.as_str());
+    }
+
+    #[test]
+    fn task_loop_hold_a_restarted_loop_queues_a_released_spec_and_finishes_it() {
+        let f = Fixture::new();
+        held_spec(&f.base(), &f.spec());
+        let gh = github(&f, PrState::Merged);
+        let script = f.script(&gh);
+        let (result, out) = f.run(&script, &gh);
+        assert!(result.is_ok(), "{result:?}\n{out}");
+        assert_eq!(
+            *script.calls.borrow(),
+            vec!["resume retro.md", "finish retro.md"],
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn task_loop_hold_a_spec_still_overlapping_stays_held_and_queues_nothing() {
+        let f = Fixture::new();
+        held_spec(&f.base(), &f.spec());
+        let gh = github(&f, PrState::Open);
+        let script = f.script(&gh);
+        let (result, out) = f.run(&script, &gh);
+        assert!(result.is_ok(), "{result:?}\n{out}");
+        assert!(script.calls.borrow().is_empty());
+        assert!(jobs::pending(&f.base()).unwrap().is_empty());
+        assert!(out.contains("is held before its review"), "{out}");
     }
 }

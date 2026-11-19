@@ -6,12 +6,13 @@ use std::path::{Path, PathBuf};
 
 /// The files directly in `tests/` that are test binaries of their own: the real-`sbx` tests, run
 /// by hand with `--ignored`, and the tests that set state for their whole process.
-const OWN_BINARIES: [&str; 7] = [
+const OWN_BINARIES: [&str; 8] = [
     "hint.rs",
     "hint_viewers.rs",
     "real_jev.rs",
     "real_sbx.rs",
     "real_sbx_cloud.rs",
+    "task_loop_hold_child.rs",
     "task_loop_owner_stamp.rs",
     "task_start_unlabel_loop.rs",
 ];

@@ -199,6 +199,7 @@ fn run_unrecorded(
             path,
             opts.resolved_spec_id.as_deref(),
             backend,
+            github,
             probe,
             host,
             out,
@@ -482,6 +483,7 @@ fn run_spec(
     path: &std::path::Path,
     id_hint: Option<&str>,
     backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
     probe: &dyn ProcessProbe,
     host: &dyn HostRunner,
     out: &mut dyn Write,
@@ -506,6 +508,15 @@ fn run_spec(
         config.worker.model.clone_from(&worker.model);
     }
     let config = &config;
+    // A queued spec job's task, run by the loop, is held before its review as an issue task is
+    // (issue 727); one run by hand never is.
+    let repo = prepared.record.repo.clone();
+    let checker = hold::Checker {
+        base_dir: &base_dir,
+        repo: &repo,
+        github,
+        probe,
+    };
     let env = TaskEnv {
         config_dir,
         config,
@@ -517,7 +528,7 @@ fn run_spec(
         disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
-        hold: None,
+        hold: record::in_loop().then_some(&checker as &dyn hold::Check),
         progress: &pipeline::quiet,
     };
     let reviewed = task_log::live(out, |progress| {

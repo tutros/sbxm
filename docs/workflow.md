@@ -312,7 +312,10 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   conflict resolved keeping both sides, as `task fix` does), the gates run again, then its one review; a cloud worker
   sandbox gone by then is made again from the saved branch, as `task resume` makes it. A merge the worker hands back
   stops the task `held`/`failed` for you: merge in the worker's clone, then `sbxm task resume --issue N`. A task run
-  by hand is never held (decision 296's check stays for it). `sbxm status` names a held task's waits under the table
+  by hand is never held (decision 296's check stays for it). A queued `spec` job's task is held the same way: its
+  job ends `stopped` with the hold's line, and once released the loop queues its spec again
+  (`queue/release-<id>.json`, the file found in `specs_dir` by the task's id), whose job resumes it (`task resume
+  --spec`) and finishes it, after a restart too. `sbxm status` names a held task's waits under the table
   (`issue-9 held: waits on #12 (PR, awaits your merge)`), the loop's log row lists each hold among its stops with its
   minutes, and `task facts` has `held (min)` and `hold conflict` for the next retro.
 
