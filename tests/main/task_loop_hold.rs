@@ -238,6 +238,14 @@ fn task_loop_hold_a_shared_file_only_with_a_merged_pr_is_not_held() {
     assert_eq!(waits(base, &github, &own), Vec::<Wait>::new());
 }
 
+/// Marks `rec` as having decided, under the decision lock, to go on to its review.
+fn decided(base: &Path, rec: &Record) -> Record {
+    let mut rec = rec.clone();
+    rec.hooks[hold::CHECKED_HOOK] = serde_json::Value::Bool(true);
+    record::write(&record::task_dir(base, &rec.id), &rec).unwrap();
+    rec
+}
+
 #[test]
 fn task_loop_hold_two_tasks_whose_gates_pass_together_the_first_holds_the_second_only() {
     let tmp = tempfile::tempdir().unwrap();
@@ -252,8 +260,11 @@ fn task_loop_hold_two_tasks_whose_gates_pass_together_the_first_holds_the_second
         Status::Passed,
         START + 1,
     );
-    // Both see the other with its gates passed: only the later one waits.
+    // Neither has decided yet: neither holds the other.
     assert_eq!(waits(base, &github, &first), Vec::<Wait>::new());
+    assert_eq!(waits(base, &github, &second), Vec::<Wait>::new());
+    // The first to decide goes on to its review, and holds the second, whichever passed first.
+    let first = decided(base, &first);
     assert_eq!(
         waits(base, &github, &second),
         vec![Wait::Task {
@@ -261,13 +272,86 @@ fn task_loop_hold_two_tasks_whose_gates_pass_together_the_first_holds_the_second
             stage: Stage::Gating
         }]
     );
-    // Once the second is held, it holds nothing: the first goes on to its review.
+    // Once the second is held, it holds nothing: never both on each other.
     let mut held = second.clone();
     held.stage = Stage::Held;
     held.status = Status::Ok;
     hold::start(&mut held, START + 2, vec![]);
     record::write(&record::task_dir(base, &held.id), &held).unwrap();
     assert_eq!(waits(base, &github, &first), Vec::<Wait>::new());
+}
+
+#[test]
+fn task_loop_hold_a_task_whose_gates_passed_later_but_decided_first_holds_the_earlier_one() {
+    // Task 8's gates started first and were still running when task 9's passed and task 9
+    // decided on its review; task 8's gates then pass.
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let github = FakeGitHub::default();
+    let later = task(
+        base,
+        9,
+        &["src/a.rs"],
+        Stage::Gating,
+        Status::Passed,
+        START + 1,
+    );
+    let earlier = task(
+        base,
+        8,
+        &["src/a.rs"],
+        Stage::Gating,
+        Status::Running,
+        START,
+    );
+    assert_eq!(waits(base, &github, &later), Vec::<Wait>::new());
+    decided(base, &later);
+    let mut earlier = earlier.clone();
+    earlier.status = Status::Passed;
+    record::write(&record::task_dir(base, &earlier.id), &earlier).unwrap();
+    assert_eq!(
+        waits(base, &github, &earlier),
+        vec![Wait::Task {
+            task: "issue-9".into(),
+            stage: Stage::Gating
+        }]
+    );
+}
+
+#[test]
+fn task_loop_hold_the_decision_waits_while_another_check_holds_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().to_owned();
+    let github = FakeGitHub::default();
+    let checker = Checker {
+        base_dir: &base,
+        repo: REPO,
+        github: &github,
+        probe: &Probe,
+    };
+    let guard = checker.decide().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let other = base.clone();
+    let waiting = std::thread::spawn(move || {
+        let github = FakeGitHub::default();
+        let checker = Checker {
+            base_dir: &other,
+            repo: REPO,
+            github: &github,
+            probe: &Probe,
+        };
+        let taken = checker.decide().map(drop);
+        tx.send(()).unwrap();
+        taken
+    });
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(500))
+            .is_err(),
+        "the second decision waits for the first"
+    );
+    drop(guard);
+    rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    waiting.join().unwrap().unwrap();
 }
 
 // The hold point in the pipeline: after the gates pass, before the first review.
@@ -408,6 +492,11 @@ mod pipeline_hold {
         let rec = saved(&f);
         assert_eq!(rec.stage, Stage::Ready);
         assert!(rec.holds.is_empty());
+        assert_eq!(
+            rec.hooks[hold::CHECKED_HOOK],
+            true,
+            "its decision is recorded"
+        );
         assert_eq!(check.calls.get(), 1);
         assert_eq!(reviews_run(&backend), 1);
     }

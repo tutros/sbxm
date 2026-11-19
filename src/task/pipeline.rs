@@ -4094,6 +4094,9 @@ fn hold_if_overlapping(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     if !before_review {
         return Ok(());
     }
+    // Held until what the check decided is recorded (held, or on to the review), so another
+    // task's check never runs in between and misses it.
+    let _decision = check.decide()?;
     let waits = task
         .changed_paths(&prepared.meta.join("repo.git"))
         .and_then(|paths| check.waits(task, &paths));
@@ -4109,7 +4112,13 @@ fn hold_if_overlapping(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
         }
     };
     if waits.is_empty() {
-        return Ok(());
+        // On to its review: from now on it holds a later task that overlaps it.
+        return record::write_change(&prepared.meta, &mut prepared.record, |t| {
+            if !t.hooks.is_object() {
+                t.hooks = serde_json::Value::Object(serde_json::Map::new());
+            }
+            t.hooks[super::hold::CHECKED_HOOK] = serde_json::Value::Bool(true);
+        });
     }
     let line = format!(
         "{} is held before its review: {}; the loop releases it once that work has merged or \

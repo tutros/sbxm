@@ -2322,6 +2322,9 @@ impl Loop<'_> {
                     probe: self.probe,
                 };
                 use crate::task::hold::Check;
+                // Held until the release is recorded, so a task's check after its gates never
+                // runs in between and misses it.
+                let _decision = checker.decide()?;
                 let waits = paths.and_then(|paths| checker.waits(&rec, &paths));
                 let waits = match waits {
                     Ok(waits) => waits,

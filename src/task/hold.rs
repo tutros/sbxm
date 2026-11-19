@@ -12,12 +12,15 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::finish::check_own_folder;
+use super::lock::{InUse, ProcessLock};
 use super::queue;
-use super::record::{self, Kind, ProcessProbe, Record, Stage, Status};
+use super::record::{self, Kind, ProcessProbe, Record, Stage};
 use crate::github::{GitHubBackend, PrState};
 use crate::run::results::{format_timestamp, parse_timestamp};
 
@@ -172,6 +175,27 @@ pub fn overlaps(paths: &[String], others: &[Other]) -> Vec<Wait> {
 pub trait Check {
     /// What `task`, whose branch changes `paths`, waits on now; empty when nothing overlaps.
     fn waits(&self, task: &Record, paths: &[String]) -> Result<Vec<Wait>>;
+    /// Held from a check to the record of what it decided (held, released, or on to the
+    /// review), so no other check runs in between and misses that decision: of two tasks whose
+    /// gates pass at once, the second to decide sees the first's. Nothing to hold by default.
+    fn decide(&self) -> Result<Decision> {
+        Ok(Decision { _lock: None })
+    }
+}
+
+/// The key in a task record's `hooks` set when its hold check decided on its review (issue 727):
+/// from then on it counts as past its gates for every other task's check ([`past_gates`]).
+pub const CHECKED_HOOK: &str = "hold_checked";
+
+/// How long a check waits for another to finish deciding before it gives up.
+const DECIDE_WAIT: Duration = Duration::from_secs(5 * 60);
+/// How often it looks again meanwhile.
+const DECIDE_POLL: Duration = Duration::from_millis(100);
+
+/// A decision in progress ([`Check::decide`]): the machine-wide lock under
+/// `<base>/.sbxm/hold-check/`, let go when dropped.
+pub struct Decision {
+    _lock: Option<ProcessLock>,
 }
 
 /// [`Check`] against the task records under `base_dir` and the PRs of `repo` on GitHub.
@@ -185,6 +209,25 @@ pub struct Checker<'a> {
 impl Check for Checker<'_> {
     fn waits(&self, task: &Record, paths: &[String]) -> Result<Vec<Wait>> {
         Ok(overlaps(paths, &self.others(task)?))
+    }
+
+    /// Takes the lock in `<base>/.sbxm/hold-check/`, waiting while another live check holds it
+    /// (one whose process is gone is taken over), at most [`DECIDE_WAIT`].
+    fn decide(&self) -> Result<Decision> {
+        let dir = self.base_dir.join(".sbxm").join("hold-check");
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("cannot create {}", dir.display()))?;
+        let mut waited = Duration::ZERO;
+        loop {
+            match ProcessLock::acquire(&dir, "the hold check", self.probe) {
+                Ok(lock) => return Ok(Decision { _lock: Some(lock) }),
+                Err(e) if e.is::<InUse>() && waited < DECIDE_WAIT => {
+                    std::thread::sleep(DECIDE_POLL);
+                    waited += DECIDE_POLL;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 }
 
@@ -223,7 +266,7 @@ impl Checker<'_> {
                 });
                 continue;
             }
-            if past_gates(&rec, task, self.probe) {
+            if past_gates(&rec, task) {
                 let Ok(paths) = rec.changed_paths(&dir.join("repo.git")) else {
                     continue;
                 };
@@ -273,36 +316,23 @@ impl Checker<'_> {
 }
 
 /// Whether `other` is a task past its gates and not finished, which `task` waits on when they
-/// share a path: an issue or spec task with no PR yet that is in review, a fix round (or its
-/// gates) or `ready`, or one a loop released from its hold (it merges the base, then goes to its
-/// review). A task whose gates passed before its first review and whose process still runs is
-/// one only when its gates started before `task`'s (then by id): of two tasks whose gates pass
-/// at once, the first holds the second, and never both each other. A task still held waits
-/// itself, and holds nothing.
-pub fn past_gates(other: &Record, task: &Record, probe: &dyn ProcessProbe) -> bool {
+/// share a path: an issue or spec task with no PR yet that is in review or `ready`, one that had a
+/// review and is in a fix round (or its gates), one whose hold check decided on its review
+/// ([`CHECKED_HOOK`], written under the decision lock, [`Check::decide`]), or one a loop released
+/// from its hold (it merges the base, then goes to its review). Of two tasks whose gates pass
+/// at once, the first to decide holds the second, and never both each other. A task still held
+/// waits itself, and holds nothing; one whose gates passed and that hasn't decided yet holds
+/// nothing either: it decides after, and finds `task` then.
+pub fn past_gates(other: &Record, task: &Record) -> bool {
     if !matches!(other.kind, Kind::Issue | Kind::Spec) || other.pr.is_some() || other.id == task.id
     {
         return false;
     }
+    let decided = other.hooks.get(CHECKED_HOOK) == Some(&serde_json::Value::Bool(true));
     match other.stage {
-        Stage::Reviewing | Stage::Fixing | Stage::Ready => true,
+        Stage::Reviewing | Stage::Ready => true,
+        Stage::Gating | Stage::Fixing => other.review.is_some() || decided,
         Stage::Held => other.holds.last().is_some_and(|h| h.released.is_some()),
-        Stage::Gating if other.review.is_some() || other.round > 0 => true,
-        Stage::Gating => {
-            other.status == Status::Passed
-                && other.process_alive(probe)
-                && (gates_started(other), &other.id) < (gates_started(task), &task.id)
-        }
         Stage::Prepared | Stage::Working | Stage::Finished => false,
     }
-}
-
-/// When `task`'s latest gates started, in seconds; the latest time when it has none recorded.
-fn gates_started(task: &Record) -> u64 {
-    task.stages
-        .iter()
-        .rev()
-        .find(|s| s.stage == Stage::Gating)
-        .and_then(|s| parse_timestamp(&s.at))
-        .unwrap_or(u64::MAX)
 }
