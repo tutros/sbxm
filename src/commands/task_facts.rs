@@ -22,7 +22,7 @@ use crate::config::GlobalConfig;
 use crate::run::results::{format_timestamp, parse_timestamp};
 use crate::task::finish::check_own_folder;
 use crate::task::record::{self, Kind, Record, RunInfo, Stage, Status};
-use crate::task::{merged, queue, review};
+use crate::task::{hold, merged, queue, review};
 
 pub struct Options {
     /// The first day, `YYYY-MM-DD`.
@@ -54,9 +54,14 @@ struct Row {
     reviewer_cost_usd: Option<f64>,
     outcome: String,
     pr: Option<String>,
+    /// The minutes the task was held before its review, every hold of it (issue 727); `None`
+    /// for a task never held.
+    held_min: Option<u64>,
+    /// Whether the merge of the base after a hold conflicted; `None` when none was looked at.
+    hold_conflict: Option<bool>,
 }
 
-const COLUMNS: [&str; 13] = [
+const COLUMNS: [&str; 15] = [
     "task",
     "issue",
     "started",
@@ -70,6 +75,8 @@ const COLUMNS: [&str; 13] = [
     "reviewer cost",
     "outcome",
     "PR",
+    "held (min)",
+    "hold conflict",
 ];
 
 /// Prints the facts of every task started in the window to `out`, one warning line per record
@@ -139,7 +146,7 @@ pub fn run(
         if !seen.insert((task.id.clone(), started.clone())) {
             continue;
         }
-        rows.push(row(&task, &dir, started));
+        rows.push(row(&task, &dir, started, now));
     }
     rows.sort_by(|a, b| (&a.started, &a.task).cmp(&(&b.started, &b.task)));
 
@@ -218,7 +225,7 @@ fn read(path: &Path) -> Result<Record, String> {
     serde_json::from_str(&text).map_err(|e| format!("not a task record ({e})"))
 }
 
-fn row(task: &Record, dir: &Path, started: String) -> Row {
+fn row(task: &Record, dir: &Path, started: String, now: u64) -> Row {
     let must_fix = review::saved_must_fix(dir);
     let ready = task
         .stages
@@ -247,6 +254,8 @@ fn row(task: &Record, dir: &Path, started: String) -> Row {
         reviewer_cost_usd: reviewer.and_then(cost),
         outcome: outcome(task),
         pr: task.pr.clone(),
+        held_min: (!task.holds.is_empty()).then(|| hold::minutes(task, now)),
+        hold_conflict: hold::conflict(task),
     }
 }
 
@@ -307,6 +316,10 @@ fn write_table(out: &mut dyn Write, rows: &[Row]) -> Result<()> {
             usd(row.reviewer_cost_usd),
             row.outcome.clone(),
             dash(row.pr.as_ref()),
+            dash(row.held_min.as_ref()),
+            row.hold_conflict
+                .map_or("-", |c| if c { "yes" } else { "no" })
+                .to_owned(),
         ];
         let cells: Vec<String> = cells.iter().map(|c| cell(c)).collect();
         writeln!(out, "| {} |", cells.join(" | "))?;

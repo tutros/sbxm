@@ -951,11 +951,21 @@ mod looping {
             "{}",
             run.out
         );
-        // Its row has the minutes it was held: an hour.
+        // It says the minutes it was held, an hour, and so does its row in the loop's log.
         assert!(
             run.out.contains("released from its hold after 60 min"),
             "{}",
             run.out
+        );
+        let logs = f.base().join(".sbxm").join("loop-logs");
+        let log: String = fs::read_dir(&logs)
+            .unwrap()
+            .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+            .collect();
+        let row = log.lines().find(|l| l.contains("#9")).unwrap_or_default();
+        assert!(
+            row.contains("held before review, waits on #30 (PR, awaits your merge)"),
+            "{log}"
         );
     }
 
@@ -998,5 +1008,100 @@ mod looping {
         );
         let eight = f.saved(8);
         assert!(hold::waiting(&eight).is_some(), "{}", run.out);
+    }
+}
+
+// What shows the holds: `sbxm status`, the loop log's row (above) and `task facts`.
+
+mod shown {
+    use super::*;
+    use common::Env as TestEnv;
+    use sbxm::commands::task_facts::{self, Options};
+    use sbxm::run::results::parse_timestamp;
+    use serde_json::Value;
+
+    #[test]
+    fn task_loop_hold_status_shows_what_a_held_task_waits_on() {
+        let env = TestEnv::new();
+        let base = env.base_dir();
+        let mut rec = task(&base, 9, &["src/a.rs"], Stage::Held, Status::Ok, START);
+        rec.process = None;
+        hold::start(
+            &mut rec,
+            START,
+            vec![
+                Wait::Pr {
+                    number: 12,
+                    armed: false,
+                },
+                Wait::Task {
+                    task: "issue-8".into(),
+                    stage: Stage::Reviewing,
+                },
+            ],
+        );
+        record::write(&record::task_dir(&base, &rec.id), &rec).unwrap();
+        let rows = sbxm::status::tasks::rows(&base, &Probe).unwrap();
+        let text = sbxm::status::tasks::render(&rows, START + 60, None);
+        assert!(
+            text.contains(
+                "issue-9 held: waits on #12 (PR, awaits your merge), issue-8 (in review)"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn task_loop_hold_task_facts_reports_hold_minutes_and_hold_conflicts() {
+        let env = TestEnv::new();
+        let base = env.base_dir();
+        let start = parse_timestamp("2026-11-10T08:00:00Z").unwrap();
+        let mut rec = task(&base, 9, &["src/a.rs"], Stage::Held, Status::Ok, start);
+        rec.stages[0].at = format_timestamp(start);
+        hold::start(&mut rec, start + 600, vec![]);
+        hold::release(&mut rec, start + 600 + 45 * 60);
+        rec.holds[0].conflict = Some(true);
+        rec.stage = Stage::Ready;
+        record::write(&record::task_dir(&base, &rec.id), &rec).unwrap();
+        let mut other = task(&base, 8, &["src/b.rs"], Stage::Ready, Status::Ok, start + 1);
+        other.stages[0].at = format_timestamp(start + 1);
+        record::write(&record::task_dir(&base, &other.id), &other).unwrap();
+
+        let run = |json: bool| {
+            let (mut out, mut warn) = (Vec::new(), Vec::new());
+            task_facts::run(
+                &env.config_dir(),
+                &Options {
+                    since: "2026-11-10".into(),
+                    until: None,
+                    json,
+                },
+                parse_timestamp("2026-11-15T12:00:00Z").unwrap(),
+                &mut out,
+                &mut warn,
+            )
+            .unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let rows: Vec<Value> = serde_json::from_str(&run(true)).unwrap();
+        let of = |id: &str| rows.iter().find(|r| r["task"] == id).unwrap().clone();
+        assert_eq!(of("issue-9")["held_min"], 45);
+        assert_eq!(of("issue-9")["hold_conflict"], true);
+        assert_eq!(of("issue-8")["held_min"], Value::Null);
+        assert_eq!(of("issue-8")["hold_conflict"], Value::Null);
+
+        let table = run(false);
+        assert!(
+            table
+                .lines()
+                .next()
+                .unwrap()
+                .ends_with("| PR | held (min) | hold conflict |"),
+            "{table}"
+        );
+        let nine = table.lines().find(|l| l.starts_with("| issue-9 ")).unwrap();
+        assert!(nine.ends_with("| - | 45 | yes |"), "{nine}");
+        let eight = table.lines().find(|l| l.starts_with("| issue-8 ")).unwrap();
+        assert!(eight.ends_with("| - | - | - |"), "{eight}");
     }
 }

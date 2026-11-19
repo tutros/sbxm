@@ -74,6 +74,7 @@ fn row(time: TaskTime) -> TaskRow {
         pr: None,
         location: None,
         parked: None,
+        held: None,
         log_line: None,
     }
 }

@@ -271,6 +271,7 @@ fn row(title: &str) -> TaskRow {
         pr: None,
         location: None,
         parked: None,
+        held: None,
         log_line: Some("[working] busy".to_owned()),
     }
 }

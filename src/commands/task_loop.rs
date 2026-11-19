@@ -5096,9 +5096,30 @@ impl Loop<'_> {
                 .map(|r| r.round),
             must_fix: review::saved_must_fix(&self.task_dir(issue)),
             outcome,
-            stops: task.stops.to_vec(),
+            stops: self.stops_with_holds(task.stops, rec.as_ref()),
             idle_before: task.idle_before,
         }
+    }
+
+    /// A row's stops, then each hold before review its record keeps (issue 727), with the
+    /// minutes it waited and what it waited on.
+    fn stops_with_holds(
+        &self,
+        stops: &[(String, u64)],
+        rec: Option<&Record>,
+    ) -> Vec<(String, u64)> {
+        let mut all = stops.to_vec();
+        let now = self.now();
+        for hold in rec.map(|r| r.holds.as_slice()).unwrap_or_default() {
+            all.push((
+                format!(
+                    "held before review, {}",
+                    crate::task::hold::waits_line(&hold.on)
+                ),
+                hold.seconds(now),
+            ));
+        }
+        all
     }
 }
 
