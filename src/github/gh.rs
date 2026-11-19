@@ -425,6 +425,16 @@ struct RawMergedPr {
     merged_at: String,
 }
 
+/// An open PR as `gh pr list --json number` lists it (issue 726).
+#[derive(Deserialize)]
+struct RawOpenPr {
+    number: u32,
+}
+
+/// How many open PRs [`GitHubBackend::prs_open`] lists at most; a listing that reaches it is
+/// refused (issue 726).
+const OPEN_LIMIT: usize = 100;
+
 /// An entry of a folder as `gh api repos/<repo>/contents/<dir>` lists it (issue 714).
 #[derive(Deserialize)]
 struct RawContent {
@@ -1257,6 +1267,19 @@ impl GitHubBackend for GhBackend {
                 })
             })
             .collect()
+    }
+
+    fn prs_open(&self, repo: &str) -> Result<Vec<u32>> {
+        let limit = OPEN_LIMIT.to_string();
+        let raw: Vec<RawOpenPr> = self.json(&strings(&[
+            "pr", "list", "--repo", repo, "--state", "open", "--limit", &limit, "--json", "number",
+        ]))?;
+        if raw.len() >= OPEN_LIMIT {
+            bail!("{repo} has {OPEN_LIMIT} or more open PRs, more than `gh pr list` lists at once");
+        }
+        let mut numbers: Vec<u32> = raw.into_iter().map(|pr| pr.number).collect();
+        numbers.sort_unstable();
+        Ok(numbers)
     }
 
     fn dir_files(&self, repo: &str, branch: &str, dir: &str) -> Result<Vec<String>> {

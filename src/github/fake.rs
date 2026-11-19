@@ -72,6 +72,7 @@ pub enum GhCall {
     FileText(String, String, String),
     /// Repo, branch.
     RepoPaths(String, String),
+    PrsOpen(String),
 }
 
 #[derive(Default)]
@@ -1195,5 +1196,20 @@ impl GitHubBackend for FakeGitHub {
             paths.push(path.clone());
         }
         Ok(paths)
+    }
+
+    /// The scripted listed PRs of `repo` that are open ([`Self::with_listed_pr`]), in order.
+    fn prs_open(&self, repo: &str) -> Result<Vec<u32>> {
+        self.record(GhCall::PrsOpen(repo.to_owned()))?;
+        let mut numbers: Vec<u32> = self
+            .listed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(r, _, state)| r == repo && *state == PrState::Open)
+            .map(|(_, pr, _)| pr.number)
+            .collect();
+        numbers.sort_unstable();
+        Ok(numbers)
     }
 }

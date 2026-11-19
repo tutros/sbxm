@@ -93,6 +93,7 @@ decision 166). A ranking is computed in code from the judge's scores.
 ```
 sbxm task init                         # writes sbxm-task.toml: worker, reviewer, profile, gates
 sbxm task ready-check --issue 63       # is the issue ready for a worker? one line per rule; exit 1 on a fail
+sbxm task ready-check --issue 63 --judge   # then a model's advice in a model-only sandbox, with its cost
 sbxm task start --issue 63             # worker in its own sandbox; commits collected; gates run
 sbxm task status                       # stage, status, commits ahead, result/review present
 sbxm status --watch                    # a live dashboard over every task (decision 171, part 4 of 6):
@@ -123,6 +124,18 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   paths, and on the PRs merged since the label was added that changed a path the body names (decision 295: re-check
   the issue against them). `task loop` and `task loop --check` pass over an issue that fails a rule with the rule's
   reason, and say its warns without holding it back; `--json` gives the verdicts as one object.
+- **A model's advice (issue 726, decision 331(2)):** `sbxm task ready-check --issue N --judge` runs the rules, then
+  one model call on what code can't judge: points left open in the prose (each quoted), whether the issue needs
+  boundary cases (decision 244) and which, the acceptance list against the answers, a proposed `**Files:**` line, and
+  whether the size fits. The issue body, the default branch's paths and the open PRs' changed files are read on the
+  host and given to Claude (its default model) in a fresh sandbox of the `ready-check` profile, which reaches only the
+  model provider: no GitHub, no crates.io (decision 269(c), issue text is untrusted; deploy it with `just
+  deploy-profiles`). The sandbox has a 10-minute limit and is removed afterwards, also when the run fails. It prints
+  the run's seconds and cost, then the answer's five sections (`files:`, `open_points:`, `boundary_cases:`,
+  `acceptance_vs_answers:`, `size:`); an answer not in that format is printed as given, with a warning, and exits 2.
+  It is advice: it never sets a label and never gates the loop. `--write-files` then shows the proposed line and, with
+  `--yes`, writes it into the issue body (in place of the old `**Files:**` line, or added before `**Depends on:**`);
+  without `--yes` it prints the command to write it, which runs the model again. A `**Files:**` line is never required.
 - **Stages:** `prepared`, `working`, `gating`, `reviewing`, `fixing`, `ready`, `finished`. A failed gate shows as
   `gates-failed`; a killed run shows as `interrupted` in `task status`, and `task resume --issue N` continues a
   failed or interrupted task from its stage, keeping its clone and commits.

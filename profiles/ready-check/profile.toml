@@ -1,0 +1,13 @@
+description = "task ready-check --judge: one model call on untrusted issue text, reaching only the model provider"
+
+# Egress is deny-by-default and nothing is added: a sandbox of this profile reaches only its
+# harness's own provider (Claude's), no GitHub and no crates.io (decision 269(c), issue 726).
+[network]
+allow = []
+deny = []
+
+[env]
+
+# Secret services that must exist in `sbx secret ls`. Values stay in sbx.
+[secrets]
+services = ["anthropic"]

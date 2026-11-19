@@ -348,4 +348,7 @@ pub trait GitHubBackend: Send + Sync {
     /// repos/<repo>/git/trees/<branch>?recursive=1`); an error rather than a partial list when
     /// GitHub cuts the listing short (issue 725).
     fn repo_paths(&self, repo: &str, branch: &str) -> Result<Vec<String>>;
+    /// The numbers of `repo`'s open PRs, in order (`gh pr list --state open`); an error rather
+    /// than a partial list when the listing reaches its limit (issue 726).
+    fn prs_open(&self, repo: &str) -> Result<Vec<u32>>;
 }
