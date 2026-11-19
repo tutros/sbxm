@@ -2337,6 +2337,15 @@ impl Loop<'_> {
                     }
                 };
                 if !waits.is_empty() {
+                    // What it waits on now, for `sbxm status` and the log row: the work it
+                    // waited on may have ended while other work came to overlap it.
+                    let changed = crate::task::hold::waiting(&rec).is_some_and(|h| h.on != waits);
+                    if changed {
+                        match self.mark_waits(issue, waits) {
+                            Err(e) if !e.is::<lock::InUse>() => return Err(e),
+                            _ => {}
+                        }
+                    }
                     continue;
                 }
                 match self.mark_released(issue) {
@@ -2389,6 +2398,22 @@ impl Loop<'_> {
             crate::task::hold::release(r, now);
         })?;
         Ok(true)
+    }
+
+    /// Saves `waits` as what task `issue`'s hold waits on now, under its lock; its start stays.
+    /// Nothing when it has no hold waiting any more.
+    fn mark_waits(&self, issue: u32, waits: Vec<crate::task::hold::Wait>) -> Result<()> {
+        let _lock = pipeline::lock_task(&self.base_dir, &format!("issue-{issue}"), self.probe)?;
+        let dir = self.task_dir(issue);
+        let mut rec = record::read(&dir.join("task.json"))?;
+        if crate::task::hold::waiting(&rec).is_none() {
+            return Ok(());
+        }
+        record::write_change(&dir, &mut rec, |r| {
+            if let Some(hold) = r.holds.last_mut() {
+                hold.on = waits;
+            }
+        })
     }
 
     /// The line for each task still held as the loop stops (issue 727): the next loop checks it

@@ -1153,7 +1153,18 @@ mod looping {
             run.out
         );
         let eight = f.saved(8);
-        assert!(hold::waiting(&eight).is_some(), "{}", run.out);
+        let waiting = hold::waiting(&eight).expect("issue 8 stays held");
+        // What it waits on now is issue 9's PR, not the merged one; since when stays.
+        assert_eq!(
+            waiting.on,
+            vec![Wait::Pr {
+                number: 109,
+                armed: false
+            }],
+            "{}",
+            run.out
+        );
+        assert_eq!(waiting.since, format_timestamp(START + 60));
     }
 }
 
