@@ -315,7 +315,8 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   by hand is never held (decision 296's check stays for it). A queued `spec` job's task is held the same way: its
   job ends `stopped` with the hold's line, and once released the loop queues its spec again
   (`queue/release-<id>.json`, the file found in `specs_dir` by the task's id), whose job resumes it (`task resume
-  --spec`) and finishes it, after a restart too. `sbxm status` names a held task's waits under the table
+  --spec`) and finishes it, after a restart too; another job of the same spec while the task still waits ends
+  `skipped`, its hold kept. `sbxm status` names a held task's waits under the table
   (`issue-9 held: waits on #12 (PR, awaits your merge)`), the loop's log row lists each hold among its stops with its
   minutes, and `task facts` has `held (min)` and `hold conflict` for the next retro.
 
