@@ -5314,6 +5314,8 @@ impl TaskSteps<'_> {
             task_log::open(self.config_dir, vec![id], None).unwrap_or_else(|_| task_log::none());
         // The step's `sbx` lines go to the task's log after its header (issue 114).
         let _route = crate::task::runlog::route(&log);
+        // The step is the loop's, as a child's would be: a spec task is held before its review.
+        let _step = record::loop_step();
         let mut out = Tee::new(out, Arc::clone(&log));
         let mut warn = Tee::new(warn, log);
         let result = step(&mut out, &mut warn);

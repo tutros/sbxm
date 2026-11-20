@@ -284,8 +284,8 @@ fn run_issue(
         config.worker.model.clone_from(&worker.model);
     }
     let config = &config;
-    // A child of `task loop` is held before its review while its changed files overlap other
-    // open work (issue 727); a review run by hand never is.
+    // A loop's task is held before its review while its changed files overlap other open work
+    // (issue 727); a review run by hand never is.
     let repo = prepared.record.repo.clone();
     let checker = hold::Checker {
         base_dir: &base_dir,
@@ -304,7 +304,7 @@ fn run_issue(
         disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
-        hold: record::in_loop().then_some(&checker as &dyn hold::Check),
+        hold: record::run_by_loop().then_some(&checker as &dyn hold::Check),
         progress: &pipeline::quiet,
     };
     let reviewed = task_log::live(out, |progress| {
@@ -528,7 +528,7 @@ fn run_spec(
         disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
-        hold: record::in_loop().then_some(&checker as &dyn hold::Check),
+        hold: record::run_by_loop().then_some(&checker as &dyn hold::Check),
         progress: &pipeline::quiet,
     };
     let reviewed = task_log::live(out, |progress| {

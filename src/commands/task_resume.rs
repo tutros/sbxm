@@ -164,7 +164,7 @@ fn run_unrecorded(
         github,
         probe,
     };
-    let holds = record::in_loop()
+    let holds = record::run_by_loop()
         && matches!(
             prepared.record.kind,
             record::Kind::Issue | record::Kind::Spec

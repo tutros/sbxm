@@ -196,6 +196,38 @@ pub fn in_loop() -> bool {
     THIS_LOOP.get().is_some()
 }
 
+thread_local! {
+    /// Whether `task loop` runs the command on this thread in its own process ([`loop_step`]).
+    static LOOP_STEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While it lives, the commands this thread runs are `task loop`'s own, run in its process
+/// rather than as a child (review M-1 of PR 734): a spec job's with `cloud_slots` unset. It
+/// ends with the step, so a command run after it is not the loop's.
+pub struct LoopStep {
+    was: bool,
+}
+
+/// Marks this thread's commands as the loop's until the returned [`LoopStep`] drops.
+pub fn loop_step() -> LoopStep {
+    LoopStep {
+        was: LOOP_STEP.replace(true),
+    }
+}
+
+impl Drop for LoopStep {
+    fn drop(&mut self) {
+        LOOP_STEP.set(self.was);
+    }
+}
+
+/// Whether the running command is `task loop`'s: in a child of it ([`in_loop`]) or run by it in
+/// its own process ([`loop_step`]). A loop's issue or spec task is held before its review while
+/// its changed files overlap other open work (issue 727); one run by hand never is.
+pub fn run_by_loop() -> bool {
+    in_loop() || LOOP_STEP.get()
+}
+
 /// The loop's process from [`LOOP_ENV`]'s value; `None` for anything else.
 pub fn parse_loop(value: &str) -> Option<Process> {
     serde_json::from_str(value).ok()
