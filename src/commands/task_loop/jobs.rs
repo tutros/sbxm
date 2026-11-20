@@ -271,6 +271,9 @@ impl Loop<'_> {
                     }
                 };
                 self.mark(&taken, &read, started, Some(id.clone()))?;
+                if let Some(ended) = self.spec_waits(&spec, &id) {
+                    return self.halt_after(&taken, &label, read, started, ended, out, warn);
+                }
                 let step = if self.held_spec(&id) {
                     JobStep::ResumeSpec(spec.clone())
                 } else {
@@ -796,6 +799,9 @@ impl Loop<'_> {
             Err(ended) => return Ok(ended),
         };
         self.mark(taken, read, started, Some(id.clone()))?;
+        if let Some(ended) = self.spec_waits(&spec, &id) {
+            return Ok(ended);
+        }
         let ended = self.spec_task(&spec, &id, out, warn)?;
         Ok(Ended {
             flag: Some(spec_flag(&spec)),
@@ -808,6 +814,24 @@ impl Loop<'_> {
     fn held_spec(&self, id: &str) -> bool {
         self.record_of(id)
             .is_some_and(|r| r.stage == Stage::Held && r.kind == crate::task::record::Kind::Spec)
+    }
+
+    /// How a spec job of task `id` ends without running while the task is held before its
+    /// review and the loop hasn't released it (review M-2 of PR 734): `skipped`, its hold kept.
+    /// Only the loop's release, once nothing overlaps the task, queues its spec again to resume
+    /// it; another job of the same file never does.
+    fn spec_waits(&self, spec: &Path, id: &str) -> Option<Ended> {
+        let rec = self.record_of(id)?;
+        let hold = crate::task::hold::waiting(&rec)?;
+        let reason = format!(
+            "{id} is held before its review and {}; the loop queues its spec again once \
+             nothing overlaps it",
+            crate::task::hold::waits_line(&hold.on)
+        );
+        Some(Ended {
+            flag: Some(spec_flag(spec)),
+            ..Ended::new(Outcome::Skipped, reason).task(id.to_owned())
+        })
     }
 
     /// A `spec` job's file `file` in `specs_dir` and its task's id; `Err`: how the job ends

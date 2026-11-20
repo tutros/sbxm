@@ -1833,4 +1833,78 @@ mod spec_jobs {
         assert!(jobs::pending(&f.base()).unwrap().is_empty());
         assert!(out.contains("is held before its review"), "{out}");
     }
+
+    /// Review M-2 of PR 734: a spec job queued for a task still held, a second job of the same
+    /// file say, ends at once; only the loop's own release resumes the task.
+    mod still_waiting {
+        use super::*;
+
+        fn parallel() -> Fixture {
+            let f = Fixture::new();
+            common::cloud_slot::set_cloud_slots(&f.env, 1);
+            f
+        }
+
+        fn queue(f: &Fixture, name: &str) {
+            let queue = jobs::queue_dir(&f.base());
+            fs::create_dir_all(&queue).unwrap();
+            fs::write(queue.join(name), r#"{"kind": "spec", "file": "retro.md"}"#).unwrap();
+        }
+
+        fn requeued_while_held_is_skipped(f: &Fixture) {
+            held_spec(&f.base(), &f.spec());
+            queue(f, "again.json");
+            let gh = github(f, PrState::Open);
+            let script = f.script(&gh);
+            let (result, out) = f.run(&script, &gh);
+            assert!(result.is_ok(), "{result:?}\n{out}");
+            assert!(script.calls.borrow().is_empty(), "{out}");
+            let again = f.result("again.json");
+            assert_eq!(again["outcome"], "skipped", "{again}");
+            assert!(again["reason"].as_str().unwrap().contains("#30"), "{again}");
+            let id = spec_id(&f.spec());
+            let rec = record::read(&record::task_dir(&f.base(), &id).join("task.json")).unwrap();
+            assert!(hold::waiting(&rec).is_some(), "{rec:?}");
+            assert!(jobs::pending(&f.base()).unwrap().is_empty());
+        }
+
+        #[test]
+        fn task_loop_hold_a_spec_queued_again_while_held_is_skipped_and_stays_held() {
+            requeued_while_held_is_skipped(&Fixture::new());
+        }
+
+        #[test]
+        fn task_loop_hold_a_spec_queued_again_while_held_is_skipped_with_slots() {
+            requeued_while_held_is_skipped(&parallel());
+        }
+
+        fn two_jobs_finish_once(f: &Fixture) {
+            queue(f, "a.json");
+            queue(f, "b.json");
+            let gh = github(f, PrState::Open);
+            let script = f.script(&gh);
+            let (result, out) = f.run(&script, &gh);
+            assert!(result.is_ok(), "{result:?}\n{out}");
+            assert_eq!(*script.calls.borrow(), vec!["run retro.md"], "{out}");
+            assert_eq!(f.result("b.json")["outcome"], "skipped", "{out}");
+            gh.set_merged(30, "cccccccccccccccccccccccccccccccccccccccc");
+            let (result, out) = f.run(&script, &gh);
+            assert!(result.is_ok(), "{result:?}\n{out}");
+            assert_eq!(
+                *script.calls.borrow(),
+                vec!["run retro.md", "resume retro.md", "finish retro.md"],
+                "{out}"
+            );
+        }
+
+        #[test]
+        fn task_loop_hold_two_jobs_of_one_held_spec_resume_and_finish_it_once() {
+            two_jobs_finish_once(&Fixture::new());
+        }
+
+        #[test]
+        fn task_loop_hold_two_jobs_of_one_held_spec_resume_and_finish_it_once_with_slots() {
+            two_jobs_finish_once(&parallel());
+        }
+    }
 }
