@@ -428,6 +428,10 @@ impl<'a> Loop<'a> {
             return Ok(Some(Ok(self.stopped(issue, out)?)));
         }
         t.ran = true;
+        if let Some(line) = self.on_hold(issue, kind) {
+            t.usage_waited = Duration::ZERO;
+            return Ok(Some(Ok(End::OnHold(line))));
+        }
         let ready = self.record(issue).filter(|r| r.stage == Stage::Ready);
         if kind == outcome::Kind::Ready && ready.is_some() {
             t.usage_waited = Duration::ZERO;
@@ -657,11 +661,11 @@ fn run<'a>(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<String> {
-    let left = |pass: &Pass, out: &mut dyn Write| -> Result<()> {
+    let left = |lp: &Loop, pass: &Pass, out: &mut dyn Write| -> Result<()> {
         for h in pass.due.iter().chain(&pass.held) {
             writeln!(out, "{}", h.left())?;
         }
-        Ok(())
+        lp.holds_left(out)
     };
     loop {
         // Each running child looked at, in the order they started; each end acted on at once.
@@ -691,18 +695,18 @@ fn run<'a>(
         let busy = !live.is_empty() || !lp.jobs.is_empty();
         if !busy {
             if let Some(e) = pass.halt.take() {
-                left(pass, out)?;
+                left(&*lp, pass, out)?;
                 return Err(e);
             }
             if (lp.env.stop_requested)() {
                 writeln!(out, "stopped on request")?;
-                left(pass, out)?;
+                left(&*lp, pass, out)?;
                 return Ok("stopped on request".to_owned());
             }
             if opts.cap.is_some_and(|cap| pass.tasks_run >= cap) {
                 let stop = format!("--cap {} reached", opts.cap.unwrap_or_default());
                 writeln!(out, "{stop}")?;
-                left(pass, out)?;
+                left(&*lp, pass, out)?;
                 return Ok(stop);
             }
         }
@@ -819,6 +823,9 @@ fn steps_and_starts<'a>(
         return Ok(None);
     }
     let mut started_any = false;
+    // The tasks held before their review that no longer overlap other work (issue 727) join the
+    // tasks tried again.
+    let queued = lp.release_holds(&mut pass.due, out, warn)?;
     // The tasks tried again first: held or cut off, each in the slot its record names.
     let mut later = VecDeque::new();
     while let Some(again) = pass.due.pop_front() {
@@ -852,7 +859,12 @@ fn steps_and_starts<'a>(
             out,
         )?;
         let Some(issue) = next else {
-            if !live.is_empty() || !lp.jobs.is_empty() || started_any || !pass.due.is_empty() {
+            if !live.is_empty()
+                || !lp.jobs.is_empty()
+                || started_any
+                || queued
+                || !pass.due.is_empty()
+            {
                 break;
             }
             if opts.wait {
@@ -879,6 +891,7 @@ fn steps_and_starts<'a>(
             for h in pass.due.iter().chain(&pass.held) {
                 writeln!(out, "{}", h.left())?;
             }
+            lp.holds_left(out)?;
             return Ok(Some(stop.to_owned()));
         };
         // A stop asked during the reads that picked it: it isn't started.

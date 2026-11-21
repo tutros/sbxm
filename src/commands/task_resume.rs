@@ -26,6 +26,7 @@ use crate::slot;
 use crate::task::config;
 use crate::task::finish;
 use crate::task::gates::HostRunner;
+use crate::task::hold;
 use crate::task::outcome;
 use crate::task::pipeline::{self, Prepared, TaskEnv};
 use crate::task::record::{self, ProcessProbe};
@@ -154,6 +155,20 @@ fn run_unrecorded(
         (Location::Cloud, Some(identity)) => Some(identity.clone()),
         (Location::Cloud, None) => Identity::read_from(None).ok(),
     };
+    // A loop's issue or spec task is held before its first review while its changed files
+    // overlap other open work (issue 727); a resume run by hand never holds it.
+    let repo = prepared.record.repo.clone();
+    let checker = hold::Checker {
+        base_dir: &base_dir,
+        repo: &repo,
+        github,
+        probe,
+    };
+    let holds = record::run_by_loop()
+        && matches!(
+            prepared.record.kind,
+            record::Kind::Issue | record::Kind::Spec
+        );
     let env = TaskEnv {
         config_dir,
         config: &config,
@@ -166,6 +181,7 @@ fn run_unrecorded(
         disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
+        hold: holds.then_some(&checker as &dyn hold::Check),
         progress: &pipeline::quiet,
     };
     resume::check_can_resume_with(&prepared.record, probe, opts.rounds, opts.should_fix)?;

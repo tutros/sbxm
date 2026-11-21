@@ -410,6 +410,9 @@ mod play {
             JobStep::ShouldFixSpec(spec) => {
                 format!("should-fix {}", spec.file_name().unwrap().to_string_lossy())
             }
+            JobStep::ResumeSpec(spec) => {
+                format!("resume {}", spec.file_name().unwrap().to_string_lossy())
+            }
             JobStep::Template { profile, .. } => format!("template {profile}"),
         }
     }

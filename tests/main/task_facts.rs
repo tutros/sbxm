@@ -19,8 +19,8 @@ use serde_json::{Value, json};
 
 const HEADER: &str = "| task | issue | started | size | review rounds | must-fix per round | \
                       wall to ready (s) | worker (s) | worker cost | reviewer (s) | \
-                      reviewer cost | outcome | PR |\n\
-                      |---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
+                      reviewer cost | outcome | PR | held (min) | hold conflict |\n\
+                      |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
 
 /// Seconds since the epoch of a stamp written as sbxm writes them.
 fn at(stamp: &str) -> u64 {
@@ -250,7 +250,9 @@ fn task_facts_prints_an_old_record_missing_newer_fields_with_dashes_and_nulls() 
             "reviewer_s": null,
             "reviewer_cost_usd": null,
             "outcome": "working running",
-            "pr": null
+            "pr": null,
+            "held_min": null,
+            "hold_conflict": null
         })]
     );
 
@@ -260,7 +262,7 @@ fn task_facts_prints_an_old_record_missing_newer_fields_with_dashes_and_nulls() 
         out,
         format!(
             "{HEADER}| issue-5 | 5 | 2026-11-10T08:00:00Z | - | 0 | - | - | - | - | - | - | \
-             working running | - |\n"
+             working running | - | - | - |\n"
         )
     );
 }
@@ -413,7 +415,9 @@ fn task_facts_fills_every_column_from_the_record_the_reviews_and_the_issue() {
             "reviewer_s": 300,
             "reviewer_cost_usd": null,
             "outcome": "ready (rounds-exhausted)",
-            "pr": "https://github.com/o/r/pull/12"
+            "pr": "https://github.com/o/r/pull/12",
+            "held_min": null,
+            "hold_conflict": null
         })]
     );
 
@@ -423,7 +427,7 @@ fn task_facts_fills_every_column_from_the_record_the_reviews_and_the_issue() {
         out,
         format!(
             "{HEADER}| issue-7 | 7 | 2026-11-10T08:00:00Z | M | 3 | 2, -, 0 | 3600 | 1200 | \
-             $1.50 | 300 | - | ready (rounds-exhausted) | https://github.com/o/r/pull/12 |\n"
+             $1.50 | 300 | - | ready (rounds-exhausted) | https://github.com/o/r/pull/12 | - | - |\n"
         )
     );
 }

@@ -318,6 +318,46 @@ pub fn pending(base_dir: &Path) -> Result<Vec<PathBuf>> {
     json_files(&queue_dir(base_dir))
 }
 
+/// The name of the file in `specs_dir` whose spec task is `id` (issue 727): the plain file whose
+/// [`spec_file`] id is `id`; `None` when there is none, or no `specs_dir`.
+pub fn spec_of(config_dir: &Path, config: &GlobalConfig, id: &str) -> Option<String> {
+    let dir = config.specs_dir.as_ref()?;
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .find(|name| spec_file(config_dir, config, name).is_ok_and(|(_, found)| found == id))
+}
+
+/// Queues the spec job of spec task `id` released from its hold before review (issue 727):
+/// `{"kind": "spec", "file": <file>}` as `release-<id>.json`, written to a temp file and renamed,
+/// so the loop never reads half of it. `false`, writing nothing, when that job is queued or
+/// running already.
+pub fn queue_release(base_dir: &Path, id: &str, file: &str) -> Result<bool> {
+    if !record::is_valid_id(id) {
+        bail!("{id:?} isn't a task id");
+    }
+    let queue = queue_dir(base_dir);
+    own_folder(base_dir, &queue)?;
+    let name = format!("release-{id}.json");
+    let path = queue.join(&name);
+    if fs::symlink_metadata(&path).is_ok()
+        || fs::symlink_metadata(running_dir(base_dir).join(&name)).is_ok()
+    {
+        return Ok(false);
+    }
+    let text = serde_json::to_string(&Job::Spec {
+        file: file.to_owned(),
+    })?;
+    let tmp = queue.join(format!("{name}.tmp"));
+    fs::write(&tmp, text).with_context(|| format!("cannot write {}", tmp.display()))?;
+    fs::rename(&tmp, &path).with_context(|| format!("cannot write {}", path.display()))?;
+    Ok(true)
+}
+
 /// The jobs left in `running/` by a loop that stopped while they ran.
 pub fn left_running(base_dir: &Path) -> Result<Vec<PathBuf>> {
     json_files(&running_dir(base_dir))

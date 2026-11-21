@@ -59,6 +59,9 @@ pub enum Role {
     FixPrFix,
     /// The fix round of a fix task after a gate failure.
     FixGatePrFix,
+    /// The merge of the base into a task released from its hold before review (issue 727,
+    /// decision 331(3)): no `[prompts]` override, since it only merges.
+    MergeBase,
 }
 
 /// A template and the name errors are reported under (the embedded name, or the override's path).
@@ -82,6 +85,7 @@ const WORKER_PR_FIX_CHECK: &str = include_str!("../../prompts/worker-pr-fix-chec
 const REVIEWER_PR_FIX: &str = include_str!("../../prompts/reviewer-pr-fix.md");
 const FIX_PR_FIX: &str = include_str!("../../prompts/fix-pr-fix.md");
 const FIX_GATE_PR_FIX: &str = include_str!("../../prompts/fix-gate-pr-fix.md");
+const MERGE_BASE: &str = include_str!("../../prompts/merge-base.md");
 
 /// The template for `role`: the repo's override when configured, else the embedded one.
 pub fn template(role: Role, prompts: &Prompts) -> Result<Template> {
@@ -121,6 +125,7 @@ pub fn template(role: Role, prompts: &Prompts) -> Result<Template> {
             FIX_GATE_PR_FIX,
             prompts.fix.as_deref(),
         ),
+        Role::MergeBase => ("merge-base.md", MERGE_BASE, None),
     };
     match custom {
         Some(path) => read_override(path),

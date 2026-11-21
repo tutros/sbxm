@@ -355,6 +355,10 @@ pub struct TaskEnv<'a> {
     /// Prints a line the moment a phase starts (issue 538): the worker, the gates, a review
     /// round, a fix round. The command's `out`, so the line reaches `run.log` then too.
     pub progress: &'a dyn Fn(&str),
+    /// What a loop task's changed files are checked against once its gates pass, before its
+    /// review (issue 727, decision 331(3)): set only for a child of `task loop`; `None` holds
+    /// nothing.
+    pub hold: Option<&'a dyn super::hold::Check>,
 }
 
 /// A [`TaskEnv::progress`] that prints nothing.
@@ -465,6 +469,7 @@ impl Ctx<'_> {
             disk: self.disk,
             identity: Some(self.identity),
             clone_source: Some(self.clone_source),
+            hold: None,
             progress,
         }
     }
@@ -784,6 +789,25 @@ impl std::fmt::Display for SbxUnavailable {
 }
 
 impl std::error::Error for SbxUnavailable {}
+
+/// A loop task held before its review (issue 727, decision 331(3)): not a failure. Its record is
+/// at `held`, naming what it waits on; the loop releases it once nothing overlaps.
+#[derive(Debug)]
+pub struct OnHold(String);
+
+impl OnHold {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self(text.into())
+    }
+}
+
+impl std::fmt::Display for OnHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OnHold {}
 
 /// The words a harness's lapsed sign-in is recorded with (issue 445, answer 2), lowercase: Claude
 /// Code's "OAuth session expired and could not be refreshed" (G64, 2026-10-27).
@@ -3872,6 +3896,10 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
             "task {id} is already being reviewed or has been (stage reviewing); if the sbxm \
              process that ran it is gone, continue it with `{resume}`, or see `{status_hint}`"
         ),
+        (Stage::Held, _) => bail!(
+            "task {id} is held before its review while its changed files overlap other open \
+             work; the loop releases it, or continue it with `{resume}`; see `{status_hint}`"
+        ),
         (Stage::Prepared, _) if matches!(task.kind, record::Kind::Spec | record::Kind::Fix) => {
             bail!(
                 "no worker has run for task {id}; see `{status_hint}`, and remove its folders under the base dir to start it again"
@@ -4012,7 +4040,7 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
     next_review_round(prepared)?;
     let _slot = take_cloud_slot(env, &prepared.record)?;
     let reviewed = review_checked(env, prepared, report);
-    stop_cloud_worker(env, prepared);
+    stop_or_keep_cloud_worker(env, prepared);
     // A fix round that failed, or gates that stopped the task, end its phase too (issue 341).
     release_local_worker_into(env, prepared);
     reviewed
@@ -4044,6 +4072,73 @@ fn review_checked(
 
     let round = next_review_round(prepared)?;
     review_rounds(env, prepared, report, round, None, false)
+}
+
+/// Decision 331(3), issue 727: a loop task (`env.hold` set) whose gates passed before its first
+/// review is held there while its changed files overlap other open work: the record goes to
+/// `held`, naming what it waits on and since when, and [`OnHold`] ends the command, which frees
+/// its sandbox slot. Called where every route to a first review meets ([`review_rounds`]), so a
+/// resumed gate-fix round is checked too. A task released from a hold goes on to its review
+/// without another check. A check that can't be made (GitHub not answering) holds nothing: the
+/// task goes on to its review, with a warning.
+fn hold_if_overlapping(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+    let Some(check) = env.hold else {
+        return Ok(());
+    };
+    let task = &prepared.record;
+    let before_review = task.stage == Stage::Gating
+        && task.status == Status::Passed
+        && task.review.is_none()
+        && task.holds.is_empty()
+        && matches!(task.kind, Kind::Issue | Kind::Spec);
+    if !before_review {
+        return Ok(());
+    }
+    // Held until what the check decided is recorded (held, or on to the review), so another
+    // task's check never runs in between and misses it.
+    let _decision = check.decide()?;
+    let waits = task
+        .changed_paths(&prepared.meta.join("repo.git"))
+        .and_then(|paths| check.waits(task, &paths));
+    let waits = match waits {
+        Ok(waits) => waits,
+        Err(e) => {
+            prepared.warnings.push(format!(
+                "{}: could not check its changed files against other open work ({e:#}); it goes \
+                 on to its review",
+                task.id
+            ));
+            return Ok(());
+        }
+    };
+    if waits.is_empty() {
+        // On to its review: from now on it holds a later task that overlaps it.
+        return record::write_change(&prepared.meta, &mut prepared.record, |t| {
+            if !t.hooks.is_object() {
+                t.hooks = serde_json::Value::Object(serde_json::Map::new());
+            }
+            t.hooks[super::hold::CHECKED_HOOK] = serde_json::Value::Bool(true);
+        });
+    }
+    let line = format!(
+        "{} is held before its review: {}; the loop releases it once that work has merged or \
+         ended",
+        task.id,
+        super::hold::waits_line(&waits)
+    );
+    let at = now();
+    record::write_change(&prepared.meta, &mut prepared.record, |t| {
+        if t.advance(Stage::Held, at, Process::current(env.probe))
+            .is_ok()
+        {
+            super::hold::start(t, at, waits);
+        }
+    })?;
+    if prepared.record.stage != Stage::Held {
+        bail!("{} could not be held before its review", prepared.record.id);
+    }
+    (env.progress)(&line);
+    Err(OnHold(line).into())
 }
 
 /// The number for a review round that is about to start: after the last recorded review and
@@ -4124,6 +4219,9 @@ pub(super) fn review_rounds(
     mut first: Option<record::ReviewResult>,
     mut ignore_repeat: bool,
 ) -> Result<ReviewReport> {
+    if first.is_none() {
+        hold_if_overlapping(env, prepared)?;
+    }
     loop {
         let (must_fix, full, repeat) = match first.take() {
             Some(replayed) => {
@@ -4201,6 +4299,149 @@ pub(super) fn review_rounds(
 /// the review rounds go on from the one after the last recorded review, to `ready`.
 pub(super) fn continue_after_fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewReport> {
     after_fix(env, prepared, false)
+}
+
+/// A task released from its hold before review (decision 331(3), issue 727), by the loop or by
+/// `task resume`: it merges the default branch in, as `task fix` does (decision 292): an agent in
+/// the worker's sandbox, which resolves any conflict (decision 298); then its gates run again
+/// and it gets its review, to `ready`. Nothing is merged when the branch has the base already
+/// (the PR it waited on was closed). A merge the agent didn't make stops the task for the user,
+/// `held` and `failed`. The hold records whether the merge had a conflict.
+pub(super) fn release_hold(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewReport> {
+    // A merge that ended before its process went may not have had its commits collected: they
+    // are collected again, as after a worker or fix round that ended (a fetch of what `repo.git`
+    // has already changes nothing).
+    if matches!(prepared.record.status, Status::Completed | Status::TimedOut)
+        && let Err(e) = recollect_commits(env, prepared)
+    {
+        release_local_worker_into(env, prepared);
+        return Err(e);
+    }
+    if matches!(
+        prepared.record.status,
+        Status::Ok | Status::Running | Status::Failed
+    ) {
+        merge_base_round(env, prepared)?;
+    }
+    let repo_git = prepared.meta.join("repo.git");
+    let base = repo::branch_tip(&repo_git, &prepared.record.base)?;
+    let tip = repo::branch_tip(&repo_git, &prepared.record.branch)?;
+    if !repo::is_ancestor(&repo_git, &base, &tip)? {
+        let line = format!(
+            "the merge of {} (at {base}) into {} wasn't made, so {} stops here for you: see {} \
+             for what the agent handed back, merge it in the worker's clone, then `{}`",
+            prepared.record.base,
+            prepared.record.branch,
+            prepared.record.id,
+            prepared.meta.join("result.md").display(),
+            next::resume(&prepared.record)
+        );
+        prepared.record.notes.push(format!("hold: {line}"));
+        prepared.record.finish(Status::Failed)?;
+        record::write(&prepared.meta, &prepared.record)?;
+        release_local_worker_into(env, prepared);
+        bail!("{line}");
+    }
+    let mut report = ReviewReport::default();
+    check_branch_locks(env, prepared)?;
+    ensure_local_worker(env, prepared)?;
+    if pass_gates(env, prepared, &mut report, "after-merge")? {
+        return Ok(report);
+    }
+    let round = next_review_round(prepared)?;
+    review_rounds(env, prepared, report, round, None, false)
+}
+
+/// The merge round of [`release_hold`]: the hold is stamped released, `repo.git`'s base moves to
+/// origin's, and when the branch doesn't have it yet, the base goes into the worker's clone as
+/// `.sbxm-task/base.bundle` with the merge prompt, and the worker merges it, its commits
+/// collected as a fix round's are.
+fn merge_base_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+    let at = now();
+    let repo_git = prepared.meta.join("repo.git");
+    let base_name = prepared.record.base.clone();
+    // Every input is read before `repo.git`'s base moves: the merge prompt, and no ambiguous
+    // create in the way of the worker's sandbox (decision 268).
+    super::resume::refuse_ambiguous(&prepared.record, "merge the base")?;
+    let template = prompts::template(Role::MergeBase, &env.config.prompts)?;
+    let prompt = prompts::render(
+        &template.name,
+        &template.text,
+        &[
+            ("branch", &prepared.record.branch),
+            ("base", &base_name),
+            ("gates_sandbox", &bullets(&env.config.gates.sandbox)),
+        ],
+    )?;
+    repo::fetch_base_branch(&repo_git, &base_name)?;
+    let base = repo::branch_tip(&repo_git, &base_name)?;
+    let tip = repo::branch_tip(&repo_git, &prepared.record.branch)?;
+    if repo::is_ancestor(&repo_git, &base, &tip)? {
+        record::write_change(&prepared.meta, &mut prepared.record, |t| {
+            super::hold::release(t, at);
+            if let Some(hold) = t.holds.last_mut() {
+                hold.conflict.get_or_insert(false);
+            }
+            t.status = Status::Ok;
+            t.ended_at = None;
+        })?;
+        (env.progress)(&format!(
+            "{}: released; {} has {base_name} already, nothing to merge",
+            prepared.record.id, prepared.record.branch
+        ));
+        return Ok(());
+    }
+    let conflict = repo::merge_conflicts(&repo_git, &base, &tip)?;
+    let bundle = prepared.meta.join("base.bundle");
+    // What the worker's clone has for sure is the branch's own history: the bundle leaves out
+    // only where it parted from the base, never what `repo.git`'s base ref said before (a retry
+    // finds it moved already).
+    let known = repo::merge_base(&repo_git, &base, &tip)?;
+    repo::bundle_base(&repo_git, &base_name, Some(&known), &bundle)?;
+    let bundle_bytes =
+        fs::read(&bundle).with_context(|| format!("cannot read {}", bundle.display()))?;
+    let process = Process::current(env.probe);
+    record::write_change(&prepared.meta, &mut prepared.record, |t| {
+        super::hold::release(t, at);
+        if let Some(hold) = t.holds.last_mut() {
+            hold.conflict = Some(conflict);
+        }
+        // Checked above: the task is held.
+        let _ = t.begin_merge(at, process);
+    })?;
+    (env.progress)(&format!(
+        "{}: released; merging {base_name} in{}",
+        prepared.record.id,
+        if conflict { ", which conflicts" } else { "" }
+    ));
+    let ensured = match prepared.record.location {
+        Location::Cloud => ensure_cloud_worker(env, prepared, SandboxRole::Fix, "the merge"),
+        Location::Local => ensure_worker_sandbox(env, prepared, false),
+    };
+    if let Err(e) = ensured {
+        prepared
+            .record
+            .notes
+            .push(format!("merge of the base: the worker sandbox: {e:#}"));
+        prepared.record.finish(Status::Failed)?;
+        record::write(&prepared.meta, &prepared.record)?;
+        return Err(e);
+    }
+    let files: [(&str, &[u8]); 2] = [
+        ("base.bundle", &bundle_bytes),
+        ("fix-prompt.md", prompt.as_bytes()),
+    ];
+    let merged = place_agent_files(env.backend, prepared, &files, "merge-input")
+        .and_then(|()| fix_as(env, prepared, true));
+    if let Err(e) = merged {
+        if prepared.record.status == Status::Running {
+            prepared.record.finish(Status::Failed)?;
+            record::write(&prepared.meta, &prepared.record)?;
+        }
+        release_local_worker_into(env, prepared);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// A task that stopped `ready` with must-fix findings, reopened by `task resume` (issue 118,
@@ -4665,24 +4906,35 @@ impl FixInput {
             ("fix-prompt.md", self.prompt.as_bytes()),
             (self.source_name, self.source_text.as_slice()),
         ];
-        if prepared.record.location == Location::Local {
-            return repo::write_agent_files(&prepared.workspace, &files, Existing::Refuse);
-        }
-        let worker = prepared
-            .record
-            .worker
-            .as_ref()
-            .context("the task has no worker")?;
-        let staging = Staged::fresh(&prepared.meta, "fix-input")?;
-        let mut staged = Vec::new();
-        for (name, bytes) in files {
-            let host = staging.dir().join(name);
-            fs::write(&host, bytes).with_context(|| format!("cannot write {}", host.display()))?;
-            staged.push((host, name));
-        }
-        let control = format!("{}/{AGENT_DIR}", prepared.sandbox_clone().to_string_lossy());
-        copy_in_all(backend, &worker.sandbox, &control, &staged)
+        place_agent_files(backend, prepared, &files, "fix-input")
     }
+}
+
+/// Writes `files` into the worker's clone's `.sbxm-task`, refusing a link the agent left; into a
+/// cloud clone they go by copy, from a fresh staging folder named `staging` (milestone 4 slice 5).
+fn place_agent_files(
+    backend: &dyn SandboxBackend,
+    prepared: &Prepared,
+    files: &[(&str, &[u8])],
+    staging: &str,
+) -> Result<()> {
+    if prepared.record.location == Location::Local {
+        return repo::write_agent_files(&prepared.workspace, files, Existing::Refuse);
+    }
+    let worker = prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?;
+    let staging = Staged::fresh(&prepared.meta, staging)?;
+    let mut staged = Vec::new();
+    for &(name, bytes) in files {
+        let host = staging.dir().join(name);
+        fs::write(&host, bytes).with_context(|| format!("cannot write {}", host.display()))?;
+        staged.push((host, name));
+    }
+    let control = format!("{}/{AGENT_DIR}", prepared.sandbox_clone().to_string_lossy());
+    copy_in_all(backend, &worker.sandbox, &control, &staged)
 }
 
 /// A fix round's [`FixInput`]: the review in the task's folder, or `gate_failure`'s output.
@@ -4889,6 +5141,12 @@ fn read_source(prepared: &Prepared) -> Result<(&'static str, Vec<u8>)> {
 /// The fix round's run itself, in a task at `fixing/running` whose prompt is in the clone: the
 /// worker, its transcript and status, then its commits collected.
 fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+    fix_as(env, prepared, false)
+}
+
+/// [`fix`]; with `merge`, the round is a released task's merge of the base (issue 727): said as
+/// such, and not one of the task's fix rounds on its issue (`fix_runs`).
+fn fix_as(env: &TaskEnv, prepared: &mut Prepared, merge: bool) -> Result<()> {
     let worker = &env.config.worker;
     let sandbox = prepared
         .record
@@ -4898,11 +5156,18 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
         .sandbox
         .clone();
     // The caller counts the round once it is over.
-    (env.progress)(&format!(
-        "{}: fix round {} started",
-        prepared.record.id,
-        prepared.record.round.saturating_add(1)
-    ));
+    (env.progress)(&if merge {
+        format!(
+            "{}: the merge of {} started",
+            prepared.record.id, prepared.record.base
+        )
+    } else {
+        format!(
+            "{}: fix round {} started",
+            prepared.record.id,
+            prepared.record.round.saturating_add(1)
+        )
+    });
     let clone = prepared.sandbox_clone();
     let run = |resume: Option<String>| {
         headless::run(
@@ -4945,12 +5210,14 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     if let Ok(result) = &ran {
         record_run(prepared, SandboxRole::Fix, round, result, started);
         // Issue 430: `task finish` says on the issue how each fix round ran. A round run again
-        // by `task resume` replaces its entry.
-        prepared.record.fix_runs.retain(|r| r.round != round);
-        prepared
-            .record
-            .fix_runs
-            .push(record::FixRun { round, resumed });
+        // by `task resume` replaces its entry. A merge of the base is no fix round.
+        if !merge {
+            prepared.record.fix_runs.retain(|r| r.round != round);
+            prepared
+                .record
+                .fix_runs
+                .push(record::FixRun { round, resumed });
+        }
     }
     let result = match ran {
         Ok(result) => result,
@@ -4982,7 +5249,12 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
             ))
             .into());
         }
-        bail!("the fix round failed ({why}); the worker's clone keeps whatever it did");
+        let what = if merge {
+            "merge of the base"
+        } else {
+            "fix round"
+        };
+        bail!("the {what} failed ({why}); the worker's clone keeps whatever it did");
     }
 
     let mut notes = Vec::new();
@@ -5833,6 +6105,31 @@ fn release_cloud_sandbox(env: &TaskEnv, prepared: &mut Prepared, sandbox: &str) 
 
 /// The task stops (ready, or for any reason): its cloud worker sandbox goes now (P5 (d),
 /// decision 263), then its scoped secrets; nothing for a local task.
+/// [`stop_cloud_worker`], except for a task held before its review (issue 727): its cloud worker
+/// sandbox is only stopped, and kept for its release within its lifetime; one gone by then is
+/// made again from the saved branch, as `task resume` makes it.
+pub(super) fn stop_or_keep_cloud_worker(env: &TaskEnv, prepared: &mut Prepared) {
+    if super::hold::waiting(&prepared.record).is_none() {
+        return stop_cloud_worker(env, prepared);
+    }
+    let Some(sandbox) = prepared.record.worker.as_ref().map(|w| w.sandbox.clone()) else {
+        return;
+    };
+    if prepared.record.location != Location::Cloud || !prepared.record.has_open_sandbox(&sandbox) {
+        return;
+    }
+    match env.backend.stop(&sandbox) {
+        Ok(()) => prepared.events.push(format!(
+            "{}: its cloud sandbox {sandbox} is stopped and kept while it is held",
+            prepared.record.id
+        )),
+        Err(e) => prepared.warnings.push(format!(
+            "could not stop cloud sandbox {sandbox} while {} is held: {e:#}",
+            prepared.record.id
+        )),
+    }
+}
+
 pub(super) fn stop_cloud_worker(env: &TaskEnv, prepared: &mut Prepared) {
     let stopped = lifetime::release_worker(
         env.backend,

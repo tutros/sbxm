@@ -87,6 +87,7 @@ fn time_cell(time: TaskTime, now: u64) -> String {
         pr: None,
         location: None,
         parked: None,
+        held: None,
         log_line: None,
     };
     let text = tasks::render(std::slice::from_ref(&row), now, None);

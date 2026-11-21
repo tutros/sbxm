@@ -748,6 +748,7 @@ fn review_with_secrets(
         disk: Box::leak(Box::default()),
         identity: Some(&who),
         clone_source: None,
+        hold: None,
     };
     sbxm::task::pipeline::review_issue(&env, &mut prepared).map(|_| ())
 }

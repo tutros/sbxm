@@ -33,6 +33,10 @@ pub enum Stage {
     Gating,
     Reviewing,
     Fixing,
+    /// Held before its review while its changed files overlap other open work (decision
+    /// 331(3), issue 727): waiting (`ok`), merging the base after its release (`running`, then
+    /// `completed` or `timed-out`), or that merge failed (`failed`).
+    Held,
     Ready,
     Finished,
 }
@@ -45,6 +49,7 @@ impl Stage {
             Self::Gating => "gating",
             Self::Reviewing => "reviewing",
             Self::Fixing => "fixing",
+            Self::Held => "held",
             Self::Ready => "ready",
             Self::Finished => "finished",
         }
@@ -66,9 +71,14 @@ impl Stage {
             (Self::Prepared, Kind::Pr) => &[Self::Gating, Self::Reviewing],
             (Self::Working | Self::Fixing, Kind::Issue | Kind::Spec | Kind::Fix) => &[Self::Gating],
             (Self::Working | Self::Fixing, Kind::Pr) => &[],
-            (Self::Gating, Kind::Issue | Kind::Spec | Kind::Fix) => {
-                &[Self::Reviewing, Self::Fixing]
+            // Only an issue or spec task is held before its review (issue 727): a fix task is the
+            // work others wait on.
+            (Self::Gating, Kind::Issue | Kind::Spec) => {
+                &[Self::Reviewing, Self::Fixing, Self::Held]
             }
+            (Self::Gating, Kind::Fix) => &[Self::Reviewing, Self::Fixing],
+            (Self::Held, Kind::Issue | Kind::Spec) => &[Self::Gating],
+            (Self::Held, Kind::Pr | Kind::Fix) => &[],
             (Self::Gating, Kind::Pr) => &[Self::Reviewing],
             (Self::Reviewing, Kind::Issue | Kind::Spec | Kind::Fix) => &[Self::Fixing, Self::Ready],
             (Self::Reviewing, Kind::Pr) => &[Self::Ready],
@@ -86,6 +96,7 @@ impl Stage {
             Self::Prepared => &[Running, Failed],
             Self::Working | Self::Fixing => &[Running, Completed, TimedOut, Failed],
             Self::Gating => &[Running, Passed, GatesFailed],
+            Self::Held => &[Ok, Running, Completed, TimedOut, Failed],
             Self::Reviewing => &[Running, Completed, Failed],
             Self::Ready | Self::Finished => &[Ok],
         }
@@ -101,6 +112,8 @@ impl Stage {
             (Self::Gating, _) => &[Passed],
             (Self::Prepared, _) => &[Running],
             (Self::Working | Self::Fixing, _) => &[Completed, TimedOut],
+            // Released with nothing to merge (`ok`), or once its merge of the base ended.
+            (Self::Held, _) => &[Ok, Completed, TimedOut],
             (Self::Reviewing, _) => &[Completed],
             (Self::Ready, _) => &[Ok],
             (Self::Finished, _) => &[],
@@ -181,6 +194,38 @@ pub fn started_by_loop(process: Process) {
 /// issue's label off itself (issue 623).
 pub fn in_loop() -> bool {
     THIS_LOOP.get().is_some()
+}
+
+thread_local! {
+    /// Whether `task loop` runs the command on this thread in its own process ([`loop_step`]).
+    static LOOP_STEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While it lives, the commands this thread runs are `task loop`'s own, run in its process
+/// rather than as a child (review M-1 of PR 734): a spec job's with `cloud_slots` unset. It
+/// ends with the step, so a command run after it is not the loop's.
+pub struct LoopStep {
+    was: bool,
+}
+
+/// Marks this thread's commands as the loop's until the returned [`LoopStep`] drops.
+pub fn loop_step() -> LoopStep {
+    LoopStep {
+        was: LOOP_STEP.replace(true),
+    }
+}
+
+impl Drop for LoopStep {
+    fn drop(&mut self) {
+        LOOP_STEP.set(self.was);
+    }
+}
+
+/// Whether the running command is `task loop`'s: in a child of it ([`in_loop`]) or run by it in
+/// its own process ([`loop_step`]). A loop's issue or spec task is held before its review while
+/// its changed files overlap other open work (issue 727); one run by hand never is.
+pub fn run_by_loop() -> bool {
+    in_loop() || LOOP_STEP.get()
 }
 
 /// The loop's process from [`LOOP_ENV`]'s value; `None` for anything else.
@@ -491,6 +536,11 @@ pub struct Record {
     /// in older records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub medium_armed: Option<crate::task::trial::Armed>,
+    /// Every hold before review the task had (issue 727), in order: the last one is in effect
+    /// while the task is `held` and not released. Absent in older records and for a task never
+    /// held.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holds: Vec<super::hold::Hold>,
     /// Set when the task continues an open PR's branch; absent in older records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continues: Option<PrBranch>,
@@ -718,6 +768,7 @@ impl Record {
             should_fix_round: false,
             repeat_tolerated: false,
             medium_armed: None,
+            holds: Vec::new(),
             continues: None,
             related: Vec::new(),
             notes: Vec::new(),
@@ -802,6 +853,28 @@ impl Record {
         self.ended_at = None;
         self.stages.push(Stamp {
             stage: Stage::Reviewing,
+            at: format_timestamp(now),
+        });
+        self.take(process);
+        Ok(())
+    }
+
+    /// Starts the merge of the base into a task released from its hold before review (issue
+    /// 727): `held` and running, owned by `process`. Refused for a task that isn't held, or whose
+    /// merge is running already, with nothing changed.
+    pub fn begin_merge(&mut self, now: u64, process: Process) -> Result<()> {
+        if self.stage != Stage::Held {
+            bail!(
+                "task {} is {} in stage {}, so it has no hold to release; see `sbxm task status`",
+                self.id,
+                self.status.name(),
+                self.stage.name()
+            );
+        }
+        self.status = Status::Running;
+        self.ended_at = None;
+        self.stages.push(Stamp {
+            stage: Stage::Held,
             at: format_timestamp(now),
         });
         self.take(process);

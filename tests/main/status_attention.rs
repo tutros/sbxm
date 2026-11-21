@@ -83,6 +83,7 @@ fn row(id: &str, location: Option<&str>) -> TaskRow {
         pr: None,
         location: location.map(str::to_owned),
         parked: None,
+        held: None,
         log_line: None,
     }
 }

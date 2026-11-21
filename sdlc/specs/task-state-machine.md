@@ -183,6 +183,8 @@ kept here as the design for issues #117-121 to build toward.
 | prepared running (pr) | advance | reviewing | run the reviewer |
 | working completed/timed-out (issue/spec/fix) | advance | gating | run the gates |
 | gating passed | advance | reviewing | run the reviewer |
+| gating passed (issue/spec) | advance | held | hold the task before its review while its changed files overlap other open work |
+| held ok/completed/timed-out (issue/spec) | advance | gating | run the gates again on the base merged in |
 | gating gates-failed (issue/spec/fix) | advance | fixing | run the fix round for the gate's own output |
 | reviewing completed (issue/spec/fix) | advance | fixing | run the fix round |
 | reviewing completed | advance | ready | record the task as ready |
@@ -222,6 +224,8 @@ kept here as the design for issues #117-121 to build toward.
 | fixing running (issue/spec/fix), interrupted | task resume | fixing | run the fix round again in its clone, then the gates and the review |
 | fixing failed (issue/spec/fix), no live process | task resume | fixing | run the fix round again in its clone, then the gates and the review |
 | reviewing completed (issue/spec/fix), no live process | task resume | fixing | replay the recorded review: a fix round for its findings, else ready |
+| held ok/completed/timed-out/failed (issue/spec), no live process | task resume | held | merge the base in, run the gates again, then the reviewer |
+| held running (issue/spec), interrupted | task resume | held | merge the base in again, run the gates again, then the reviewer |
 | ready ok (issue/spec/fix), no live process, stopped with rounds left | task resume | fixing | a fix round from the recorded review |
 | ready ok (issue/spec/fix), no live process, stopped | task resume --rounds N | fixing | add N fix rounds to the budget, then a fix round from the recorded review |
 | ready ok (fix), no live process, not stopped | task resume | finished | push the branch onto the PR's own branch, a fast-forward or nothing |

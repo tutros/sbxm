@@ -205,6 +205,7 @@ pub trait Steps {
             JobStep::Review { pr } => self.review_pr(*pr, out, warn),
             JobStep::RunSpec(spec) => self.run_spec(spec, out, warn),
             JobStep::ShouldFixSpec(spec) => self.should_fix_spec(spec, out, warn),
+            JobStep::ResumeSpec(spec) => self.resume_spec(spec, out, warn),
             JobStep::Template {
                 profile,
                 harness,
@@ -263,6 +264,11 @@ pub trait Steps {
     ) -> Result<()> {
         bail!("no should-fix round of {} here", spec.display())
     }
+    /// `task resume --spec FILE`: a spec job's task released from its hold before review (issue
+    /// 727) merges the base, runs its gates again and gets its review.
+    fn resume_spec(&self, spec: &Path, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        bail!("no resume of {} here", spec.display())
+    }
     /// `task finish --spec FILE`: through the `[finish] sink` of the checkout's `sbxm-task.toml`.
     fn finish_spec(&self, spec: &Path, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         bail!("no finish of {} here", spec.display())
@@ -308,6 +314,8 @@ pub enum JobStep {
     RunSpec(PathBuf),
     /// `task resume --spec FILE --rounds 1 --should-fix` (decision 306).
     ShouldFixSpec(PathBuf),
+    /// `task resume --spec FILE`: a spec task released from its hold before review (issue 727).
+    ResumeSpec(PathBuf),
     /// `template build <profile> --harness <harness>`, with `warm` `--warm <checkout>`.
     Template {
         profile: String,
@@ -708,6 +716,10 @@ enum End {
     /// Cut short by a stop request after one of its phases ran: logged, never counted as parked
     /// (a requested stop exits 0, decision 310; review M-1 of issue 570).
     Stopped(String),
+    /// Held before its review while its changed files overlap other open work (issue 727): no
+    /// row yet, not counted; the loop releases it at a later pass ([`Loop::release_holds`]). The
+    /// line saying so.
+    OnHold(String),
 }
 
 /// A child of a dead loop that outlived it, adopted by this loop (issue 643).
@@ -1743,6 +1755,10 @@ impl Loop<'_> {
                 return self.stopped(issue, out).map_err(io);
             }
             ran = true;
+            if let Some(line) = self.on_hold(issue, kind) {
+                self.usage_waited = Duration::ZERO;
+                return Ok(End::OnHold(line));
+            }
             let ready = self.record(issue).filter(|r| r.stage == Stage::Ready);
             if kind == outcome::Kind::Ready && ready.is_some() {
                 self.usage_waited = Duration::ZERO;
@@ -2236,6 +2252,234 @@ impl Loop<'_> {
             r.hooks[LOOP_HOOK] = serde_json::Value::Bool(true);
         })?;
         Ok(Claimed::Marked)
+    }
+
+    /// The line for task `issue` whose phase ended with `kind`, when that end held it before its
+    /// review (issue 727): its record at `held`, naming what it waits on.
+    fn on_hold(&self, issue: u32, kind: outcome::Kind) -> Option<String> {
+        if kind != outcome::Kind::OnHold {
+            return None;
+        }
+        let rec = self.record(issue)?;
+        let hold = crate::task::hold::waiting(&rec)?;
+        Some(format!(
+            "{}: held before its review: {}; the loop releases it once that work has merged or \
+             ended",
+            self.issue_named(issue),
+            crate::task::hold::waits_line(&hold.on)
+        ))
+    }
+
+    /// The held tasks of this repo the loop may release now (issue 727), from their records
+    /// alone, so a restarted loop finds them too: issue tasks at `held` that wait (`ok`), or were
+    /// released and not resumed yet, or whose merge of the base ended before their process went
+    /// (`completed`, `timed-out`), with no live process, none of them `due` or running already.
+    /// One whose merge failed (`failed`) is the user's. In the order they were held, so the one
+    /// held first goes first.
+    fn held_tasks(&self, due: &VecDeque<Held>) -> Result<Vec<Record>> {
+        let mut found = Vec::new();
+        for dir in record::task_folders(&self.base_dir)? {
+            if check_own_folder(&self.base_dir, &dir).is_err() {
+                continue;
+            }
+            let Ok(rec) = record::read(&dir.join("task.json")) else {
+                continue;
+            };
+            // An issue task, or a queued spec job's (issue 727): its job is queued again once
+            // released.
+            let kind_ours = match rec.kind {
+                Kind::Issue => rec.id == format!("issue-{}", rec.number),
+                Kind::Spec => record::is_valid_id(&rec.id),
+                Kind::Pr | Kind::Fix => false,
+            };
+            let ours = kind_ours
+                && rec.repo == self.repo
+                && rec.stage == Stage::Held
+                && matches!(
+                    rec.status,
+                    record::Status::Ok | record::Status::Completed | record::Status::TimedOut
+                )
+                && !rec.process_alive(self.probe)
+                && (rec.kind == Kind::Spec
+                    || (!due.iter().any(|h| h.issue == rec.number)
+                        && !self.running_issues.contains(&rec.number)))
+                && !(rec.kind == Kind::Spec && self.jobs.iter().any(|j| j.runs_spec_task(&rec.id)));
+            if ours {
+                found.push(rec);
+            }
+        }
+        found.sort_by_key(|r| {
+            let since = r.holds.last().map(|h| h.since.clone()).unwrap_or_default();
+            (since, r.number)
+        });
+        Ok(found)
+    }
+
+    /// Decision 331(3), issue 727: each held task is checked again, the one held first first;
+    /// one that no longer overlaps any open work is released (stamped in its record, under its
+    /// lock) and put at the end of `due`, so its `task resume` merges the base, runs its gates
+    /// again and gets its review; a spec task's job is queued again instead (`true` then). Each released one counts for those checked after it. A check
+    /// that can't be made leaves the task held, with a warning; a task a live command holds is
+    /// left for the next pass.
+    fn release_holds(
+        &mut self,
+        due: &mut VecDeque<Held>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<bool> {
+        let mut queued = false;
+        for rec in self.held_tasks(due)? {
+            let issue = rec.number;
+            let named = held_named(&rec);
+            if crate::task::hold::waiting(&rec).is_some() {
+                let paths =
+                    rec.changed_paths(&record::task_dir(&self.base_dir, &rec.id).join("repo.git"));
+                let checker = crate::task::hold::Checker {
+                    base_dir: &self.base_dir,
+                    repo: &self.repo,
+                    github: self.github,
+                    probe: self.probe,
+                };
+                use crate::task::hold::Check;
+                // Held until the release is recorded, so a task's check after its gates never
+                // runs in between and misses it.
+                let _decision = checker.decide()?;
+                let waits = paths.and_then(|paths| checker.waits(&rec, &paths));
+                let waits = match waits {
+                    Ok(waits) => waits,
+                    Err(e) => {
+                        self.warn_once(
+                            warn,
+                            format!("{named} stays held: its overlap could not be checked ({e:#})"),
+                        )?;
+                        continue;
+                    }
+                };
+                if !waits.is_empty() {
+                    // What it waits on now, for `sbxm status` and the log row: the work it
+                    // waited on may have ended while other work came to overlap it.
+                    let changed = crate::task::hold::waiting(&rec).is_some_and(|h| h.on != waits);
+                    if changed {
+                        match self.mark_waits(&rec.id, waits) {
+                            Err(e) if !e.is::<lock::InUse>() => return Err(e),
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+                match self.mark_released(&rec.id) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(e) if e.is::<lock::InUse>() => continue,
+                    Err(e) => return Err(e),
+                }
+                let minutes = self
+                    .record_of(&rec.id)
+                    .map_or(0, |r| crate::task::hold::minutes(&r, self.now()));
+                writeln!(
+                    out,
+                    "{named}: released from its hold after {minutes} min; it merges {} in, runs \
+                     its gates again, then gets its review",
+                    rec.base
+                )?;
+            }
+            if rec.kind == Kind::Spec {
+                queued |= self.queue_released_spec(&rec, warn)?;
+                continue;
+            }
+            let started = rec
+                .stages
+                .first()
+                .and_then(|s| crate::run::results::parse_timestamp(&s.at))
+                .unwrap_or_else(|| self.now());
+            due.push_back(Held {
+                issue,
+                title: rec.title.clone(),
+                size: None,
+                started,
+                stops: Vec::new(),
+                // A release whose merge fails stops for the user (decision 298), not resumed again.
+                retry: Retry::Resume { failures: 1 },
+                cut_off: false,
+            });
+        }
+        Ok(queued)
+    }
+
+    /// A released spec task (issue 727): its spec job is queued again, its file found in
+    /// `specs_dir` by the task's id (a spec task's id is its file's), so the job resumes it (merges the
+    /// base, gates, review) and finishes it as any spec job. One whose file isn't there any more
+    /// is left, with a warning naming the command that continues it.
+    fn queue_released_spec(&mut self, rec: &Record, warn: &mut dyn Write) -> Result<bool> {
+        let global = GlobalConfig::load(self.config_dir)?;
+        match crate::task::jobs::spec_of(self.config_dir, &global, &rec.id) {
+            Some(file) => {
+                // `false` when its job is queued or running already: nothing new to run.
+                return crate::task::jobs::queue_release(&self.base_dir, &rec.id, &file);
+            }
+            None => self.warn_once(
+                warn,
+                format!(
+                    "{} was released from its hold, but no file in specs_dir is its spec any \
+                     more; continue it with `sbxm task resume --spec <file>`",
+                    rec.id
+                ),
+            )?,
+        }
+        Ok(false)
+    }
+
+    /// Stamps the release of task `id`'s hold in its record, under its lock: `false` when it
+    /// has no hold waiting any more (a command run by hand released it).
+    fn mark_released(&self, id: &str) -> Result<bool> {
+        let _lock = pipeline::lock_task(&self.base_dir, id, self.probe)?;
+        let dir = record::task_dir(&self.base_dir, id);
+        let mut rec = record::read(&dir.join("task.json"))?;
+        if crate::task::hold::waiting(&rec).is_none() {
+            return Ok(false);
+        }
+        let now = self.now();
+        record::write_change(&dir, &mut rec, |r| {
+            crate::task::hold::release(r, now);
+        })?;
+        Ok(true)
+    }
+
+    /// Saves `waits` as what task `id`'s hold waits on now, under its lock; its start stays.
+    /// Nothing when it has no hold waiting any more.
+    fn mark_waits(&self, id: &str, waits: Vec<crate::task::hold::Wait>) -> Result<()> {
+        let _lock = pipeline::lock_task(&self.base_dir, id, self.probe)?;
+        let dir = record::task_dir(&self.base_dir, id);
+        let mut rec = record::read(&dir.join("task.json"))?;
+        if crate::task::hold::waiting(&rec).is_none() {
+            return Ok(());
+        }
+        record::write_change(&dir, &mut rec, |r| {
+            if let Some(hold) = r.holds.last_mut() {
+                hold.on = waits;
+            }
+        })
+    }
+
+    /// The line for each task still held as the loop stops (issue 727): the next loop checks it
+    /// again.
+    fn holds_left(&self, out: &mut dyn Write) -> Result<()> {
+        for rec in self.held_tasks(&VecDeque::new())? {
+            if let Some(hold) = crate::task::hold::waiting(&rec) {
+                let command = match rec.kind {
+                    Kind::Spec => "sbxm task resume --spec <file>".to_owned(),
+                    _ => format!("sbxm task resume --issue {}", rec.number),
+                };
+                writeln!(
+                    out,
+                    "{} is held before its review ({}); the next loop checks it again, or \
+                     continue it with `{command}`",
+                    held_named(&rec),
+                    crate::task::hold::waits_line(&hold.on),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// A task whose lock was held, tried again (issue 409): it goes on from what its record says
@@ -4483,12 +4727,13 @@ fn work(
     // task, then moves to `due`, tried before the next new issue. A task held again goes back to
     // `held`, so the loop never tries one twice with nothing run in between.
     let mut held: Vec<Held> = Vec::new();
-    let left = |held: &[Held], due: &VecDeque<Held>, out: &mut dyn Write| -> Result<()> {
-        for h in due.iter().chain(held) {
-            writeln!(out, "{}", h.left())?;
-        }
-        Ok(())
-    };
+    let left =
+        |lp: &Loop, held: &[Held], due: &VecDeque<Held>, out: &mut dyn Write| -> Result<()> {
+            for h in due.iter().chain(held) {
+                writeln!(out, "{}", h.left())?;
+            }
+            lp.holds_left(out)
+        };
     loop {
         let (issue, title, size, started, stops, ended, retried) = if let Some(a) =
             adopted.pop_front()
@@ -4543,13 +4788,13 @@ fn work(
         } else {
             if (env.stop_requested)() {
                 writeln!(out, "stopped on request")?;
-                left(&held, &due, out)?;
+                left(&*lp, &held, &due, out)?;
                 return Ok("stopped on request".to_owned());
             }
             if opts.cap.is_some_and(|cap| tasks_run >= cap) {
                 let stop = format!("--cap {} reached", opts.cap.unwrap_or_default());
                 writeln!(out, "{stop}")?;
-                left(&held, &due, out)?;
+                left(&*lp, &held, &due, out)?;
                 return Ok(stop);
             }
             lp.clean_merged(out, warn)?;
@@ -4565,8 +4810,12 @@ fn work(
             };
             if !go_on {
                 writeln!(out, "stopped on request")?;
-                left(&held, &due, out)?;
+                left(&*lp, &held, &due, out)?;
                 return Ok("stopped on request".to_owned());
+            }
+            // A released spec's job, queued again, runs at the next pass, before the next issue.
+            if lp.release_holds(&mut due, out, warn)? {
+                continue;
             }
             if let Some(again) = due.pop_front() {
                 let Held {
@@ -4631,7 +4880,7 @@ fn work(
                             })
                         )?;
                     }
-                    left(&held, &due, out)?;
+                    left(&*lp, &held, &due, out)?;
                     return Ok(stop.to_owned());
                 };
                 idle = false;
@@ -4715,12 +4964,12 @@ fn work(
                     });
                 }
                 writeln!(out, "stopped on request")?;
-                left(&held, &due, out)?;
+                left(&*lp, &held, &due, out)?;
                 return Ok("stopped on request".to_owned());
             }
             Next::NeedsUser(cause, e) => {
                 if cause == Cause::SignIn {
-                    left(&held, &due, out)?;
+                    left(&*lp, &held, &due, out)?;
                 }
                 return Err(e);
             }
@@ -4855,7 +5104,7 @@ impl Loop<'_> {
             End::Done { .. } => Outcome::Done,
             End::Parked { .. } | End::Stopped(_) => Outcome::Parked,
             End::Refused(_) | End::Taken(_) => Outcome::Skipped,
-            End::Held(_) => Outcome::Held,
+            End::Held(_) | End::OnHold(_) => Outcome::Held,
         };
         note(lock, self, warn, |p| {
             if p.current == Some(issue) {
@@ -4880,6 +5129,10 @@ impl Loop<'_> {
                 return Ok(Next::Taken);
             }
             End::Held(retry) => return Ok(Next::Held(retry)),
+            End::OnHold(line) => {
+                writeln!(out, "{tag}{line}")?;
+                return Ok(Next::Taken);
+            }
             End::Done { ready, outcome } => (Some(ready), outcome, false),
             End::Parked { ready, outcome } => (ready, outcome, true),
             End::Stopped(outcome) => (None, outcome, false),
@@ -4924,9 +5177,30 @@ impl Loop<'_> {
                 .map(|r| r.round),
             must_fix: review::saved_must_fix(&self.task_dir(issue)),
             outcome,
-            stops: task.stops.to_vec(),
+            stops: self.stops_with_holds(task.stops, rec.as_ref()),
             idle_before: task.idle_before,
         }
+    }
+
+    /// A row's stops, then each hold before review its record keeps (issue 727), with the
+    /// minutes it waited and what it waited on.
+    fn stops_with_holds(
+        &self,
+        stops: &[(String, u64)],
+        rec: Option<&Record>,
+    ) -> Vec<(String, u64)> {
+        let mut all = stops.to_vec();
+        let now = self.now();
+        for hold in rec.map(|r| r.holds.as_slice()).unwrap_or_default() {
+            all.push((
+                format!(
+                    "held before review, {}",
+                    crate::task::hold::waits_line(&hold.on)
+                ),
+                hold.seconds(now),
+            ));
+        }
+        all
     }
 }
 
@@ -5040,6 +5314,8 @@ impl TaskSteps<'_> {
             task_log::open(self.config_dir, vec![id], None).unwrap_or_else(|_| task_log::none());
         // The step's `sbx` lines go to the task's log after its header (issue 114).
         let _route = crate::task::runlog::route(&log);
+        // The step is the loop's, as a child's would be: a spec task is held before its review.
+        let _step = record::loop_step();
         let mut out = Tee::new(out, Arc::clone(&log));
         let mut warn = Tee::new(warn, log);
         let result = step(&mut out, &mut warn);
@@ -5288,6 +5564,13 @@ impl TaskSteps<'_> {
                 args.push(spec.display().to_string());
                 args.extend(words(&["--rounds", "1", "--should-fix"]));
                 (id, "should-fix round", args, false)
+            }
+            JobStep::ResumeSpec(spec) => {
+                let id = record::spec_id(spec).map_err(here)?.0;
+                self.release(&id).map_err(here)?;
+                let mut args = words(&["task", "resume", "--spec"]);
+                args.push(spec.display().to_string());
+                (id, "task resume", args, false)
             }
             JobStep::Template {
                 profile,
@@ -5730,6 +6013,31 @@ impl Steps for TaskSteps<'_> {
         })
     }
 
+    fn resume_spec(&self, spec: &Path, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        let id = record::spec_id(spec)?.0;
+        self.release(&id)?;
+        self.logged_as(id, out, warn, &|out, warn| {
+            task_resume::run(
+                self.config_dir,
+                &task_resume::Options {
+                    repo_root: self.repo_root.clone(),
+                    target: task_resume::Target::Spec(spec.to_owned()),
+                    rounds: None,
+                    should_fix: false,
+                    disk: self.disk.clone(),
+                    identity: None,
+                    forget_ambiguous: false,
+                },
+                self.backend,
+                self.github,
+                self.probe,
+                self.host,
+                out,
+                warn,
+            )
+        })
+    }
+
     fn finish_spec(&self, spec: &Path, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
         let id = record::spec_id(spec)?.0;
         self.logged_as(id, out, warn, &|out, _warn| {
@@ -5788,4 +6096,9 @@ impl Steps for TaskSteps<'_> {
             &self.disk,
         )
     }
+}
+
+/// A held task as the loop names it: `#41 (title)`, or a spec task's id with its file.
+fn held_named(rec: &Record) -> String {
+    crate::title::named(&crate::title::reference(rec), &rec.title)
 }

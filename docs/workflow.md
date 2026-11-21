@@ -298,6 +298,28 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   left) leaves the PR and its fix task to you: said once, counted toward the cap, not tried again in that run.
   Resolves don't count toward `--cap`; each gets its own row in the loop's log.
 
+- **`task loop` holds overlapping work before review (decision 331(3), issue 727):** once a loop task's gates pass,
+  before its first review, its changed files (its branch against the merge base with the default branch) are checked
+  against the open PRs a loop opened (their files on GitHub), a running fix or resolve of a PR (that PR's files), and
+  every other task past its gates and not finished (in review, `ready`, a fix round after a review, or one whose check
+  already sent it to its review; the checks take turns under `<base_dir>/.sbxm/hold-check/`, so of two whose gates
+  pass at once the first to decide holds the second, never both each other). A shared path holds the task: its record goes to stage `held`, naming what it
+  waits on and since when, its child ends (`outcome.json` says `on_hold`), its sandbox slot is freed, a cloud worker
+  sandbox is stopped and kept, and the loop starts other work. At each pass the loop checks the held tasks again, the
+  one held first first, from their records alone (a restarted loop does the same). Once nothing overlaps (the PR
+  merged or closed, the task ended), the task is released: `task resume` fetches the default branch into its
+  `repo.git`, the worker merges it in its sandbox from `.sbxm-task/base.bundle` (`prompts/merge-base.md`; a
+  conflict resolved keeping both sides, as `task fix` does), the gates run again, then its one review; a cloud worker
+  sandbox gone by then is made again from the saved branch, as `task resume` makes it. A merge the worker hands back
+  stops the task `held`/`failed` for you: merge in the worker's clone, then `sbxm task resume --issue N`. A task run
+  by hand is never held (decision 296's check stays for it). A queued `spec` job's task is held the same way: its
+  job ends `stopped` with the hold's line, and once released the loop queues its spec again
+  (`queue/release-<id>.json`, the file found in `specs_dir` by the task's id), whose job resumes it (`task resume
+  --spec`) and finishes it, after a restart too; another job of the same spec while the task still waits ends
+  `skipped`, its hold kept. `sbxm status` names a held task's waits under the table
+  (`issue-9 held: waits on #12 (PR, awaits your merge)`), the loop's log row lists each hold among its stops with its
+  minutes, and `task facts` has `held (min)` and `hold conflict` for the next retro.
+
 - **`task loop` watches the checks (decision 299, issue 442):** on each pass, after the resolves and before the wait
   on 5 PRs, the loop reads the workflow runs of the head of each open PR it opened (drafts too), of the merge commit
   of each PR it armed that merged since the last pass, and of `main`'s tip. A run still going is left for the next

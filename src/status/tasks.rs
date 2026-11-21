@@ -41,6 +41,9 @@ pub struct TaskRow {
     pub location: Option<String>,
     /// Set when the task is parked (issue 671): what to run next, shown under the table.
     pub parked: Option<Parked>,
+    /// Set while the task is held before its review (issue 727): what it waits on (`waits on #12
+    /// (PR, awaits your merge)`), shown under the table.
+    pub held: Option<String>,
     /// The last `run.log` line that isn't a header, without its timestamp.
     pub log_line: Option<String>,
 }
@@ -162,6 +165,8 @@ pub fn rows(base: &Path, probe: &dyn ProcessProbe) -> Result<Vec<TaskRow>> {
                 pr: record.pr.clone(),
                 location: location(&dir, &record),
                 parked,
+                held: crate::task::hold::waiting(&record)
+                    .map(|hold| crate::task::hold::waits_line(&hold.on)),
                 log_line: last_log_line(&dir.join("run.log")),
             })
         })
@@ -418,6 +423,11 @@ pub fn render(rows: &[TaskRow], now: u64, width: Option<usize>) -> String {
         line(&mut out, cells, title, log, log_is_real);
     }
     parked_lines(rows, &mut out);
+    for row in rows {
+        if let Some(waits) = &row.held {
+            out.push_str(&format!("{} held: {waits}\n", row.id));
+        }
+    }
     out
 }
 

@@ -69,6 +69,7 @@ fn stopped(f: &Fixture) {
         disk: Box::leak(Box::default()),
         identity: None,
         clone_source: None,
+        hold: None,
     };
     sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
 }
