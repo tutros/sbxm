@@ -21,6 +21,7 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
 - Decision 244: if the change has a limit, a size or an identity, the body lists the boundary cases. A change that
   takes a path lists relative, absolute and missing paths among them, and a fix round tests the exact variant a
   finding names (issue 455, an experiment).
+- Decision 332 (an experiment): for an issue that changes the loop or a task's stages, the boundary cases also list each new step failing, a loop restart in the middle of it, and each loop mode it runs in (in-process, child, cloud).
 - Decision 273: if it depends on an external tool's behavior a spike recorded, re-run that check by hand first.
   If its PR needs a real check that only runs on the host (an ignored real test, many runs on Windows), write a
   body line `**Real check:** <what to run; what counts as a pass>` (issue 547): the loop then never arms the PR,

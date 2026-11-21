@@ -132,6 +132,10 @@ Decisions 328-329: `sdlc/decisions/` (`sdlc/retros/2026-11-16-retro.md`); decisi
 Decisions 330: `sdlc/decisions/` (recurring work from the loop, issue #152).
 Decision 331: `sdlc/decisions/` (readiness as code; overlapping work holds before review).
 
+## Round 26: the 2026-11-21 retro (2026-11-21)
+
+Decisions 332-333: `sdlc/decisions/` (`sdlc/retros/2026-11-21-retro.md`); decision 326 adopted.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

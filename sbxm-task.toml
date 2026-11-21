@@ -47,7 +47,7 @@ timeout = "20m"                # per command
 # 176, 179; case-insensitive substrings, added to the built-in defaults): the git trust boundary,
 # the kit (egress, secrets), and the state formats.
 [risk]
-high = ["src/git.rs", "src/task/repo.rs", "src/kit.rs", "src/task/record.rs", "src/state.rs"]
+high = ["src/git.rs", "src/task/repo.rs", "src/kit.rs", "src/state.rs"]
 
 # How `sbxm task loop` waits out a harness's usage limit: usage_wait before each resume, and
 # the loop stops once the waits in a row reach usage_wait_total.
