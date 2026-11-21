@@ -617,6 +617,7 @@ fn an_adopted_local_child_holds_the_local_slot_while_a_cloud_task_may_start() {
 #[test]
 fn four_awaiting_prs_and_one_adopted_child_make_five_and_nothing_new_starts() {
     let f = fixture(Some(2), true);
+    crate::common::cloud_slot::set_placement(&f.env, "local-first");
     let mut gh = github(&[5]);
     for (issue, number) in [(50, 150), (51, 151), (52, 152), (53, 153)] {
         loop_pr(&f.base(), issue, number);

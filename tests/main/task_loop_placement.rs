@@ -12,13 +12,6 @@ mod setting {
     use super::set_placement;
 
     #[test]
-    fn unset_means_local_first() {
-        let env = Env::new();
-        let config = GlobalConfig::load(&env.config_dir()).unwrap();
-        assert_eq!(config.resources.placement, Placement::LocalFirst);
-    }
-
-    #[test]
     fn both_values_are_read() {
         for (text, placement) in [
             ("local-first", Placement::LocalFirst),
@@ -64,18 +57,7 @@ mod setting {
     }
 }
 
-/// Sets `placement = "<value>"` in `[resources]` of `env`'s config.
-fn set_placement(env: &common::Env, value: &str) {
-    let path = env.config_dir().join("config.toml");
-    let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("[resources]\n"), "{text}");
-    let text = text.replacen(
-        "[resources]\n",
-        &format!("[resources]\nplacement = \"{value}\"\n"),
-        1,
-    );
-    std::fs::write(&path, text).unwrap();
-}
+use common::cloud_slot::set_placement;
 
 // --- routing ---
 
@@ -403,9 +385,9 @@ mod status {
     fn the_real_env_reads_the_setting() {
         let test = common::Env::new();
         let unset = GlobalConfig::load(&test.config_dir()).unwrap();
-        assert_eq!(Env::real(&unset).placement, Placement::LocalFirst);
-        set_placement(&test, "cloud-first");
+        assert_eq!(Env::real(&unset).placement, Placement::CloudFirst);
+        set_placement(&test, "local-first");
         let set = GlobalConfig::load(&test.config_dir()).unwrap();
-        assert_eq!(Env::real(&set).placement, Placement::CloudFirst);
+        assert_eq!(Env::real(&set).placement, Placement::LocalFirst);
     }
 }

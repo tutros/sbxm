@@ -124,16 +124,17 @@ pub struct Resources {
 }
 
 /// `[resources] placement`: which free slot the loop fills first with the next issue (issue
-/// 648); only read while `cloud_slots` is set.
+/// 648); only read while `cloud_slots` is set. Unset means `cloud-first` (decision 326, issue
+/// 735); `local-first` is the off switch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Placement {
     /// The first free slot, local first, takes the first issue in the queue's order (decision
     /// 317(4)).
-    #[default]
     LocalFirst,
     /// A free cloud slot takes the largest issue that may run there, a free local slot the
     /// first in the queue's order.
+    #[default]
     CloudFirst,
 }
 

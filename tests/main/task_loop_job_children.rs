@@ -955,6 +955,7 @@ mod resolves {
     #[test]
     fn a_task_childs_end_is_acted_on_while_a_resolve_child_runs() {
         let f = fixture(Some(2));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         loop_pr(&f.base(), 50, 150, Location::Cloud);
         let gh = github(&[(1, &[])]).with_pr(pr(150)).with_pr(pr(101));
         gh.set_mergeable(150, Mergeable::Conflicting);
@@ -1073,6 +1074,7 @@ mod log_fixes {
     #[test]
     fn a_log_fix_runs_as_a_child_while_a_task_child_is_finished() {
         let f = fixture(Some(2));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         loop_pr(&f.base(), 50, 150, Location::Cloud);
         let gh = github(&[(1, &[])]).with_pr(pr150()).with_pr(pr(101));
         failed_twice(&gh);
@@ -1454,6 +1456,7 @@ mod runs {
     #[test]
     fn a_queued_run_job_runs_as_a_task_child_next_to_another_task_and_ends_with_its_result() {
         let f = fixture(Some(1));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         let gh = github(&[(1, &[]), (9, &["run-cloud"])])
             .with_pr(pr(101))
             .with_pr(pr(109));
@@ -1556,6 +1559,7 @@ mod pr_cap {
     #[test]
     fn a_fix_job_child_does_not_count_so_an_issue_starts_at_four_awaiting() {
         let f = fixture(Some(2));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         f.queue("fix.json", r#"{"kind": "fix", "pr": 150}"#, 1);
         let gh = awaiting(&f, github(&[(1, &[])]), 4)
             .with_pr(pr(101))
