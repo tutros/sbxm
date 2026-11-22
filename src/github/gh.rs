@@ -456,8 +456,8 @@ struct RawTreeEntry {
     path: String,
 }
 
-/// How many merged PRs [`GitHubBackend::prs_merged_since`] lists at most: the retro alert only
-/// needs to know there are 10 (issue 714).
+/// How many merged PRs [`GitHubBackend::prs_merged_since`] asks for first; it doubles the limit
+/// until fewer come back, so the count is complete (issue 721).
 const MERGED_LIMIT: u32 = 500;
 
 /// `path`, a repository path, with each of its segments percent-encoded for an API path.
@@ -1235,22 +1235,33 @@ impl GitHubBackend for GhBackend {
         if crate::run::results::parse_day(day).is_none() {
             bail!("{day:?} isn't a YYYY-MM-DD day, so merged PRs since it can't be listed");
         }
-        let limit = MERGED_LIMIT.to_string();
-        let args = strings(&[
-            "pr",
-            "list",
-            "--repo",
-            repo,
-            "--state",
-            "merged",
-            "--search",
-            &format!("merged:>={day}"),
-            "--limit",
-            &limit,
-            "--json",
-            "number,mergedAt",
-        ]);
-        let raw: Vec<RawMergedPr> = self.json(&args)?;
+        // As many as the limit came back: there may be more, so ask again with twice the limit
+        // until fewer come back (issue 721).
+        let mut limit = MERGED_LIMIT;
+        let raw = loop {
+            let limit_arg = limit.to_string();
+            let args = strings(&[
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "merged",
+                "--search",
+                &format!("merged:>={day}"),
+                "--limit",
+                &limit_arg,
+                "--json",
+                "number,mergedAt",
+            ]);
+            let raw: Vec<RawMergedPr> = self.json(&args)?;
+            if raw.len() < limit as usize {
+                break raw;
+            }
+            limit = limit
+                .checked_mul(2)
+                .ok_or_else(|| anyhow!("{repo} has more merged PRs than can be listed"))?;
+        };
         raw.into_iter()
             .map(|pr| {
                 let merged_at =

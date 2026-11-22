@@ -49,6 +49,7 @@ mod github_pr_files;
 mod github_prs_open;
 mod github_repo_paths;
 mod github_retro;
+mod github_retro_limit;
 mod github_retry;
 mod github_trial;
 mod github_window;
