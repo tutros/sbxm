@@ -28,6 +28,19 @@ pub fn set_cloud_slots(env: &Env, n: u32) {
     std::fs::write(&path, text).unwrap();
 }
 
+/// Sets `placement = "<value>"` in `[resources]` of `env`'s config.
+pub fn set_placement(env: &Env, value: &str) {
+    let path = env.config_dir().join("config.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("[resources]\n"), "{text}");
+    let text = text.replacen(
+        "[resources]\n",
+        &format!("[resources]\nplacement = \"{value}\"\n"),
+        1,
+    );
+    std::fs::write(&path, text).unwrap();
+}
+
 pub fn cloud_slots_dir(env: &Env) -> PathBuf {
     env.tmp
         .path()

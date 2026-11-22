@@ -319,6 +319,7 @@ fn run_loop(
 #[test]
 fn the_loop_runs_an_unlabeled_issue_in_the_first_free_slot_local_first() {
     let (env, repo_root) = loop_fixture(Some(2));
+    common::cloud_slot::set_placement(&env, "local-first");
 
     let (calls, out) = run_loop(&env, &repo_root, &ready_issue(&[]));
 

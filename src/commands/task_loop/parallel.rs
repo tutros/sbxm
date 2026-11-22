@@ -4,12 +4,13 @@
 //! each child's end as it happens. With `cloud_slots` unset the loop is [`super::work`], one task
 //! at a time, as before (decision 321(5)).
 //!
-//! - **Routing** (317(4)): the next issue goes to the first free slot, local first, then cloud;
-//!   `run-local` and `run-cloud` pin it. An issue whose place is full keeps its place in the
-//!   queue, and the first issue in order that fits a free slot starts instead. With
-//!   `[resources] placement = "cloud-first"` (issue 648) a free cloud slot takes the largest
-//!   issue that may run there ([`queue::largest_first`]), and a free local slot the first in the
-//!   queue's order that may run locally.
+//! - **Routing:** with `[resources] placement = "cloud-first"` (issue 648, the default since
+//!   decision 326 and issue 735) a free cloud slot takes the largest issue that may run there
+//!   ([`queue::largest_first`]), and a free local slot the first in the queue's order that may
+//!   run locally. With `placement = "local-first"` (317(4)) the next issue goes to the first free
+//!   slot, local first, then cloud. Either way `run-local` and `run-cloud` pin an issue, and an
+//!   issue whose place is full keeps its place in the queue while the first issue in order that
+//!   fits a free slot starts instead.
 //! - **The loop's own steps never wait for a slot:** a resolve, a log-fix or a queued job whose
 //!   slot a child holds is postponed to a later pass; once free, they start as job children
 //!   ([`super::job_children`], issue 633) before any new issue.

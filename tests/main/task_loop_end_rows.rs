@@ -187,6 +187,8 @@ fn github() -> FakeGitHub {
 /// Runs one loop over issue 3 failing as `fail`; returns its log's row for the issue.
 fn stopped_row(cloud_slots: Option<u32>, fail: Fail) -> String {
     let (env, repo_root) = fixture(cloud_slots);
+    // The serial loop runs locally, so the parallel one routes its one task local first too.
+    crate::common::cloud_slot::set_placement(&env, "local-first");
     let script = Script::new(&env.base_dir(), fail);
     let now = || script.clock.get();
     let sleep = |d: Duration| script.clock.set(script.clock.get() + d.as_secs());

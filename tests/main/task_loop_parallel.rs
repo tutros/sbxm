@@ -717,6 +717,7 @@ pub(crate) mod several {
     #[test]
     fn one_local_and_two_cloud_children_run_at_once_and_a_fourth_waits_for_a_free_slot() {
         let f = fixture(Some(2));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         let gh = github(&[(1, &[]), (2, &[]), (3, &[]), (4, &[])]);
         let play = Play::new(&f.base())
             .plays(1, &[(10, Act::Ready)])
@@ -818,6 +819,7 @@ pub(crate) mod several {
     #[test]
     fn a_run_local_issue_whose_slot_is_full_waits_and_the_next_unpinned_starts_in_the_cloud() {
         let f = fixture(Some(2));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         let gh = github(&[(1, &[]), (2, &["run-local"]), (3, &[])]);
         let play = Play::new(&f.base())
             .plays(1, &[(3, Act::Ready)])
@@ -883,6 +885,7 @@ pub(crate) mod several {
     #[test]
     fn a_resolve_whose_slot_a_child_holds_is_postponed_then_run_once_it_is_free() {
         let f = fixture(Some(2));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         loop_pr(&f.base(), 50, 150, Location::Local);
         let gh = github(&[(1, &[])]).with_pr(pr(150)).with_pr(pr(101));
         // The PR starts conflicting once the child runs.
@@ -909,6 +912,7 @@ pub(crate) mod several {
     #[test]
     fn a_queued_run_job_pinned_to_the_cloud_runs_while_a_child_holds_the_local_slot() {
         let f = fixture(Some(1));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         let gh = github(&[(1, &[]), (9, &["run-cloud"])]);
         let queue = sbxm::task::jobs::queue_dir(&f.base());
         // The job is queued once the child holds the local slot.
@@ -934,6 +938,7 @@ pub(crate) mod several {
     #[test]
     fn a_queued_job_whose_slot_a_child_holds_waits_for_it_to_end() {
         let f = fixture(Some(1));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         loop_pr(&f.base(), 50, 150, Location::Local);
         let gh = github(&[(1, &[])]).with_pr(pr(150)).with_pr(pr(101));
         let queue = sbxm::task::jobs::queue_dir(&f.base());
@@ -963,6 +968,7 @@ pub(crate) mod several {
     #[test]
     fn a_usage_limit_in_one_child_holds_new_starts_while_the_others_run_to_their_ends() {
         let f = fixture(Some(2));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         let gh = github(&[(1, &[]), (2, &[]), (3, &[]), (4, &[])]);
         let play = Play::new(&f.base())
             .plays(1, &[(1, Act::UsageLimit), (1, Act::Ready)])
@@ -993,6 +999,7 @@ pub(crate) mod several {
     #[test]
     fn two_children_ending_in_one_pass_are_finished_one_after_the_other_with_their_rows() {
         let f = fixture(Some(2));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         let gh = github(&[(1, &[]), (2, &[])]);
         let play = Play::new(&f.base())
             .plays(1, &[(2, Act::Ready)])
@@ -1017,6 +1024,7 @@ pub(crate) mod several {
     #[test]
     fn a_crashed_child_is_resumed_once_in_the_slot_it_had() {
         let f = fixture(Some(2));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         let gh = github(&[(1, &[]), (2, &[])]);
         let play = Play::new(&f.base())
             .plays(1, &[(5, Act::Ready)])
@@ -1202,6 +1210,7 @@ pub(crate) mod several {
         #[test]
         fn the_real_steps_run_a_local_and_a_cloud_child_at_once_each_line_naming_its_slot() {
             let f = fixture(Some(1));
+            crate::common::cloud_slot::set_placement(&f.env, "local-first");
             let gh = github(&[(1, &[]), (2, &[])]);
             let (backend, host) = (FakeBackend::default(), FakeHostRunner::default());
             let spawner = Slow {
@@ -1300,6 +1309,7 @@ mod admission {
     #[test]
     fn a_stop_asked_as_the_first_child_starts_leaves_the_free_slots_empty() {
         let f = fixture(Some(2));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         let gh = github(&[(1, &[]), (2, &[]), (3, &[])]);
         let play = Play::new(&f.base()).plays(1, &[(3, Act::Ready)]);
         let stop = || play.most.get() >= 1;
@@ -1445,6 +1455,7 @@ mod admission {
     #[test]
     fn a_new_review_of_a_cloud_opened_pr_takes_the_default_slot_and_waits_for_it() {
         let f = fixture(Some(1));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         loop_pr(&f.base(), 50, 150, Location::Cloud);
         let gh = github(&[(1, &[])]).with_pr(pr(150)).with_pr(pr(101));
         let queue = sbxm::task::jobs::queue_dir(&f.base());
@@ -1468,6 +1479,7 @@ mod admission {
     #[test]
     fn an_existing_review_takes_the_slot_its_record_names() {
         let f = fixture(Some(1));
+        crate::common::cloud_slot::set_placement(&f.env, "local-first");
         loop_pr(&f.base(), 50, 150, Location::Local);
         // The PR's review task ran in the cloud.
         let mut rec = Record::new(
