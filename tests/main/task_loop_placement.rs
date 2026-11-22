@@ -39,8 +39,9 @@ mod setting {
     fn the_setting_is_not_part_of_a_sandbox_config_hash() {
         let env = Env::new();
         let before = GlobalConfig::load(&env.config_dir()).unwrap();
-        set_placement(&env, "cloud-first");
+        set_placement(&env, "local-first");
         let after = GlobalConfig::load(&env.config_dir()).unwrap();
+        assert_ne!(before.resources.placement, after.resources.placement);
         for harness in [
             sbxm::harness::Harness::Claude,
             sbxm::harness::Harness::Codex,
