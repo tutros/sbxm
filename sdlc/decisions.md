@@ -136,6 +136,10 @@ Decision 331: `sdlc/decisions/` (readiness as code; overlapping work holds befor
 
 Decisions 332-333: `sdlc/decisions/` (`sdlc/retros/2026-11-21-retro.md`); decision 326 adopted.
 
+## Round 27: milestone 6, sbx 0.54 (2026-11-22, issue #740)
+
+Decisions 334-343: `sdlc/decisions/` (planning round 1; inventory `sdlc/spikes/S19-inventory.md`).
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
@@ -149,6 +153,7 @@ Decisions 332-333: `sdlc/decisions/` (`sdlc/retros/2026-11-21-retro.md`); decisi
 - **S14 (#245, Docker Cloud Sandboxes):** Done 2026-10-23; write-up `sdlc/spikes/S14.md`, followed by milestone 4 (merged).
 - **S16 (#288, Google OAuth for throwaway Antigravity sandboxes):** Done (decision 270, PR #329).
 - **#199 (does a fresh reviewer sandbox per review round matter):** not run, waiting on its trigger (issue #199).
+- **S19 (#740, sbx 0.54):** not run yet; its spec comes next, for the user's approval. What it checks: [336]; where and how: [335]; the calls it covers: `sdlc/spikes/S19-inventory.md`.
 
 ## Spike results (2026-09-24, sbx v0.43.0, Windows)
 
